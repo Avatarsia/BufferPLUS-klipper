@@ -22,15 +22,22 @@ Stand: 2026-04-21. Quellen: Avatarsia-Fork-README[^1], Fly3DTeam-Upstream-Firmwa
 
 Alle Pins sind MCU-Aliasname `LLL_PLUS:<Pin>` in der Klipper-Config.
 
+**Hinweis zum Sensortyp:** Die Pin-Namen `HALL1/2/3` folgen der Upstream-
+Konvention (Fly3DTeam/Buffer). Auf diesem Hardware-Sample sind es tatsaechlich
+**optische Durchlichtschranken / Photo-Interrupter**, keine Hall-Effekt-Chips
+(vom User anhand der verbauten Komponenten verifiziert). Das Signalverhalten
+ist aber identisch zu Open-Collector-Halls: digital, aktiv LOW mit Pullup,
+darum `^!` als Klipper-Pin-Praefix.
+
 | Pin  | Funktion                       | Typ                          | Klipper-Praefix |
 |------|--------------------------------|------------------------------|-----------------|
 | PC13 | Stepper STEP                   | Output                       | (kein)          |
 | PA7  | Stepper DIR                    | Output                       | (kein)          |
 | PA6  | Stepper ENABLE (aktiv LOW)     | Output, invertiert           | `!`             |
 | PB1  | TMC2208 UART                   | UART (Single-Wire)           | (kein)          |
-| PB2  | HALL1 (Ueberfuell-Limiter)     | Input, Pullup + invertiert   | `^!`            |
-| PB3  | HALL2 (Buffer-Mittelpunkt)     | Input, Pullup + invertiert   | `^!`            |
-| PB4  | HALL3 (Initial-Fill komplett)  | Input, Pullup + invertiert   | `^!`            |
+| PB2  | HALL1 (Ueberlast-Notanschlag, ganz oben) | Input, Pullup + invertiert | `^!`   |
+| PB3  | HALL2 (Voll-Schwelle, oben)    | Input, Pullup + invertiert   | `^!`            |
+| PB4  | HALL3 (Leer-Schwelle, unten)   | Input, Pullup + invertiert   | `^!`            |
 | PB7  | ENDSTOP3 (Filament-Einlauf)    | Input, Pullup + invertiert   | `^!`            |
 | PB12 | Feed-Button                    | Input, Pullup + invertiert   | `^!`            |
 | PB13 | Retract-Button                 | Input, Pullup + invertiert   | `^!`            |
@@ -50,18 +57,35 @@ Alle Pins sind MCU-Aliasname `LLL_PLUS:<Pin>` in der Klipper-Config.
 
 ## Sensor-Semantik
 
-Wichtig: Die Semantik unterscheidet sich vom intuitiven "oben = voll":
-Bei diesem Puffer bewegt sich der Hals beim **Befuellen nach oben**, d.h. HALL3
-(oben) markiert den vollen/initial befuellten Zustand, HALL1 (noch weiter oben)
-die Ueberfuellung.[^1][^6]
+**Autoritative Quelle:** `printer_data/config/lll.cfg`, Zeilen 260-268
+(User hat die Anordnung "laut Foto" direkt auf seiner Hardware verifiziert).
+Die Upstream-/Fork-READMEs[^1][^6] beschreiben eine **abweichende** Zuordnung
+(HALL3 als "Initial-Fill komplett"/oben), die fuer dieses konkrete Geraet
+**nicht zutrifft**. Siehe "Abweichung Upstream" unten.
+
+Der Buffer-Hals bewegt sich beim Befuellen nach oben (mehr Filament im Puffer
+-> Hals steigt) und beim Verbrauch nach unten (Extruder zieht Filament ab,
+Hals folgt). Mit dieser Mechanik:
 
 - **ENDSTOP3 (PB7) aktiv** = Filament am Einlauf eingelegt/erkannt.
-- **HALL3 (PB4) aktiv** = Buffer-Hals hat Oberposition erreicht = Initial-Fill
-  abgeschlossen. Firmware wechselt von kontinuierlichem Fuellen auf Burst-Modus.
-- **HALL2 (PB3) aktiv** = Buffer-Hals im Mittelbereich. Primaerer Trigger fuer
-  Feed-Bursts waehrend des Drucks (Default 15 mm).
-- **HALL1 (PB2) aktiv** = Buffer-Hals in Ueberlaufposition = Ueberfuell-Notstopp.
-  Feeding pausiert, bis der Hals durch Filamentverbrauch wieder zurueckzieht.
+- **HALL3 (PB4) aktiv** = Buffer-Hals an der untersten Position =
+  **Leer-Schwelle**. Auto-Regelung beschleunigt den Feeder (kleinere
+  `rotation_distance`), bis der Hals wieder nach oben geht.
+- **HALL2 (PB3) aktiv** = Buffer-Hals an der oberen Arbeitsposition =
+  **Voll-Schwelle**. Auto-Regelung drosselt den Feeder (groessere
+  `rotation_distance`), bis der Hals wieder nach unten geht.
+- **HALL1 (PB2) aktiv** = Buffer-Hals ganz oben, ueber HALL2 =
+  **Ueberlast-Notanschlag**. Sync wird komplett getrennt und der Feeder
+  wegen `overfill_lock` blockiert, bis der Hals physisch zurueckzieht.
+
+### Abweichung Upstream
+
+Die Avatarsia-Fork-README und die ThaatGuy-Zwischenfork-README dokumentieren
+eine gegenlaeufige Zuordnung (HALL3 = Initial-Fill komplett, HALL2 als
+Feed-Burst-Mittelpunkt). Vermutlich beschreibt diese Doku ein anderes
+Wiring-Muster oder ein frueheres Hardware-Revision. Fuer die in diesem Repo
+gepflegte Config (`lll.cfg`) und die Variante-2-Sync-Architektur gilt die
+oben genannte Zuordnung.
 
 ### Invertierungs-Nuance (Klipper `^!`)
 
@@ -114,15 +138,18 @@ Aktivierung des Sensors).
 
 ## Offene Punkte / unverifiziert
 
-- Genauer Hall-Sensor-Typ (Chip-Bezeichnung, z.B. SS49E vs. digitaler Schalter
-  wie AH3572): **nicht aus den Quellen extrahierbar**. Die `^!`-Konfiguration
-  deutet auf **digitale Open-Collector-Halls** hin.
+- Sensortyp: **optische Durchlichtschranken / Photo-Interrupter** (vom User
+  anhand der verbauten Komponenten verifiziert). Die Pin-Label `HALL1/2/3`
+  sind aus Upstream-Kompatibilitaet uebernommen, obwohl die Sensorik nicht
+  magnetisch ist. Exaktes Bauteil (z.B. TCST1103 / GP1A57HRJ00F / EE-SX*)
+  nicht aus den Quellen extrahierbar; das Signalprofil (digital, aktiv LOW,
+  Pullup) ist fuer die Klipper-Config identisch zu Hall-Open-Collector.
 - MCU-Suffix: `platformio.ini` referenziert den Variant-Ordner `f072c8` (64 KiB
   Flash-Naming), Klipper nutzt `stm32f072xb` (128 KiB) - wahrscheinlich nutzt
   das Board einen F072CB, der die f072c8-Variant-Config teilt. **Nicht hart
   verifiziert**, Empfehlung: Board-Aufdruck pruefen vor Katapult-Build.
-- `gear_ratio 50:17`: Konvention im Fork-Umfeld, aber in der von WebFetch
-  gelieferten `mellow-plus.cfg`-Kurzfassung nicht explizit bestaetigt.
+- `gear_ratio 50:17`: in `lll.cfg` Zeile 66 explizit so gesetzt (User-Config
+  ist die autoritative Quelle).
 
 ## Quellen
 
