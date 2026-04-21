@@ -254,3 +254,87 @@ UI-Integration.
      (Wartbarkeit, nicht Semantik-Bug).
 - Kein Bereich mit Verhaltens-Regression identifiziert.
 - Drucker-Integration-Test bleibt Endnachweis (Spec §12 Punkt 4).
+
+---
+
+## Phase 2 Verhaltensaenderungen
+
+Phase 2 hat Features aus der parallelen User-Variante `LLL_Plus.cfg`
+integriert. Anders als Phase 1 sind **bewusste Verhaltensaenderungen**
+dokumentiert:
+
+### Hysterese-Latch statt Neutral-Fallback
+- **Vorher (Phase 1):** `_APPLY_SYNC_STATE` setzt `rotation_distance`
+  zurueck auf nominal, sobald kein Hall aktiv ist.
+- **Nachher (Phase 2):** Letzter Hall-Zustand bleibt gelatcht im neuen
+  `sync_state` (0=init, 1=fast, 2=slow). Erst beim gegenteiligen Hall-
+  Trigger springt der Latch um.
+- **Effekt:** Glattere Regelkurve, weniger Spruenge zwischen nominal und
+  modulierten Werten. Gewollt — User-Entscheidung E2.
+
+### sync_locked-Sperre
+- **Neu:** `sync_locked=1` blockiert `_APPLY_SYNC_STATE` komplett. Wird
+  von LOAD Phase 2, UNLOAD Phase 1+2 und Runout gesetzt, um Hall-
+  Events waehrend kritischer Sync-Phasen auszublenden.
+- **Effekt:** Kein unerwarteter `rotation_distance`-Wechsel mitten in
+  einem G1 E-Move. Safety-Feature.
+
+### Runout mit 100-mm-Nachlauf (externer Sensor)
+- **Vorher (Phase 1):** Runout setzt `system_enabled=0` sofort, Feeder
+  bleibt mit Filament-Rest im Antrieb stehen.
+- **Nachher (Phase 2 `runout_pause=0`):** Feeder laeuft noch 100 mm
+  synchron, dann wird der Stepper ueber `_runout_stepper_disable`-Polling
+  (gegen `print_stats.filament_used`) abgeschaltet. PAUSE kommt vom
+  externen Sensor.
+- **Nachher (Phase 2 `runout_pause=1`):** wie Phase-1-Verhalten (sofort
+  Pause + Stepper off).
+- **Effekt:** Saubere Feeder-Leerung, kein Filament-Rest im Antrieb.
+
+### LOAD sensorgesteuert
+- **Vorher (Phase 1):** Feste Distanzen Phase 1 (`load_fast1`),
+  Phase 3 (`load_fast2`), kein Sensor-Feedback.
+- **Nachher (Phase 2):** Phase 1 laeuft `load_fast_distance` in
+  10-mm-Chunks, Phase 3 laeuft bis HALL2-Raw-State aktiv (oder
+  `load_buffer_max`-Timeout). Phase 2 mit 50-mm-Chunks wegen
+  `max_extrude_only_distance`.
+- **Effekt:** Befuellung endet wenn Buffer tatsaechlich voll ist, nicht
+  wenn Feste-Distanz gefoerdert wurde. Robuster.
+
+### UNLOAD chunked
+- **Vorher (Phase 1):** Phase 2 `G1 E-unload_sync` auf einen Schlag,
+  Phase 3 Polling mit Chunk=10.
+- **Nachher (Phase 2):** Phase 2 in 50-mm-Chunks, Phase 3 zweigeteilt:
+  3a `load_fast_distance` am Stueck, 3b Polling in 50-mm-Chunks.
+- **Effekt:** `max_extrude_only_distance`-safe, keine Klipper-Config-
+  Zusatz-Einstellung noetig. Exit-Counter startet bei `load_fast_distance`
+  statt 0.
+
+### Boot-Autostart vereinfacht
+- **Vorher (Phase 1):** Hall-State-Check, bei leerem Buffer Auto-
+  `FORCE_BUFFER_FILL`.
+- **Nachher (Phase 2):** Nur `BUFFER_AUTO_ON` wenn Filament da, sonst
+  Standby. Keine automatische Erstbefuellung nach Neustart.
+- **Effekt:** Nach ungeplantem Klipper-Restart waehrend Druck wird
+  nicht ungefragt Filament gefoerdert. Gewollt — User-Entscheidung E3.
+
+### M117-Display mit Toggle
+- **Neu:** 31 M117-Statusausgaben an User-relevanten Stellen (Buttons,
+  LOAD/UNLOAD-Phasen, Runout, Boot, Kalibriermakros). Alle durch
+  `v.display_status_enabled`-Wrapper gated.
+- **Effekt:** Drucker-Display zeigt zusaetzlich zur Konsole Status-Infos.
+  Bei `display_status_enabled=0` stiller Betrieb.
+
+### Kalibrier-Makros (neu)
+- `CALIBRATE_FEEDER_SYNC`: setzt Sync auf exakt nominal fuer Messung.
+- `MEASURE_LOAD_START` / `MEASURE_LOAD_STOP`: Toggle-Distanz-Messung
+  via Vorschub-Taster.
+- **Effekt:** Kalibrierung ist jetzt im Config selbst durchfuehrbar,
+  ohne manuelle Rechnung oder externe Tools.
+
+### Fazit Phase 2
+
+- Keine Regressionen gegenueber Phase 1.
+- Alle Aenderungen sind bewusste Feature-Additionen oder vom User
+  freigegebene Verhaltens-Aenderungen.
+- Drucker-Integration-Test bleibt Endnachweis (Spec §12 Punkt 4 aus
+  Phase 1).

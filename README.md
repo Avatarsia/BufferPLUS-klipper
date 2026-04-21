@@ -18,6 +18,114 @@ Complete Klipper configuration for the Mellow LLL Filament Plus Buffer with auto
 - ✅ **Manual Feed/Retract** - Physical buttons for manual filament loading
 - ✅ **Filament Runout Detection** - Optional pause on filament runout
 
+## Kalibrierung (nach Refactor-/Phase-2-Integration)
+
+Die `printer_data/config/lll.cfg` nach Phase-2-Integration braucht einmalige
+Einrichtung pro Geraet. Folgende 6 Schritte fuehren durch die Kalibrierung:
+
+### Schritt 1: Pflicht-Variablen anpassen
+
+In `[gcode_macro _FILAMENT_VARS]` diese vier Werte muessen auf das eigene
+Setup angepasst werden, alle anderen sind sinnvolle Defaults:
+
+- `variable_sync_rotation_distance`: Kalibrierter 1:1-Mitlauf Feeder/Extruder.
+  Startwert `18.86` ist ein Platzhalter - unbedingt per Schritt 2 kalibrieren.
+- `variable_load_fast_distance`: Weg vom Feeder bis Toolhead-Eingang [mm].
+  Per Schritt 3 ausmessen.
+- `variable_load_slow`: Weg Extruder-Eingang bis Nozzle-Spitze [mm].
+  Typisch 40-60 mm Direct Drive, 60-100 mm Volcano. Per Schritt 4 ausmessen.
+- `variable_unload_sync`: Wie `load_slow` (oder geringfuegig groesser).
+  Muss Filament vollstaendig aus Heatbreak+Nozzle herausziehen.
+
+### Schritt 2: `sync_rotation_distance` kalibrieren
+
+**Wichtig:** `BUFFER_AUTO_ON` allein genuegt nicht - die +-20%-Modulation
+ueber die Hall-Sensoren verfaelscht den Wert. Stattdessen:
+
+1. Filament einlegen, Hotend auf Drucktemperatur heizen.
+2. Konsole: `CALIBRATE_FEEDER_SYNC`. Feeder laeuft dann exakt 1:1 ohne
+   Modulation.
+3. Markierung am Filament kurz vor dem Feeder-Eingang anbringen.
+4. Konsole: `G1 E100 F60`.
+5. Nachmessen, wieviel Filament am Feeder durchgezogen wurde.
+6. Anpassen: `neue_dist = alte_dist * (gemessene_mm / 100)`
+7. Wert in `variable_sync_rotation_distance` eintragen.
+8. Auch `rotation_distance` in `[extruder_stepper mellow]` auf denselben
+   Wert setzen (Hardware-Default fuer Klipper-Start).
+9. Klipper neu starten, Schritt 2 wiederholen bis Abweichung unter 1 mm.
+
+### Schritt 3: `load_fast_distance` ausmessen
+
+Genauer Weg vom Feeder bis zum Toolhead-Eingang per Taster-Messmodus:
+
+1. Filament komplett aus dem System entfernen.
+2. Frisches Filament in den Feeder-Eingang (buffer_entrance) stecken.
+3. Konsole: `MEASURE_LOAD_START`.
+4. Vorschub-Taster 1x druecken -> Foerderung startet.
+5. Beobachten bis Filament-Spitze am Toolhead-Eingang erscheint.
+6. Vorschub-Taster erneut druecken -> Foerderung stoppt, Ergebnis wird
+   automatisch ausgegeben.
+7. Ausgegebenen Wert als `variable_load_fast_distance` eintragen. Tipp:
+   10-20 mm weniger als gemessen, damit das Filament nicht zu weit in
+   den Extruder ragt vor Phase 2.
+
+### Schritt 4: `load_slow` / `unload_sync` ausmessen
+
+Mechanisch messen (Schieblehre oder Markierungen):
+- Abstand Extruder-Klemme bis Nozzle-Spitze = `load_slow`.
+- Gleicher oder etwas groesserer Wert fuer `unload_sync` (muss Filament
+  vollstaendig aus der Nozzle ziehen).
+
+### Schritt 5: Erstbefuellung testen
+
+Nach Phase-2 startet Klipper beim Neustart **nicht** mehr automatisch
+die Erstbefuellung — stattdessen wird nur der Sync aktiviert. Wuenscht
+man eine Erstbefuellung:
+
+1. Filament in den Feeder-Eingang stecken (wenn noch nicht geschehen).
+2. Der `buffer_entrance`-`insert_gcode`-Event startet dann automatisch
+   die Grip-Phase + Follow-Phase.
+3. Bei bereits eingelegtem Filament ohne Neu-Insert-Event: manuell
+   `FORCE_BUFFER_FILL` in der Konsole aufrufen.
+
+### Schritt 6: `LOAD_FILAMENT` testen
+
+Kompletter Lade-Zyklus mit sensorgesteuertem Ende:
+
+1. Hotend auf Betriebstemperatur heizen.
+2. Konsole: `LOAD_FILAMENT`.
+3. Phase 1: Feeder foerdert `load_fast_distance` mm schnell (kein Sensor).
+4. Phase 2: Feeder + Extruder synchron langsam durch Hotend
+   (`load_slow` mm in 50-mm-Chunks).
+5. Phase 3: Feeder fuellt Buffer bis HALL2 triggert (max `load_buffer_max`).
+6. Bei Problemen mit Phase 2 (zu kurz/lang): `load_slow` anpassen.
+
+### Optionale Feintuning-Variablen
+
+- `variable_sync_modulation` (Default 0.20 = +-20%): staerkere Reaktion
+  auf Hall-Sensoren, aber mehr Schlupf im Normalbetrieb.
+- `variable_fast_speed` (Default 50 mm/s): Feeder-Schnellgeschwindigkeit.
+  Bei Schlupf reduzieren.
+- `variable_tip_cycles` / `tip_push` / `tip_pull` / `tip_speed`:
+  Tip-Forming beim Entladen. TPU braucht andere Werte als PLA.
+- `variable_initial_grip_speed` / `initial_grip_duration`: Erstbefuellung
+  aggressiver/schwaecher.
+- `variable_runout_pause`: `0` = externer Runout-Sensor uebernimmt Pause,
+  Feeder laeuft 100 mm mit nach dem Triggern. `1` = direkt pausieren.
+- `variable_display_status_enabled`: `1` = M117-Statusanzeige am Drucker-
+  Display, `0` = stiller Betrieb (Debug-Off).
+
+### Hilfsmakros
+
+- `CALIBRATE_FEEDER_SYNC` - aktiviert Sync auf exakt nominaler
+  rotation_distance (ohne Modulation), fuer Schritt 2.
+- `MEASURE_LOAD_START` / `MEASURE_LOAD_STOP` - Toggle-Messmodus fuer
+  Schritt 3.
+- `FORCE_BUFFER_FILL` - manueller Start von Grip + Follow.
+- `STOP_BUFFER_FILL` - alle Foerder-Loops sofort abbrechen.
+- `BUFFER_AUTO_ON` - Sync aktivieren ohne Initial-Phase.
+- `_STATE_DUMP` - Diagnostischer Dump aller Flags und Hall-States.
+
 ## Hardware Setup
 
 ### Sensor Configuration
