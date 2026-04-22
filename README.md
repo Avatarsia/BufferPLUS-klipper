@@ -8,7 +8,8 @@ Complete Klipper configuration for the Mellow LLL Filament Plus Buffer with auto
 1/12/2026 - Updated config to use extra_stepper and force moves instead of the second extruder setup.
             This avoids a few conflicts and allows the motor to be synced to the extruder
             Added filament runout switch logic.
-            Can be enabled or disabled with Enable_Filament_Runout or Disable_Filament_Runout
+            Can be enabled or disabled with ENABLE_RUNOUT_SENSOR or DISABLE_RUNOUT_SENSOR
+            (umbenannt in R-10 auf UPPER_SNAKE — siehe aktuelle Config)
 
 ## Features
 
@@ -687,22 +688,43 @@ Run with `sudo` if permission denied.
 
 ### Buffer Operation Issues
 
-**Buffer feeds continuously and won't stop:**
-- Check HALL3 sensor is working: `QUERY_ENDSTOPS`
-- Verify neck can physically reach HALL3 when extended
-- Check sensor wiring and polarity
-- Look for "HALL3 TRIGGERED" message in console
+> Die aktuelle Architektur nutzt permanenten Sync (`SYNC_EXTRUDER_MOTION EXTRUDER=mellow MOTION_QUEUE=extruder`)
+> mit `rotation_distance`-Modulation ueber `SET_EXTRUDER_ROTATION_DISTANCE`. Hall-Sensoren triggern
+> den Modulations-Latch, keine eigenstaendigen Feed-Bursts. Manueller Feed/Retract laeuft ueber
+> `_MANUAL_FEED` / `_MANUAL_RETRACT` (FORCE_MOVE, nur ausserhalb Druck). Triple-Burst existiert nur
+> am Retract-Taster (und optional am Feed-Taster via `feed_burst_enabled=1`).
 
-**HALL2 bursts happen too frequently:**
-- Increase burst amount (E15 -> E20 or E25)
-- Check reverse bowden tube tension
-- Verify printer is actually consuming filament
+**Feeder laeuft dauerhaft zu schnell oder zu langsam:**
+- `sync_rotation_distance` falsch kalibriert - mit `CALIBRATE_FEEDER_SYNC` neu kalibrieren (Schritt 3.3)
+- Kalibrierten Wert auch in `[extruder_stepper mellow]` -> `rotation_distance` eintragen
+- `sync_modulation` pruefen (Default 0.20 = +-20 %)
 
-**Buffer overfills (HALL1 warning):**
-- Decrease burst amount (E15 -> E10)
-- Check that printer is pulling filament from buffer
-- Verify no clogs in bowden tube
-- Check extruder is actually feeding
+**Buffer dauerhaft leer (HALL3 dauerhaft aktiv):**
+- Feeder foerdert zu wenig - `sync_rotation_distance` ggf. zu hoch
+- Alternativ: `sync_modulation` zu klein (nicht genug Aufhol-Reserve)
+- `_STATE_DUMP` in der Konsole pruefen (Hall-Rohwerte, Latch-Zustand)
+
+**Buffer dauerhaft voll (HALL2 dauerhaft aktiv, ggf. HALL1-Overflow):**
+- Feeder foerdert zu viel - `sync_rotation_distance` ggf. zu niedrig
+- Reverse-Bowden-Spannung pruefen, Druckerverbrauch verifizieren
+
+**HALL1-Overflow wird sofort nach Reset wieder getriggert:**
+- Mechanischer Stau im Buffer - Filament-Durchgang manuell pruefen
+- `v.triple_click_distance` ggf. reduzieren
+- Retract-Mechanik auf Blockade pruefen
+
+**LOAD_FILAMENT endet mit "HALL2 nicht erreicht" (Timeout):**
+- `load_buffer_max` ggf. zu niedrig (Default 2000 mm)
+- HALL2-Sensor defekt oder Wiring pruefen (`QUERY_ENDSTOPS`)
+- Buffer-Mechanik blockiert
+
+**UNLOAD_FILAMENT blockiert oder kein Retract:**
+- Temperatur-Check schlaegt fehl: Hotend unter `min_temp` - erst aufheizen
+- `sync_locked` bleibt haengen - `_STATE_DUMP` pruefen, ggf. Klipper-Restart
+
+**Nach Klipper-Restart keine Automatik:**
+- Boot triggert nicht automatisch eine Erstbefuellung (Design ab P2)
+- Manuell `FORCE_BUFFER_FILL` aufrufen, oder Filament kurz rausziehen und wieder einfuehren
 
 **Manual buttons don't work:**
 - Verify button wiring to PB12 (feed) and PB13 (retract)
@@ -716,10 +738,6 @@ Run with `sudo` if permission denied.
 - Run `ls /dev/serial/by-id/` to find device
 - Check `dmesg | tail` for USB enumeration errors
 - Reflash Klipper firmware
-
-**"Option 'step_pin' is not valid in section 'extruder X'":**
-- Ensure section is named `[extruder1]` not `[extruder filament_buffer]`
-- Klipper only supports numbered extruders: `extruder`, `extruder1`, `extruder2`, etc.
 
 **TMC UART errors:**
 - Verify UART pin is correct: `uart_pin: LLL_PLUS:PB1`
