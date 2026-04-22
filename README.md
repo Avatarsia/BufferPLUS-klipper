@@ -1,39 +1,32 @@
-# Klipper Configuration for Mellow LLL Buffer Plus
+# Mellow LLL Plus Filament Buffer - Klipper-Konfiguration
 
-Complete Klipper configuration for the Mellow LLL Filament Plus Buffer with automatic filament feeding and buffer management.
+Aktive Klipper-Konfiguration fuer den **Mellow LLL Plus Filament Buffer**. Der Feeder-Stepper laeuft permanent synchron mit dem Hauptextruder; die drei Hall-Sensoren regeln die effektive `rotation_distance` und halten den Buffer selbstaendig im mittleren Fuellbereich - ohne Druck-Pausen durch Feed-Bursts.
 
-> **Note:** This is the Klipper configuration. For the Buffer Plus firmware source code, see the [main repository README](../README.md).
+Diese Konfiguration ist der Rebuild-Branch `rebuild-sync-v2` und enthaelt gegenueber dem Upstream: sensor-gesteuertes LOAD/UNLOAD, Hysterese-Latch, HALL1-Safety auf allen Feed-Pfaden, Kalibriermakros (`CALIBRATE_FEEDER_SYNC`, `MEASURE_LOAD_START`) und einen Runout-Nachlauf fuer externe Filament-Sensoren.
 
-# Revisions
-1/12/2026 - Updated config to use extra_stepper and force moves instead of the second extruder setup.
-            This avoids a few conflicts and allows the motor to be synced to the extruder
-            Added filament runout switch logic.
-            Can be enabled or disabled with ENABLE_RUNOUT_SENSOR or DISABLE_RUNOUT_SENSOR
-            (umbenannt in R-10 auf UPPER_SNAKE — siehe aktuelle Config)
+> **Hinweis:** Das hier ist die Klipper-Konfiguration. Den Quellcode der Buffer-Plus-Firmware findest du im
+> [Haupt-Repository](../README.md).
 
-## Features
+---
 
-- **Permanenter Feeder-Sync** - Feeder-Stepper laeuft dauerhaft synchron mit dem Hauptextruder via `SYNC_EXTRUDER_MOTION`. Keine Druck-Pausen durch Feed-Bursts.
-- **Hall-Sensor-Modulation** - HALL2 (voll) und HALL3 (leer) modulieren die effektive `rotation_distance` um +-`sync_modulation` (Standard +-20 %). HALL1 (Ueberlast) trennt den Sync sofort.
-- **Hysterese-Latch** - Letzter Hall-Zustand wird gehalten, bis der gegenteilige Hall triggert. Glatte Regelkurve ohne Sprung-Artefakte.
-- **3-Klick-Taster** - Feed/Retract mit Dauerlauf (1 Klick), Puls (2 Klicks), Triple-Burst (3 Klicks, Retract standardmaessig; Feed optional via `variable_feed_burst_enabled`).
-- **Sensor-gesteuertes LOAD_FILAMENT** - 3 Phasen: schnell zum Toolhead, synchron durchs Hotend (50-mm-Chunks), Buffer-Fuellung bis HALL2 triggert.
-- **Chunked UNLOAD_FILAMENT** - Tip-Forming + synchroner Rueckzug in 50-mm-Chunks + vollstaendiger Feeder-Rueckzug inkl. Follow-Strecke.
-- **Runout-Handling** - Externer Sensor via `runout_pause=0` (Feeder laeuft noch 100 mm leer, dann disable) oder Sofort-Pause via `runout_pause=1`.
-- **Kalibriermakros** - `CALIBRATE_FEEDER_SYNC` fuer `sync_rotation_distance`, `MEASURE_LOAD_START` fuer `load_fast_distance` per Tastermessung.
-- **Display-Toggle** - M117-Statusausgaben via `variable_display_status_enabled` umschaltbar.
+## Inhalt
 
-## Hardware Setup
-
-### Sensor Configuration
-- **ENDSTOP3 (PB7)**: Filament-Eingangssensor - erkennt Filament am Buffer-Eingang (triggert Erstbefuellung via `_PREPARE_INITIAL_FILL`).
-- **HALL3 (PB4)**: Untere Schwelle (Buffer nahe leer) - Feeder-Modulation erhoeht Foerdermenge (`rotation_distance` verkleinert).
-- **HALL2 (PB3)**: Obere Schwelle (Buffer nahe voll) - Feeder-Modulation reduziert Foerdermenge (`rotation_distance` vergroessert). Dient zusaetzlich als LOAD-Abbruchsensor.
-- **HALL1 (PB2)**: Ueberlast-Notanschlag - trennt Sync sofort und setzt `overfill_lock=1`.
-
-### Button Configuration
-- **Feed Button (PB12)**: 1 Klick = Dauerlauf-Vorschub, 2 Klicks = `manual_chunk_distance`-Puls, 3 Klicks = neuer Dauerlauf (oder Triple-Burst falls `variable_feed_burst_enabled=1`).
-- **Retract Button (PB13)**: 1 Klick = Dauerlauf-Rueckzug, 2 Klicks = `manual_chunk_distance`-Puls, 3 Klicks = Triple-Retract-Burst.
+- [Funktionsprinzip](#funktionsprinzip)
+- [Was diese Config leistet](#was-diese-config-leistet)
+- [Hardware](#hardware)
+- [Voraussetzungen](#voraussetzungen)
+- [Inbetriebnahme](#inbetriebnahme)
+- [Variablen-Referenz](#variablen-referenz)
+- [Taster-Bedienung](#taster-bedienung)
+- [Benutzer-Macros](#benutzer-macros)
+- [Runout-Verhalten](#runout-verhalten)
+- [Tipps und Hinweise](#tipps-und-hinweise)
+- [Interne Macros (Diagnose)](#interne-macros-diagnose)
+- [Firmware flashen (einmalig)](#firmware-flashen-einmalig)
+- [Fehlerbehebung](#fehlerbehebung)
+- [Revisionen](#revisionen)
+- [Danksagungen](#danksagungen)
+- [Lizenz](#lizenz)
 
 ---
 
@@ -52,6 +45,36 @@ passen die Foerdergeschwindigkeit des Feeders dynamisch an:
 
 Die Modulation betraegt standardmaessig +-20 % der kalibrierten `rotation_distance`. Das haelt den Buffer dauerhaft
 im mittleren Fuellbereich, ohne dass separate Feed-Loops benoetigt werden.
+
+---
+
+## Was diese Config leistet
+
+- **Permanenter Feeder-Sync** - Feeder-Stepper laeuft dauerhaft synchron mit dem Hauptextruder via `SYNC_EXTRUDER_MOTION`. Keine Druck-Pausen durch Feed-Bursts.
+- **Hall-Sensor-Modulation** - HALL2 (voll) und HALL3 (leer) modulieren die effektive `rotation_distance` um +-`sync_modulation` (Standard +-20 %). HALL1 (Ueberlast) trennt den Sync sofort.
+- **Hysterese-Latch** - Letzter Hall-Zustand wird gehalten, bis der gegenteilige Hall triggert. Glatte Regelkurve ohne Sprung-Artefakte.
+- **3-Klick-Taster** - Feed/Retract mit Dauerlauf (1 Klick), Puls (2 Klicks), Triple-Burst (3 Klicks, Retract standardmaessig; Feed optional via `variable_feed_burst_enabled`).
+- **Sensor-gesteuertes LOAD_FILAMENT** - 3 Phasen: schnell zum Toolhead, synchron durchs Hotend (50-mm-Chunks), Buffer-Fuellung bis HALL2 triggert.
+- **Chunked UNLOAD_FILAMENT** - Tip-Forming + synchroner Rueckzug in 50-mm-Chunks + vollstaendiger Feeder-Rueckzug inkl. Follow-Strecke.
+- **Runout-Handling** - Externer Sensor via `runout_pause=0` (Feeder laeuft noch 100 mm leer, dann disable) oder Sofort-Pause via `runout_pause=1`.
+- **Kalibriermakros** - `CALIBRATE_FEEDER_SYNC` fuer `sync_rotation_distance`, `MEASURE_LOAD_START` fuer `load_fast_distance` per Tastermessung.
+- **Display-Toggle** - M117-Statusausgaben via `variable_display_status_enabled` umschaltbar.
+
+---
+
+## Hardware
+
+### Sensor-Konfiguration
+
+- **ENDSTOP3 (PB7)**: Filament-Eingangssensor - erkennt Filament am Buffer-Eingang (triggert Erstbefuellung via `_PREPARE_INITIAL_FILL`).
+- **HALL3 (PB4)**: Untere Schwelle (Buffer nahe leer) - Feeder-Modulation erhoeht Foerdermenge (`rotation_distance` verkleinert).
+- **HALL2 (PB3)**: Obere Schwelle (Buffer nahe voll) - Feeder-Modulation reduziert Foerdermenge (`rotation_distance` vergroessert). Dient zusaetzlich als LOAD-Abbruchsensor.
+- **HALL1 (PB2)**: Ueberlast-Notanschlag - trennt Sync sofort und setzt `overfill_lock=1`.
+
+### Taster-Konfiguration
+
+- **Vorschub-Taster (PB12)**: 1 Klick = Dauerlauf-Vorschub, 2 Klicks = `manual_chunk_distance`-Puls, 3 Klicks = neuer Dauerlauf (oder Triple-Burst falls `variable_feed_burst_enabled=1`).
+- **Rueckzug-Taster (PB13)**: 1 Klick = Dauerlauf-Rueckzug, 2 Klicks = `manual_chunk_distance`-Puls, 3 Klicks = Triple-Retract-Burst.
 
 ---
 
@@ -81,208 +104,12 @@ Fluidd: Die Datei muss im Konfigurationsverzeichnis (`~/printer_data/config/`) l
 
 ---
 
-## Installation
+## Inbetriebnahme
 
-### Step 1: Flash Katapult Bootloader (Recommended)
-
-Katapult (formerly CanBoot) allows easy firmware updates without needing to press physical buttons or enter DFU mode.
-
-#### 1.1: Build Katapult
-
-```bash
-cd ~
-git clone https://github.com/Arksine/katapult
-cd katapult
-make menuconfig
-```
-
-**Katapult Configuration:**
-- Micro-controller Architecture: `STMicroelectronics STM32`
-- Processor model: `STM32F072`
-- Build Katapult deployment application: `Do Not build`
-- Clock Reference: `8 MHz crystal`
-- Communication interface: `USB (on PA11/PA12)`
-- Application start offset: `8KiB offset`
-- USB ids: Leave default or customize
-- Support bootloader entry on rapid double click: `[*]` (Enable this!)
-- Enable bootloader entry on button (or gpio) state (Do not enable this)
-- Enable Status LED `[*]`
-- (PA8)   Status LED GPIO Pin
-
-```bash
-make clean
-make
-```
-
-#### 1.2: Enter DFU Mode
-
-The LLL Buffer Plus needs to be put into DFU (Device Firmware Update) mode:
-
-**Method 1: Jumper BOOT0 to 3.3V**
-1. Push and hold the boot button
-2. Push the reset button
-3. Release the boot button
-
-**Method 2: BOOT Button (if accessible)**
-1. Disconnect USB
-2. Hold the **BOOT button** on the board
-3. Connect USB while holding BOOT
-4. Release BOOT button
-
-
-#### 1.3: Verify DFU Mode
-
-```bash
-lsusb | grep DFU
-```
-
-You should see something like:
-```
-Bus 001 Device 015: ID 0483:df11 STMicroelectronics STM Device in DFU Mode
-```
-
-If not detected, try:
-```bash
-sudo dfu-util -l
-```
-
-#### 1.4: Flash Katapult
-
-```bash
-cd ~/katapult
-sudo dfu-util -a 0 -D ~/katapult/out/katapult.bin --dfuse-address 0x08000000:force:mass-erase:leave -d 0483:df11
-```
-
-You should see output ending with:
-```
-File downloaded successfully
-```
-
-#### 1.5: Verify Katapult
-
-Disconnect and reconnect USB. Check for Katapult device:
-
-```bash
-ls /dev/serial/by-id/
-```
-
-You should see something like:
-```
-usb-katapult_stm32f072xb_XXXXXX-if00
-```
-
----
-
-### Step 2: Build and Flash Klipper Firmware
-
-#### 2.1: Build Klipper
-
-```bash
-cd ~/klipper
-make menuconfig
-```
-
-**Klipper Configuration:**
-- Micro-controller Architecture: `STMicroelectronics STM32`
-- Processor model: `STM32F072`
-- Bootloader offset: `8KiB bootloader` (for Katapult)
-- Clock Reference: `8 MHz crystal`
-- Communication interface: `USB (on PA11/PA12)`
-
-**Important:** The bootloader offset MUST match what you set in Katapult (8KiB)!
-
-```bash
-make clean
-make
-```
-
-#### 2.2: Flash Klipper via Katapult
-
-Find your device ID:
-```bash
-ls /dev/serial/by-id/
-```
-
-Flash using Katapult's flashtool:
-```bash
-python3 ~/katapult/scripts/flashtool.py -f ~/klipper/out/klipper.bin -d /dev/serial/by-id/usb-katapult_stm32f072xb_XXXXXX-if00
-```
-
-Or using `make flash`:
-```bash
-make flash FLASH_DEVICE=/dev/serial/by-id/usb-katapult_stm32f072xb_XXXXXX-if00
-```
-
-You should see:
-```
-Attempting to connect to bootloader
-Katapult Connected
-Protocol: 1.0.0
-Flashing '/home/pi/klipper/out/klipper.bin'...
-[##################################################]
-Write complete: X pages
-Verifying...
-Verification Complete
-CRC: 0xXXXXXXXX
-Flashing successful
-```
-
-#### 2.3: Verify Klipper
-
-Disconnect and reconnect USB. Check the device ID changed:
-
-```bash
-ls /dev/serial/by-id/
-```
-
-You should now see:
-```
-usb-Klipper_stm32f072xb_XXXXXX-if00
-```
-
----
-
-### Alternative: Flash Klipper Without Katapult
-
-If you prefer not to use Katapult, you can flash Klipper directly:
-
-#### Build Klipper (No Bootloader)
-
-```bash
-cd ~/klipper
-make menuconfig
-```
-
-**Settings:**
-- Micro-controller Architecture: `STMicroelectronics STM32`
-- Processor model: `STM32F072`
-- Bootloader offset: `No bootloader`
-- Clock Reference: `8 MHz crystal`
-- Communication interface: `USB (on PA11/PA12)`
-
-```bash
-make clean
-make
-```
-
-#### Flash via DFU
-
-1. Enter DFU mode (see Step 1.2)
-2. Flash:
-   ```bash
-   make flash FLASH_DEVICE=0483:df11
-   ```
-
-> **Note:** Without Katapult, future firmware updates will require entering DFU mode manually each time.
-
----
-
-## Inbetriebnahme Schritt fuer Schritt
-
-Die Schritte 3.1 bis 3.5 muessen einmalig bei der Ersteinrichtung durchgefuehrt werden. Danach genuegt es, die Config
+Die folgenden Schritte muessen einmalig bei der Ersteinrichtung durchgefuehrt werden. Danach genuegt es, die Config
 einzubinden und den Drucker zu starten.
 
-### 3.1 MCU Serial-ID eintragen
+### 1. MCU Serial-ID eintragen
 
 Die MCU-Serial-ID identifiziert den LLL-Plus-Controller eindeutig. Sie wird einmalig ausgelesen und in der Config
 eingetragen.
@@ -292,22 +119,22 @@ eingetragen.
    `usb-Klipper_stm32...`).
 3. In der Config den Abschnitt `[mcu LLL_PLUS]` suchen und den `serial:`-Wert mit der eigenen ID ersetzen.
 
-### 3.2 Pflicht-Variablen anpassen
+### 2. Pflicht-Variablen anpassen
 
 Folgende Variablen in `_FILAMENT_VARS` sind mit `!!` markiert und muessen vor dem ersten Betrieb auf das eigene
 Setup angepasst werden:
 
 | Variable                 | Bedeutung                                                                           | Kalibrierung  |
 |--------------------------|-------------------------------------------------------------------------------------|---------------|
-| `sync_rotation_distance` | Kalibrierte `rotation_distance` fuer 1:1-Mitlauf des Feeders mit dem Extruder.      | Schritt 3.3   |
-| `load_fast_distance`     | Foerderweg vom Ende der Follow-Phase bis zum Toolhead-Eingang [mm].                 | Schritt 3.4   |
-| `load_slow`              | Synchroner Foerderweg durch Heatbreak und Nozzle beim Laden [mm].                   | Schritt 3.5   |
-| `unload_sync`            | Synchroner Rueckzugsweg durch Heatbreak und Nozzle beim Entladen [mm].              | Schritt 3.5   |
+| `sync_rotation_distance` | Kalibrierte `rotation_distance` fuer 1:1-Mitlauf des Feeders mit dem Extruder.      | Schritt 3     |
+| `load_fast_distance`     | Foerderweg vom Ende der Follow-Phase bis zum Toolhead-Eingang [mm].                 | Schritt 4     |
+| `load_slow`              | Synchroner Foerderweg durch Heatbreak und Nozzle beim Laden [mm].                   | Schritt 5     |
+| `unload_sync`            | Synchroner Rueckzugsweg durch Heatbreak und Nozzle beim Entladen [mm].              | Schritt 5     |
 
 Ausserdem: Den kalibrierten Wert von `sync_rotation_distance` auch in `[extruder_stepper mellow]` unter
 `rotation_distance:` eintragen - das ist der Hardware-Startwert beim Klipper-Boot.
 
-### 3.3 Feeder-Sync kalibrieren (CALIBRATE_FEEDER_SYNC)
+### 3. Feeder-Sync kalibrieren (CALIBRATE_FEEDER_SYNC)
 
 Ziel: Der Feeder soll exakt gleich viel foerdern wie der Hauptextruder (1:1). Dieser Wert ist die Basis fuer die
 +-20%-Modulation.
@@ -321,7 +148,7 @@ Ziel: Der Feeder soll exakt gleich viel foerdern wie der Hauptextruder (1:1). Di
 7. Wert in `variable_sync_rotation_distance` UND in `[extruder_stepper mellow]` `rotation_distance` eintragen.
 8. Klipper neu starten, Schritte 3-6 wiederholen bis Abweichung < 1 mm.
 
-### 3.4 load_fast_distance kalibrieren (MEASURE_LOAD_START)
+### 4. load_fast_distance kalibrieren (MEASURE_LOAD_START)
 
 > **ACHTUNG:** Hotend KALT lassen! Bei warmem Hotend startet nach der Follow-Phase automatisch `LOAD_FILAMENT`
 > (via `_initial_follow_end`) - das unterbricht die Kalibrierung bevor `load_fast_distance` eingetragen wurde.
@@ -341,7 +168,7 @@ Wert wird direkt eingetragen - kein Abzug notwendig.
 8. Gemessenen Wert in `variable_load_fast_distance` eintragen. Tipp: 10-20 mm weniger als gemessen eintragen,
    damit das Filament nicht zu weit in den Extruder ragt vor Phase 2.
 
-### 3.5 load_slow und unload_sync kalibrieren
+### 5. load_slow und unload_sync kalibrieren
 
 **load_slow:** Weg vom Toolhead-Eingang (Ende Phase 1) bis zur Nozzle-Spitze. Entspricht dem Toolhead-Innenweg
 inkl. Heatbreak und Nozzle-Laenge. Mit Schieblehre oder Markierung ausmessen. Typisch: 120-180 mm je nach
@@ -350,7 +177,7 @@ Toolhead.
 **unload_sync:** Rueckzugsweg beim Entladen durch Heatbreak und Nozzle. Gleicher oder 5-10 mm groesserer Wert
 als `load_slow`. Muss das Filament vollstaendig aus dem Hotend herausziehen.
 
-### 3.6 Erstbefuellung und LOAD_FILAMENT testen
+### 6. Erstbefuellung und LOAD_FILAMENT testen
 
 1. Hotend auf Betriebstemperatur vorheizen.
 2. Filament in den Feeder-Eingang stecken.
@@ -370,7 +197,7 @@ als `load_slow`. Muss das Filament vollstaendig aus dem Hotend herausziehen.
 Alle Variablen befinden sich im Macro `_FILAMENT_VARS` in der Config. Mit `!!` markierte Variablen sind Pflichtfelder
 und muessen kalibriert werden. Alle anderen sind gut gewaehlte Richtwerte die in den meisten Setups funktionieren.
 
-### 4.1 Sync und Allgemein
+### Sync und Allgemein
 
 | Variable                     | Standard | Einheit | Beschreibung |
 |------------------------------|----------|---------|--------------|
@@ -386,7 +213,7 @@ und muessen kalibriert werden. Alle anderen sind gut gewaehlte Richtwerte die in
 | `reenable_cooldown`          | 1        | s       | Verzoegerung nach Taster-Loslassen bis die Sync-Automatik wieder aktiv wird. Verhindert sofortiges Wiedereinschalten nach kurzem Taster-Kontakt. |
 | `reenable_cooldown_fast`     | 0.5      | s       | Verzoegerung nach einem Triple-Click-Burst bis die Sync-Automatik wieder aktiv wird. Kuerzer als `reenable_cooldown`, da der Burst selbst eine definierte Distanz zuruecklegt. |
 
-### 4.2 LOAD-Parameter
+### LOAD-Parameter
 
 | Variable                | Standard | Einheit | Beschreibung |
 |-------------------------|----------|---------|--------------|
@@ -394,14 +221,14 @@ und muessen kalibriert werden. Alle anderen sind gut gewaehlte Richtwerte die in
 | `load_slow` !!          | 180      | mm      | Synchroner Foerderweg Phase 2: Feeder + Extruder gemeinsam durch Heatbreak und Nozzle. Entspricht dem Toolhead-Innenweg. Typisch 120-180 mm je nach Toolhead. |
 | `load_buffer_max`       | 2000     | mm      | Sicherheits-Timeout fuer LOAD Phase 3 (Buffer befuellen bis HALL2). Wird HALL2 nicht innerhalb dieser Distanz erreicht, laeuft das Macro trotzdem mit einer Warnmeldung durch. |
 
-### 4.3 UNLOAD-Parameter
+### UNLOAD-Parameter
 
 | Variable            | Standard | Einheit | Beschreibung |
 |---------------------|----------|---------|--------------|
 | `unload_sync` !!    | 180      | mm      | Synchroner Rueckzugsweg Phase 2: Feeder + Extruder ziehen gemeinsam durch Heatbreak und Nozzle. Muss >= `load_slow` sein. Gleicher oder 5-10 mm groesserer Wert als `load_slow` empfohlen. |
 | `unload_fast_max`   | 2510     | mm      | Maximale Feeder-Rueckzugsdistanz Phase 3 (Polling bis `buffer_entrance` frei). Sicherheits-Timeout bei Sensorausfall. |
 
-### 4.4 Tip-Forming
+### Tip-Forming
 
 Das Tip-Forming formt die Filamentspitze vor dem Entladen. Es verhindert Fadenziehen und Verstopfungen beim
 naechsten Ladevorgang. Die Parameter analog zum Prusa MMU-System. Werte je nach Filamenttyp anpassen (TPU
@@ -416,7 +243,7 @@ benoetigt z.B. andere Werte als PLA).
 | `tip_final_retract` | 25       | mm      | Finaler Retract nach den Zyklen - zieht die geformte Spitze aus der Schmelzzone. |
 | `tip_final_speed`   | 50       | mm/s    | Geschwindigkeit des finalen Retracts. |
 
-### 4.5 Erstbefuellung (Grip + Follow)
+### Erstbefuellung (Grip + Follow)
 
 Die Erstbefuellung laeuft in zwei Phasen ab. Die Grip-Phase ergreift das Filament mit hoher Geschwindigkeit. Die
 anschliessende Follow-Phase foerdert langsamer und stellt sicher, dass das Filament den gesamten Weg bis kurz vor
@@ -430,7 +257,7 @@ den Toolhead-Eingang zuruecklegt.
 | `initial_follow_duration`  | 30       | s       | Dauer der Follow-Phase. Foerderstrecke = `initial_follow_speed * initial_follow_duration` (Standard: 450 mm). Bei Aenderung: `load_fast_distance` neu kalibrieren (`MEASURE_LOAD_START`, Hotend KALT). |
 | `auto_load_after_follow`   | 0        | 0/1     | 0 = nach Follow-Phase nur Sync aktiv, User startet `LOAD_FILAMENT` manuell. 1 = bei Hotend >= `min_temp` automatisch `LOAD_FILAMENT`. |
 
-### 4.6 Triple-Click-Burst
+### Triple-Click-Burst
 
 Wichtig: Nur der Rueckzug-Taster hat standardmaessig einen Triple-Click. Der Vorschub-Taster ist bei
 `feed_burst_enabled=0` (Default) so konfiguriert, dass der 3. Klick lediglich einen neuen Dauerlauf startet.
@@ -441,7 +268,7 @@ Wichtig: Nur der Rueckzug-Taster hat standardmaessig einen Triple-Click. Der Vor
 | `triple_click_window`    | 1.5      | s       | Zeitfenster fuer Triple-Click-Erkennung am Rueckzug-Taster. Alle drei Klicks muessen innerhalb dieses Fensters erfolgen. |
 | `feed_burst_enabled`     | 0        | 0/1     | 0 = Vorschub-Taster Klick 3 startet neuen Dauerlauf (sicher). 1 = Triple-Feed-Burst am Vorschub-Taster aktiv (Verstopfungsrisiko wenn Filament im Toolhead). |
 
-### 4.7 Runout und Anzeige
+### Runout und Anzeige
 
 | Variable                  | Standard | Einheit | Beschreibung |
 |---------------------------|----------|---------|--------------|
@@ -549,7 +376,7 @@ Aktiviert bzw. deaktiviert den Runout-Zaehler (`print_running`-Flag). Diese Macr
 
 Versetzt den Feeder in den Kalibrierungsmodus: Sync ist aktiv mit exakt nominaler `rotation_distance`
 (`sync_rotation_distance`), ohne +-20%-Modulation durch Hall-Sensoren. Dient zur Kalibrierung von
-`sync_rotation_distance` (Schritt 3.3).
+`sync_rotation_distance` (Schritt 3).
 
 - Verwendung: `CALIBRATE_FEEDER_SYNC` aufrufen, dann `G1 E100 F60` ausfuehren, am Feeder nachmessen, Formel
   anwenden.
@@ -578,39 +405,6 @@ Runout-Verhalten unterscheidet zwei Situationen:
 | Waehrend LOAD, UNLOAD oder manueller Taster-Operation | Das Filamentende passiert `buffer_entrance` planmaessig. Das Runout-Event wird ignoriert (kein Fehlerzustand). |
 | Echter Runout waehrend des Drucks (`runout_pause = 0`, externer Sensor vorhanden) | Feeder laeuft noch synchron weiter. Der interne Polling-Loop wartet bis 100 mm mehr extrudiert wurden als beim Runout-Zeitpunkt. Dann: Feeder entkoppeln und Stepper deaktivieren. Die Druckpause wird vom externen Sensor (z.B. BTT SFS) ausgeloest. |
 | Echter Runout waehrend des Drucks (`runout_pause = 1`, kein externer Sensor) | Feeder wird sofort entkoppelt und deaktiviert. Druck wird sofort pausiert (PAUSE). Filament pruefen, neu einlegen und RESUME aufrufen. |
-
----
-
-## Interne Macros (Kurzuebersicht)
-
-Die folgenden Macros sind interne Helfer und erscheinen nicht in der Mainsail-/Fluidd-Makro-Leiste
-(Unterstrich-Praefix). Sie sollten im Normalbetrieb nicht direkt aufgerufen werden. Ausnahme: `_STATE_DUMP` ist
-ein nuetzliches Diagnose-Werkzeug.
-
-| Macro / Delayed-GCode              | Zweck |
-|------------------------------------|-------|
-| `_FILAMENT_VARS`                   | Container fuer alle Konfigurationsvariablen (kein ausfuehrbarer Code). |
-| `_BUFFER_AUTO_CONTROL`             | Zentrale Zustandsvariablen: Flags fuer Sync, Lockouts, E-Modus, Runout-Referenz. |
-| `_APPLY_SYNC_STATE`                | Kernlogik: Liest Hall-Sensor-Zustaende direkt aus der Hardware, berechnet `rotation_distance` und schaltet Sync an/aus. |
-| `_SYNC_OFF`                        | Trennt Sync und setzt `rotation_distance` auf Nominalwert zurueck. |
-| `_SAVE_E_MODE` / `_RESTORE_E_MODE` | Speichert und stellt den Extruder-Modus (absolut/relativ) bei LOAD/UNLOAD wieder her. |
-| `_PREPARE_INITIAL_FILL`            | Gemeinsame Initialisierung fuer Erstbefuellung (`insert_gcode` und `FORCE_BUFFER_FILL`). |
-| `_INITIAL_GRIP_PHASE`              | Fuehrt die Grip-Phase der Erstbefuellung aus. |
-| `_initial_follow_loop`             | Delayed-GCode-Loop fuer die kontinuierliche Foerderung waehrend der Follow-Phase. |
-| `_initial_follow_end`              | Beendet die Follow-Phase, hebt Lockout auf, startet Sync und ggf. `LOAD_FILAMENT`. |
-| `_LOAD_PH_ONE_LOOP`                | Loop fuer LOAD Phase 1 (distanzbasierte Foerderung bis `load_fast_distance`). |
-| `_LOAD_PH_TWO`                     | Fuehrt LOAD Phase 2 aus (synchrone Hotend-Durchfahrt). |
-| `_LOAD_PH_THREE_LOOP`              | Loop fuer LOAD Phase 3 (Buffer befuellen bis HALL2 aktiv). |
-| `_UNLOAD_FAST_RETRACT`             | UNLOAD Phase 3a: Schnell-Rueckzug Toolhead -> `buffer_entrance`. |
-| `_ABORT_ALL_FEED_LOOPS`            | Cleanup-Helper: Bricht alle aktiven Feed-Loops ab. |
-| `_BUTTON_CLICK_HANDLER`            | Zentraler Handler fuer Feed- und Retract-Taster (3-Klick-Logik). |
-| `_MANUAL_FEED` / `_MANUAL_RETRACT` | Dauerlauf-Loops fuer Taster-Betrieb. |
-| `_TRIPLE_FEED_BURST`               | Fuehrt den Triple-Click-Burst des Vorschub-Tasters aus (nur wenn `feed_burst_enabled=1`). |
-| `_TRIPLE_RETRACT_BURST`            | Fuehrt den Triple-Click-Burst des Rueckzug-Tasters aus. |
-| `_runout_stepper_disable`          | Polling-Loop nach Runout: deaktiviert Feeder nach 100 mm extrudiertem Filament. |
-| `_boot_autostart`                  | Verzoegerter Start nach Klipper-Boot (7 s): aktiviert Sync wenn Filament vorhanden. |
-| `_reenable_autofeed`               | Reaktiviert Sync nach Ablauf des `reenable_cooldown`. |
-| `_STATE_DUMP`                      | **Diagnose-Macro:** Gibt alle aktuellen Flags, Sensor-Zustaende und Hall-Sensor-Rohwerte in der Konsole aus. Aufruf: `_STATE_DUMP` in der Konsole eingeben. Im Normalbetrieb nur dieses Macro sinnvoll direkt aufrufen. |
 
 ---
 
@@ -662,35 +456,286 @@ unkalibrierten Platzhalter-Wert.
 
 ---
 
-## Troubleshooting
+## Interne Macros (Diagnose)
 
-### Flashing Issues
+Die folgenden Macros sind interne Helfer und erscheinen nicht in der Mainsail-/Fluidd-Makro-Leiste
+(Unterstrich-Praefix). Sie sollten im Normalbetrieb nicht direkt aufgerufen werden. Ausnahme: `_STATE_DUMP` ist
+ein nuetzliches Diagnose-Werkzeug - fuer User ist nur dieses Macro relevant.
 
-**DFU device not detected:**
-- Check USB cable (must be data cable, not charge-only)
-- Try different USB port
-- Check `lsusb` without grep to see all devices
-- Verify BOOT0 is properly jumpered to 3.3V
-- Try both BOOT button methods
+| Macro / Delayed-GCode              | Zweck |
+|------------------------------------|-------|
+| `_FILAMENT_VARS`                   | Container fuer alle Konfigurationsvariablen (kein ausfuehrbarer Code). |
+| `_BUFFER_AUTO_CONTROL`             | Zentrale Zustandsvariablen: Flags fuer Sync, Lockouts, E-Modus, Runout-Referenz. |
+| `_APPLY_SYNC_STATE`                | Kernlogik: Liest Hall-Sensor-Zustaende direkt aus der Hardware, berechnet `rotation_distance` und schaltet Sync an/aus. |
+| `_SYNC_OFF`                        | Trennt Sync und setzt `rotation_distance` auf Nominalwert zurueck. |
+| `_SAVE_E_MODE` / `_RESTORE_E_MODE` | Speichert und stellt den Extruder-Modus (absolut/relativ) bei LOAD/UNLOAD wieder her. |
+| `_PREPARE_INITIAL_FILL`            | Gemeinsame Initialisierung fuer Erstbefuellung (`insert_gcode` und `FORCE_BUFFER_FILL`). |
+| `_INITIAL_GRIP_PHASE`              | Fuehrt die Grip-Phase der Erstbefuellung aus. |
+| `_initial_follow_loop`             | Delayed-GCode-Loop fuer die kontinuierliche Foerderung waehrend der Follow-Phase. |
+| `_initial_follow_end`              | Beendet die Follow-Phase, hebt Lockout auf, startet Sync und ggf. `LOAD_FILAMENT`. |
+| `_LOAD_PH_ONE_LOOP`                | Loop fuer LOAD Phase 1 (distanzbasierte Foerderung bis `load_fast_distance`). |
+| `_LOAD_PH_TWO`                     | Fuehrt LOAD Phase 2 aus (synchrone Hotend-Durchfahrt). |
+| `_LOAD_PH_THREE_LOOP`              | Loop fuer LOAD Phase 3 (Buffer befuellen bis HALL2 aktiv). |
+| `_UNLOAD_FAST_RETRACT`             | UNLOAD Phase 3a: Schnell-Rueckzug Toolhead -> `buffer_entrance`. |
+| `_ABORT_ALL_FEED_LOOPS`            | Cleanup-Helper: Bricht alle aktiven Feed-Loops ab. |
+| `_BUTTON_CLICK_HANDLER`            | Zentraler Handler fuer Feed- und Retract-Taster (3-Klick-Logik). |
+| `_MANUAL_FEED` / `_MANUAL_RETRACT` | Dauerlauf-Loops fuer Taster-Betrieb. |
+| `_TRIPLE_FEED_BURST`               | Fuehrt den Triple-Click-Burst des Vorschub-Tasters aus (nur wenn `feed_burst_enabled=1`). |
+| `_TRIPLE_RETRACT_BURST`            | Fuehrt den Triple-Click-Burst des Rueckzug-Tasters aus. |
+| `_runout_stepper_disable`          | Polling-Loop nach Runout: deaktiviert Feeder nach 100 mm extrudiertem Filament. |
+| `_boot_autostart`                  | Verzoegerter Start nach Klipper-Boot (7 s): aktiviert Sync wenn Filament vorhanden. |
+| `_reenable_autofeed`               | Reaktiviert Sync nach Ablauf des `reenable_cooldown`. |
+| `_STATE_DUMP`                      | **Diagnose-Macro:** Gibt alle aktuellen Flags, Sensor-Zustaende und Hall-Sensor-Rohwerte in der Konsole aus. Aufruf: `_STATE_DUMP` in der Konsole eingeben. Im Normalbetrieb nur dieses Macro sinnvoll direkt aufrufen. |
+
+---
+
+## Firmware flashen (einmalig)
+
+Dieser Abschnitt beschreibt die einmalige Erstinstallation der MCU-Firmware. Wenn Klipper bereits laeuft und die
+MCU erkannt wird, kann dieser Abschnitt uebersprungen werden.
+
+### Katapult-Bootloader (empfohlen)
+
+Katapult (frueher CanBoot) ermoeglicht einfache Firmware-Updates, ohne dass physische Taster gedrueckt oder
+der DFU-Modus manuell aufgerufen werden muss.
+
+#### 1. Katapult bauen
+
+```bash
+cd ~
+git clone https://github.com/Arksine/katapult
+cd katapult
+make menuconfig
+```
+
+**Katapult-Konfiguration:**
+- Micro-controller Architecture: `STMicroelectronics STM32`
+- Processor model: `STM32F072`
+- Build Katapult deployment application: `Do Not build`
+- Clock Reference: `8 MHz crystal`
+- Communication interface: `USB (on PA11/PA12)`
+- Application start offset: `8KiB offset`
+- USB ids: Standard lassen oder anpassen
+- Support bootloader entry on rapid double click: `[*]` (unbedingt aktivieren!)
+- Enable bootloader entry on button (or gpio) state (nicht aktivieren)
+- Enable Status LED `[*]`
+- (PA8)   Status LED GPIO Pin
+
+```bash
+make clean
+make
+```
+
+#### 2. DFU-Modus aktivieren
+
+Der LLL Buffer Plus muss in den DFU-Modus (Device Firmware Update) versetzt werden:
+
+**Methode 1: BOOT0 auf 3.3V bruecken**
+1. BOOT-Taster gedrueckt halten
+2. Reset-Taster druecken
+3. BOOT-Taster loslassen
+
+**Methode 2: BOOT-Taster (falls zugaenglich)**
+1. USB trennen
+2. BOOT-Taster auf dem Board gedrueckt halten
+3. USB bei gedruecktem BOOT-Taster einstecken
+4. BOOT-Taster loslassen
+
+#### 3. DFU-Modus pruefen
+
+```bash
+lsusb | grep DFU
+```
+
+Erwartete Ausgabe in etwa:
+```
+Bus 001 Device 015: ID 0483:df11 STMicroelectronics STM Device in DFU Mode
+```
+
+Falls nicht erkannt:
+```bash
+sudo dfu-util -l
+```
+
+#### 4. Katapult flashen
+
+```bash
+cd ~/katapult
+sudo dfu-util -a 0 -D ~/katapult/out/katapult.bin --dfuse-address 0x08000000:force:mass-erase:leave -d 0483:df11
+```
+
+Die Ausgabe sollte enden mit:
+```
+File downloaded successfully
+```
+
+#### 5. Katapult verifizieren
+
+USB trennen und erneut verbinden. Katapult-Geraet pruefen:
+
+```bash
+ls /dev/serial/by-id/
+```
+
+Erwartete Ausgabe in etwa:
+```
+usb-katapult_stm32f072xb_XXXXXX-if00
+```
+
+### Klipper-Firmware
+
+#### 1. Klipper bauen
+
+```bash
+cd ~/klipper
+make menuconfig
+```
+
+**Klipper-Konfiguration:**
+- Micro-controller Architecture: `STMicroelectronics STM32`
+- Processor model: `STM32F072`
+- Bootloader offset: `8KiB bootloader` (fuer Katapult)
+- Clock Reference: `8 MHz crystal`
+- Communication interface: `USB (on PA11/PA12)`
+
+**Wichtig:** Der Bootloader-Offset MUSS dem Wert aus Katapult entsprechen (8KiB)!
+
+```bash
+make clean
+make
+```
+
+#### 2. Klipper via Katapult flashen
+
+Geraete-ID ermitteln:
+```bash
+ls /dev/serial/by-id/
+```
+
+Mit Katapult-Flashtool flashen:
+```bash
+python3 ~/katapult/scripts/flashtool.py -f ~/klipper/out/klipper.bin -d /dev/serial/by-id/usb-katapult_stm32f072xb_XXXXXX-if00
+```
+
+Alternativ ueber `make flash`:
+```bash
+make flash FLASH_DEVICE=/dev/serial/by-id/usb-katapult_stm32f072xb_XXXXXX-if00
+```
+
+Erwartete Ausgabe:
+```
+Attempting to connect to bootloader
+Katapult Connected
+Protocol: 1.0.0
+Flashing '/home/pi/klipper/out/klipper.bin'...
+[##################################################]
+Write complete: X pages
+Verifying...
+Verification Complete
+CRC: 0xXXXXXXXX
+Flashing successful
+```
+
+#### 3. Klipper verifizieren
+
+USB trennen und erneut verbinden. Geraete-ID sollte sich geaendert haben:
+
+```bash
+ls /dev/serial/by-id/
+```
+
+Erwartete Ausgabe:
+```
+usb-Klipper_stm32f072xb_XXXXXX-if00
+```
+
+### Ohne Katapult (Alternative)
+
+Wer Katapult nicht verwenden will, kann Klipper direkt flashen:
+
+#### Klipper ohne Bootloader bauen
+
+```bash
+cd ~/klipper
+make menuconfig
+```
+
+**Einstellungen:**
+- Micro-controller Architecture: `STMicroelectronics STM32`
+- Processor model: `STM32F072`
+- Bootloader offset: `No bootloader`
+- Clock Reference: `8 MHz crystal`
+- Communication interface: `USB (on PA11/PA12)`
+
+```bash
+make clean
+make
+```
+
+#### Via DFU flashen
+
+1. DFU-Modus aktivieren (siehe Schritt 2 oben)
+2. Flashen:
+   ```bash
+   make flash FLASH_DEVICE=0483:df11
+   ```
+
+> **Hinweis:** Ohne Katapult muss fuer jedes Firmware-Update wieder manuell der DFU-Modus aktiviert werden.
+
+### Firmware aktualisieren (mit Katapult)
+
+Nach der Katapult-Installation sind Klipper-Updates einfach:
+
+1. **Klipper neu bauen:**
+   ```bash
+   cd ~/klipper
+   make clean
+   make
+   ```
+
+2. **Via Katapult flashen:**
+   ```bash
+   python3 ~/katapult/scripts/flashtool.py -f ~/klipper/out/klipper.bin -d /dev/serial/by-id/usb-Klipper_stm32f072xb_XXXXXX-if00
+   ```
+
+3. **Oder Double-Tap-Reset verwenden:**
+   - Reset-Taster zweimal schnell druecken
+   - Das Geraet wechselt fuer 5 Sekunden in den Katapult-Modus
+   - Mit Katapult-Geraete-ID flashen
+
+Gehaeuse oeffnen oder BOOT-Taster druecken ist nicht mehr noetig.
+
+---
+
+## Fehlerbehebung
+
+### Flashing-Probleme
+
+**DFU-Geraet wird nicht erkannt:**
+- USB-Kabel pruefen (muss ein Datenkabel sein, nicht nur Ladekabel)
+- Anderen USB-Port probieren
+- `lsusb` ohne grep aufrufen um alle Geraete zu sehen
+- Pruefen, ob BOOT0 korrekt auf 3.3V gebrueckt ist
+- Beide BOOT-Taster-Methoden durchprobieren
 
 **"Cannot open DFU device":**
 ```bash
 sudo dfu-util -a 0 -D ~/katapult/out/katapult.bin --dfuse-address 0x08000000:force:mass-erase:leave -d 0483:df11
 ```
-Run with `sudo` if permission denied.
+Bei Permission-Denied mit `sudo` ausfuehren.
 
-**Katapult not appearing after flash:**
-- Disconnect and reconnect USB
-- Wait 5-10 seconds
-- Check `dmesg | tail` for USB events
-- Reflash Katapult - it may not have written correctly
+**Katapult erscheint nach dem Flashen nicht:**
+- USB trennen und erneut verbinden
+- 5-10 Sekunden warten
+- `dmesg | tail` auf USB-Events pruefen
+- Katapult erneut flashen - eventuell war der Schreibvorgang nicht sauber
 
-**Klipper flash fails via Katapult:**
-- Verify bootloader offset matches (8KiB in both Katapult and Klipper)
-- Try entering Katapult manually: Double-tap reset button quickly
-- Reflash Katapult and try again
+**Klipper-Flash via Katapult schlaegt fehl:**
+- Pruefen, ob der Bootloader-Offset uebereinstimmt (8KiB in Katapult und Klipper)
+- Katapult manuell aktivieren: Reset-Taster zweimal schnell druecken
+- Katapult erneut flashen und erneut versuchen
 
-### Buffer Operation Issues
+### Buffer-Betrieb
 
 > Die aktuelle Architektur nutzt permanenten Sync (`SYNC_EXTRUDER_MOTION EXTRUDER=mellow MOTION_QUEUE=extruder`)
 > mit `rotation_distance`-Modulation ueber `SET_EXTRUDER_ROTATION_DISTANCE`. Hall-Sensoren triggern
@@ -699,7 +744,7 @@ Run with `sudo` if permission denied.
 > am Retract-Taster (und optional am Feed-Taster via `feed_burst_enabled=1`).
 
 **Feeder laeuft dauerhaft zu schnell oder zu langsam:**
-- `sync_rotation_distance` falsch kalibriert - mit `CALIBRATE_FEEDER_SYNC` neu kalibrieren (Schritt 3.3)
+- `sync_rotation_distance` falsch kalibriert - mit `CALIBRATE_FEEDER_SYNC` neu kalibrieren (Inbetriebnahme Schritt 3)
 - Kalibrierten Wert auch in `[extruder_stepper mellow]` -> `rotation_distance` eintragen
 - `sync_modulation` pruefen (Default 0.20 = +-20 %)
 
@@ -730,63 +775,50 @@ Run with `sudo` if permission denied.
 - Boot triggert nicht automatisch eine Erstbefuellung (Design ab P2)
 - Manuell `FORCE_BUFFER_FILL` aufrufen, oder Filament kurz rausziehen und wieder einfuehren
 
-**Manual buttons don't work:**
-- Verify button wiring to PB12 (feed) and PB13 (retract)
-- Check console for "button pressed/released" messages
-- Ensure buttons are wired normally-open (NO)
-- Test with `QUERY_ENDSTOPS` while pressing
+**Taster funktionieren nicht:**
+- Verkabelung zu PB12 (Vorschub) und PB13 (Rueckzug) pruefen
+- Konsole auf "button pressed/released"-Meldungen beobachten
+- Sicherstellen, dass die Taster als Normally-Open (NO) verkabelt sind
+- Mit `QUERY_ENDSTOPS` bei gedruecktem Taster testen
 
-**MCU not detected after flashing Klipper:**
-- Verify Klipper firmware is flashed (not Arduino or Katapult)
-- Check USB connection
-- Run `ls /dev/serial/by-id/` to find device
-- Check `dmesg | tail` for USB enumeration errors
-- Reflash Klipper firmware
+**MCU wird nach Klipper-Flash nicht erkannt:**
+- Pruefen, ob wirklich Klipper-Firmware geflasht wurde (nicht Arduino oder Katapult)
+- USB-Verbindung pruefen
+- `ls /dev/serial/by-id/` ausfuehren um das Geraet zu finden
+- `dmesg | tail` auf USB-Enumeration-Fehler pruefen
+- Klipper-Firmware neu flashen
 
-**TMC UART errors:**
-- Verify UART pin is correct: `uart_pin: LLL_PLUS:PB1`
-- Check TMC2208 is properly seated
-- Verify run_current is not too low (minimum ~0.2)
-
----
-
-## Updating Firmware (with Katapult)
-
-Once Katapult is installed, updating Klipper is easy:
-
-1. **Rebuild Klipper:**
-   ```bash
-   cd ~/klipper
-   make clean
-   make
-   ```
-
-2. **Flash via Katapult:**
-   ```bash
-   python3 ~/katapult/scripts/flashtool.py -f ~/klipper/out/klipper.bin -d /dev/serial/by-id/usb-Klipper_stm32f072xb_XXXXXX-if00
-   ```
-
-3. **Or use double-tap reset:**
-   - Quickly press reset button twice
-   - Device enters Katapult mode for 5 seconds
-   - Flash using the Katapult device ID
-
-No need to open the case or press BOOT buttons!
+**TMC-UART-Fehler:**
+- UART-Pin pruefen: `uart_pin: LLL_PLUS:PB1`
+- Sitz des TMC2208 pruefen
+- `run_current` nicht zu niedrig (Minimum ca. 0.2)
 
 ---
 
-## Credits
+## Revisionen
 
-Klipper configuration developed by [@ss1gohan13](https://github.com/ss1gohan13) for the Mellow LLL Filament Plus Buffer.
+12.01.2026 - Config auf `extra_stepper` + Force-Moves umgestellt (statt Second-Extruder-Setup). Vermeidet
+Konflikte und ermoeglicht das Synchronisieren des Motors mit dem Extruder. Filament-Runout-Switch-Logik
+hinzugefuegt. Aktivierung/Deaktivierung via `ENABLE_RUNOUT_SENSOR` / `DISABLE_RUNOUT_SENSOR`
+(umbenannt in R-10 auf UPPER_SNAKE - siehe aktuelle Config).
 
-Hardware and original firmware by [Mellow 3D](https://github.com/mellow-3d).
+---
 
-Special thanks to:
-- James on the Klipper Discord
-- Ian on the Klipper Discord
-- [Arksine](https://github.com/Arksine) for Katapult bootloader
-- [Klipper](https://github.com/Klipper3d/klipper) team
+## Danksagungen
 
-## License
+Klipper-Konfiguration entwickelt von [@ss1gohan13](https://github.com/ss1gohan13) fuer den Mellow LLL
+Filament Plus Buffer.
 
-MIT License - Feel free to use and modify!
+Hardware und Original-Firmware von [Mellow 3D](https://github.com/mellow-3d).
+
+Besonderer Dank an:
+- James aus dem Klipper-Discord
+- Ian aus dem Klipper-Discord
+- [Arksine](https://github.com/Arksine) fuer den Katapult-Bootloader
+- Das [Klipper](https://github.com/Klipper3d/klipper)-Team
+
+---
+
+## Lizenz
+
+MIT-Lizenz - Freie Verwendung und Modifikation erlaubt.
