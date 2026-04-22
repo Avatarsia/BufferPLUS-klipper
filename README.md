@@ -13,23 +13,27 @@ Complete Klipper configuration for the Mellow LLL Filament Plus Buffer with auto
 
 ## Features
 
-- Automatic Buffer Control - Fills buffer automatically when filament is detected
-- Smart Feed Bursts - HALL2 sensor triggers small feed bursts during printing
-- Overfill Protection - HALL1 prevents buffer from jamming into extruder
-- Manual Feed/Retract - Physical buttons for manual filament loading
-- Filament Runout Detection - Optional pause on filament runout
+- **Permanenter Feeder-Sync** - Feeder-Stepper laeuft dauerhaft synchron mit dem Hauptextruder via `SYNC_EXTRUDER_MOTION`. Keine Druck-Pausen durch Feed-Bursts.
+- **Hall-Sensor-Modulation** - HALL2 (voll) und HALL3 (leer) modulieren die effektive `rotation_distance` um +-`sync_modulation` (Standard +-20 %). HALL1 (Ueberlast) trennt den Sync sofort.
+- **Hysterese-Latch** - Letzter Hall-Zustand wird gehalten, bis der gegenteilige Hall triggert. Glatte Regelkurve ohne Sprung-Artefakte.
+- **3-Klick-Taster** - Feed/Retract mit Dauerlauf (1 Klick), Puls (2 Klicks), Triple-Burst (3 Klicks, Retract standardmaessig; Feed optional via `variable_feed_burst_enabled`).
+- **Sensor-gesteuertes LOAD_FILAMENT** - 3 Phasen: schnell zum Toolhead, synchron durchs Hotend (50-mm-Chunks), Buffer-Fuellung bis HALL2 triggert.
+- **Chunked UNLOAD_FILAMENT** - Tip-Forming + synchroner Rueckzug in 50-mm-Chunks + vollstaendiger Feeder-Rueckzug inkl. Follow-Strecke.
+- **Runout-Handling** - Externer Sensor via `runout_pause=0` (Feeder laeuft noch 100 mm leer, dann disable) oder Sofort-Pause via `runout_pause=1`.
+- **Kalibriermakros** - `CALIBRATE_FEEDER_SYNC` fuer `sync_rotation_distance`, `MEASURE_LOAD_START` fuer `load_fast_distance` per Tastermessung.
+- **Display-Toggle** - M117-Statusausgaben via `variable_display_status_enabled` umschaltbar.
 
 ## Hardware Setup
 
 ### Sensor Configuration
-- **ENDSTOP3 (PB7)**: Filament entrance sensor - detects when filament is loaded
-- **HALL3 (PB4)**: Initial fill sensor - switches from continuous to burst mode
-- **HALL2 (PB3)**: Primary buffer control - triggers feed bursts when neck extends
-- **HALL1 (PB2)**: Overfill limiter - prevents buffer from over-filling
+- **ENDSTOP3 (PB7)**: Filament-Eingangssensor - erkennt Filament am Buffer-Eingang (triggert Erstbefuellung via `_PREPARE_INITIAL_FILL`).
+- **HALL3 (PB4)**: Untere Schwelle (Buffer nahe leer) - Feeder-Modulation erhoeht Foerdermenge (`rotation_distance` verkleinert).
+- **HALL2 (PB3)**: Obere Schwelle (Buffer nahe voll) - Feeder-Modulation reduziert Foerdermenge (`rotation_distance` vergroessert). Dient zusaetzlich als LOAD-Abbruchsensor.
+- **HALL1 (PB2)**: Ueberlast-Notanschlag - trennt Sync sofort und setzt `overfill_lock=1`.
 
 ### Button Configuration
-- **Feed Button (PB12)**: Manual continuous feed (hold to feed)
-- **Retract Button (PB13)**: Manual continuous retract (hold to retract)
+- **Feed Button (PB12)**: 1 Klick = Dauerlauf-Vorschub, 2 Klicks = `manual_chunk_distance`-Puls, 3 Klicks = neuer Dauerlauf (oder Triple-Burst falls `variable_feed_burst_enabled=1`).
+- **Retract Button (PB13)**: 1 Klick = Dauerlauf-Rueckzug, 2 Klicks = `manual_chunk_distance`-Puls, 3 Klicks = Triple-Retract-Burst.
 
 ---
 
