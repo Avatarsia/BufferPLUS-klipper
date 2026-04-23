@@ -944,16 +944,19 @@ class BufferFeeder:
         return now_pt < self._current_move['end_time']
 
     def _halt_motion(self):
-        """Stop any in-flight move.
+        """Stop the feeder at the next opportunity.
 
-        Implementation: submit a tiny opposite-direction-free zero-length
-        "truncate" by clearing our continuous-feed state. Any already-queued
-        move plays out (minimum one chunk at <= 0.5s ahead of real-time).
-        For immediate-stop semantics we let the current trapezoid finish —
-        chunks are short (<=0.5s at manual_speed) so stop is near-instant.
+        We cannot abort a move in-flight on the trapq without a flush
+        (which we refuse — that's the whole point of the architecture).
+        Instead we: (a) stop submitting new chunks, (b) leave
+        `_current_move` intact so `_move_in_flight` can still report
+        accurately until the last submitted chunk plays out. For
+        emergency stops, `_disable_stepper` is called separately to
+        cut motor power on the MCU-level. Typical latency between
+        halt request and actual motor-still: one chunk (≤0.5s at
+        manual_speed) plus MCU step-queue depth (ms).
         """
         self._continuous_feed = False
-        self._current_move = None
 
     def _start_continuous_motion(self, direction, speed, max_duration_s):
         self._continuous_feed = True
@@ -1071,8 +1074,12 @@ class BufferFeeder:
 
     cmd_BUFFER_AUTO_ON_help = "Enable bang-bang auto mode"
     def cmd_BUFFER_AUTO_ON(self, gcmd):
-        if self.hall_overflow:
+        if self.hall_overflow or self._state == STATE_OVERFLOW:
             raise self._cmd_error("Cannot enable AUTO while HALL1 overflow active")
+        if self._state == STATE_JAM or self._jam_active:
+            raise self._cmd_error(
+                "Cannot enable AUTO while JAM active. Inspect and call "
+                "BUFFER_CLEAR_JAM to resume, or BUFFER_AUTO_OFF first.")
         self._enable_stepper()
         self._set_state(STATE_AUTO)
         self._respond("AUTO engaged")
@@ -1089,25 +1096,30 @@ class BufferFeeder:
         # Wait strictly for any in-flight feeder move to finish.
         # State transitions are the responsibility of the invoking
         # command (LOAD/UNLOAD phase commands transition back to IDLE
-        # themselves after calling this). OVERFLOW/JAM also trip the
-        # in-flight check because _halt_motion clears _current_move.
+        # themselves after calling this).
         while self._move_in_flight():
             eventtime = self.reactor.monotonic()
             self.reactor.pause(eventtime + 0.05)
+        # If a safety lockout tripped while we were waiting, abort the
+        # caller. The Klipper error propagates up and halts the macro,
+        # preventing subsequent phases from running.
+        self._raise_if_locked_out(gcmd)
 
     cmd_BUFFER_LOAD_PHASE1_help = "LOAD Phase 1 — feeder alone fast to toolhead. DISTANCE=mm"
     def cmd_BUFFER_LOAD_PHASE1(self, gcmd):
+        self._raise_if_locked_out(gcmd)
         distance = gcmd.get_float('DISTANCE', self.load_fast_distance, above=0.)
         speed    = gcmd.get_float('SPEED',    self.load_fast_speed,    above=0.)
         self._set_state(STATE_LOAD_PHASE_1)
         self._enable_stepper()
         self._submit_move(+distance, speed)
-        # Blocking: wait until done
+        # Blocking: wait until done. WAIT_IDLE raises on OVERFLOW/JAM.
         self.cmd_BUFFER_WAIT_IDLE(gcmd)
         self._set_state(STATE_IDLE)
 
     cmd_BUFFER_LOAD_PHASE2_help = "LOAD Phase 2 — feeder parallel to extruder. Non-blocking, use BUFFER_WAIT_IDLE"
     def cmd_BUFFER_LOAD_PHASE2(self, gcmd):
+        self._raise_if_locked_out(gcmd)
         distance = gcmd.get_float('DISTANCE', self.load_slow_distance, above=0.)
         speed    = gcmd.get_float('SPEED',    self.load_slow_speed,    above=0.)
         self._set_state(STATE_LOAD_PHASE_2)
@@ -1116,6 +1128,7 @@ class BufferFeeder:
 
     cmd_BUFFER_LOAD_PHASE3_help = "LOAD Phase 3 — feed until HALL2 or MAX_DISTANCE"
     def cmd_BUFFER_LOAD_PHASE3(self, gcmd):
+        self._raise_if_locked_out(gcmd)
         max_distance = gcmd.get_float('MAX_DISTANCE', self.load_buffer_max, above=0.)
         speed        = gcmd.get_float('SPEED',        self.feed_speed,      above=0.)
         self._load_phase3_distance = 0.0
@@ -1126,9 +1139,12 @@ class BufferFeeder:
         # Block until the tick-driven state machine exits STATE_LOAD_PHASE_3.
         while self._state == STATE_LOAD_PHASE_3:
             self.reactor.pause(self.reactor.monotonic() + 0.1)
+        # Exit reason might be normal (AUTO) or safety lockout — check.
+        self._raise_if_locked_out(gcmd)
 
     cmd_BUFFER_UNLOAD_PHASE2_help = "UNLOAD Phase 2 — feeder retract parallel to extruder"
     def cmd_BUFFER_UNLOAD_PHASE2(self, gcmd):
+        self._raise_if_locked_out(gcmd)
         distance = gcmd.get_float('DISTANCE', self.unload_sync_distance, above=0.)
         speed    = gcmd.get_float('SPEED',    self.load_slow_speed,      above=0.)
         self._set_state(STATE_UNLOAD_PHASE_2)
@@ -1137,6 +1153,7 @@ class BufferFeeder:
 
     cmd_BUFFER_UNLOAD_PHASE3_help = "UNLOAD Phase 3 — chunked retract until entrance free"
     def cmd_BUFFER_UNLOAD_PHASE3(self, gcmd):
+        self._raise_if_locked_out(gcmd)
         max_distance = gcmd.get_float('MAX_DISTANCE', self.unload_fast_max, above=0.)
         speed        = gcmd.get_float('SPEED',        self.unload_fast_speed, above=0.)
         chunk        = 50.0
@@ -1144,12 +1161,15 @@ class BufferFeeder:
         self._enable_stepper()
         retracted = 0.0
         while retracted < max_distance:
+            # Abort immediately on lockout (WAIT_IDLE also catches, but
+            # check before the next submit to avoid a race).
+            self._raise_if_locked_out(gcmd)
             if not self.entrance_detected:
                 self._respond("UNLOAD Phase 3: entrance clear after %.0f mm" % retracted)
                 break
             self._submit_move(-chunk, speed)
             retracted += chunk
-            # Wait this chunk out before next.
+            # WAIT_IDLE raises if OVERFLOW/JAM happens during this chunk.
             self.cmd_BUFFER_WAIT_IDLE(gcmd)
         else:
             self._respond("UNLOAD Phase 3: MAX_DISTANCE reached without entrance clear",
@@ -1161,8 +1181,10 @@ class BufferFeeder:
     def cmd_FORCE_BUFFER_FILL(self, gcmd):
         if not self.entrance_detected:
             raise self._cmd_error("FORCE_BUFFER_FILL aborted: no filament at entrance")
-        if self.hall_overflow:
+        if self.hall_overflow or self._state == STATE_OVERFLOW:
             raise self._cmd_error("FORCE_BUFFER_FILL aborted: HALL1 overflow active")
+        if self._state == STATE_JAM or self._jam_active:
+            raise self._cmd_error("FORCE_BUFFER_FILL aborted: JAM active. Use BUFFER_CLEAR_JAM first.")
         self._start_initial_grip(self.reactor.monotonic())
 
     cmd_STOP_BUFFER_FILL_help = "Abort any ongoing fill/grip/manual and return to IDLE"
@@ -1228,6 +1250,12 @@ class BufferFeeder:
         self._halt_motion()
         self._measure_report()
         self._measure_load_active = False
+        # Reset state: if the feeder was started via the feed-button in
+        # toggle-mode, state was MANUAL_FEED. Drop it back to IDLE (or
+        # AUTO if filament is present and no safety flags) so a
+        # subsequent MEASURE_LOAD_START doesn't fail its precondition.
+        if self._state in (STATE_MANUAL_FEED, STATE_MANUAL_RETRACT):
+            self._set_state(STATE_IDLE)
 
     def cmd_ENABLE_RUNOUT_SENSOR(self, gcmd):
         self._print_running = True
@@ -1253,6 +1281,18 @@ class BufferFeeder:
     def _cmd_error(self, msg):
         gc = self.printer.lookup_object('gcode')
         return gc.error(msg)
+
+    def _raise_if_locked_out(self, gcmd=None):
+        """Abort a caller if the feeder is in a safety lockout.
+
+        Called from blocking phase commands and from BUFFER_WAIT_IDLE so
+        that OVERFLOW / JAM events propagate out of macros as errors
+        rather than silently letting the macro run into the next phase.
+        """
+        if self._state == STATE_OVERFLOW:
+            raise self._cmd_error("BufferFeeder: HALL1 OVERFLOW active — aborting. Clear overflow, then retry.")
+        if self._state == STATE_JAM or self._jam_active:
+            raise self._cmd_error("BufferFeeder: JAM active — aborting. Use BUFFER_CLEAR_JAM after inspection.")
 
     # -----------------------------------------------------------------------
     # Status API
