@@ -233,6 +233,12 @@ class BufferFeeder:
         # ----- Cooldown timer -----
         self._cooldown_deadline = None    # reactor time after which auto re-enables
 
+        # ----- Abort signalling (set by HALT / STOP_BUFFER_FILL) -----
+        # When True, _raise_if_locked_out() raises once, then auto-clears
+        # the flag. Lets HALT propagate through any pending WAIT_IDLE
+        # so calling macros abort cleanly.
+        self._halt_requested = False
+
         # ----- Timers (created in _handle_ready) -----
         self._main_timer = None
         self._jam_timer = None
@@ -1087,13 +1093,23 @@ class BufferFeeder:
             self._set_state(target_state)
             self._start_continuous_motion(direction, speed, timeout)
 
-    cmd_BUFFER_HALT_help = "Immediately stop any feeder motion"
+    cmd_BUFFER_HALT_help = "Immediately stop any feeder motion (sticky — aborts active workflow)"
     def cmd_BUFFER_HALT(self, gcmd):
+        # Halt must be sticky across AUTO / INITIAL_GRIP / LOAD_PHASE_3
+        # (which would otherwise re-submit chunks from the tick loop)
+        # AND across any non-locked state so an ongoing LOAD_FILAMENT /
+        # UNLOAD_FILAMENT macro aborts instead of silently continuing.
         self._continuous_feed = False
         self._halt_motion()
-        self._respond("HALT")
-        if self._state in (STATE_MANUAL_FEED, STATE_MANUAL_RETRACT):
+        # Preserve safety-lockout states (OVERFLOW / JAM); any other
+        # state drops to IDLE. Our _set_state(STATE_IDLE) hook also
+        # disables the stepper.
+        if self._state not in (STATE_OVERFLOW, STATE_JAM):
             self._set_state(STATE_IDLE)
+        # Arm the abort flag so any pending WAIT_IDLE in a macro
+        # propagates the halt as a Klipper error.
+        self._halt_requested = True
+        self._respond("HALT — workflow will abort at next wait")
 
     cmd_BUFFER_AUTO_ON_help = "Enable bang-bang auto mode"
     def cmd_BUFFER_AUTO_ON(self, gcmd):
@@ -1103,6 +1119,8 @@ class BufferFeeder:
             raise self._cmd_error(
                 "Cannot enable AUTO while JAM active. Inspect and call "
                 "BUFFER_CLEAR_JAM to resume, or BUFFER_AUTO_OFF first.")
+        # Clear a pending HALT flag — user is explicitly starting fresh.
+        self._halt_requested = False
         self._enable_stepper()
         self._set_state(STATE_AUTO)
         self._respond("AUTO engaged")
@@ -1111,8 +1129,8 @@ class BufferFeeder:
     def cmd_BUFFER_AUTO_OFF(self, gcmd):
         # Full-reset semantic: AUTO_OFF is the operator's "stop
         # everything and acknowledge" lever. Clear recovery flags so
-        # the system is in a clean IDLE — no lingering JAM that would
-        # reject future commands.
+        # the system is in a clean IDLE — no lingering JAM or HALT
+        # that would reject future commands.
         self._continuous_feed = False
         self._halt_motion()
         self._jam_active = False
@@ -1120,6 +1138,7 @@ class BufferFeeder:
         self._hall3_start_time = None
         self._runout_follow_active = False
         self._runout_filament_ref = None
+        self._halt_requested = False
         self._set_state(STATE_IDLE)
         self._respond("AUTO off (all recovery flags cleared)")
 
@@ -1218,12 +1237,26 @@ class BufferFeeder:
             raise self._cmd_error("FORCE_BUFFER_FILL aborted: HALL1 overflow active")
         if self._state == STATE_JAM or self._jam_active:
             raise self._cmd_error("FORCE_BUFFER_FILL aborted: JAM active. Use BUFFER_CLEAR_JAM first.")
+        # State guard per spec §5: only valid transition from IDLE
+        # or RUNOUT into INITIAL_GRIP. Reject otherwise — accidentally
+        # re-entering while AUTO / MANUAL_* / a LOAD-UNLOAD phase is
+        # running would stomp over the active motion, and in
+        # LOAD_PHASE_3 would pop the blocking caller out of its loop
+        # into a surprise grip move.
+        if self._state not in (STATE_IDLE, STATE_RUNOUT):
+            raise self._cmd_error(
+                "FORCE_BUFFER_FILL aborted: feeder busy (state=%s). "
+                "Call STOP_BUFFER_FILL or BUFFER_AUTO_OFF first."
+                % self._state)
         self._start_initial_grip(self.reactor.monotonic())
 
     cmd_STOP_BUFFER_FILL_help = "Abort any ongoing fill/grip/manual and return to IDLE"
     def cmd_STOP_BUFFER_FILL(self, gcmd):
         # Full-reset semantic: STOP_BUFFER_FILL aborts everything and
         # clears recovery flags so we land in a clean IDLE state.
+        # Like BUFFER_HALT, this also arms _halt_requested so any
+        # macro waiting on BUFFER_WAIT_IDLE raises and aborts rather
+        # than silently continuing to the next phase.
         self._continuous_feed = False
         self._halt_motion()
         self._initial_grip_end_time = None
@@ -1234,8 +1267,9 @@ class BufferFeeder:
         self._hall3_start_time = None
         self._runout_follow_active = False
         self._runout_filament_ref = None
+        self._halt_requested = True
         self._set_state(STATE_IDLE)
-        self._respond("All feed loops stopped (all recovery flags cleared)")
+        self._respond("All feed loops stopped (workflow will abort at next wait)")
 
     cmd_BUFFER_STATE_DUMP_help = "Dump full buffer_feeder state to console"
     def cmd_BUFFER_STATE_DUMP(self, gcmd):
@@ -1311,6 +1345,7 @@ class BufferFeeder:
         self._jam_active = False
         self._hall2_start_time = None
         self._hall3_start_time = None
+        self._halt_requested = False
         self._set_state(STATE_IDLE if not self.entrance_detected else STATE_AUTO)
         self._respond("JAM cleared — state=%s" % self._state)
 
@@ -1326,9 +1361,16 @@ class BufferFeeder:
         """Abort a caller if the feeder is in a safety lockout.
 
         Called from blocking phase commands and from BUFFER_WAIT_IDLE so
-        that OVERFLOW / JAM events propagate out of macros as errors
-        rather than silently letting the macro run into the next phase.
+        that OVERFLOW / JAM / user-abort events propagate out of macros
+        as errors rather than silently letting the macro run into the
+        next phase.
+
+        _halt_requested auto-clears after raising so that the next
+        command issued by the operator starts from a clean slate.
         """
+        if self._halt_requested:
+            self._halt_requested = False
+            raise self._cmd_error("BufferFeeder: HALT requested — aborting workflow")
         if self._state == STATE_OVERFLOW:
             raise self._cmd_error("BufferFeeder: HALL1 OVERFLOW active — aborting. Clear overflow, then retry.")
         if self._state == STATE_JAM or self._jam_active:
