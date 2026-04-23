@@ -211,6 +211,7 @@ class BufferFeeder:
         self._load_phase3_target = None     # eventtime deadline for phase 3
         self._load_phase3_distance = 0.0
         self._load_phase3_max_distance = 0.0
+        self._load_phase3_speed = 0.0       # per-call feed speed in phase 3
         self._continuous_feed = False       # True = keep submitting moves while active
         self._continuous_feed_direction = 0 # +1 or -1
         self._continuous_feed_speed = 0.0
@@ -772,7 +773,7 @@ class BufferFeeder:
             return
         if not self._move_in_flight():
             chunk = 10.0
-            self._submit_move(chunk, self.feed_speed)
+            self._submit_move(chunk, self._load_phase3_speed)
             self._load_phase3_distance += chunk
 
     # -----------------------------------------------------------------------
@@ -999,6 +1000,9 @@ class BufferFeeder:
         if old in JAM_WATCH_STATES and new_state not in JAM_WATCH_STATES:
             self._hall2_start_time = None
             self._hall3_start_time = None
+        # IDLE semantic per spec/README: stopped AND disabled. Enforce.
+        if new_state == STATE_IDLE:
+            self._disable_stepper()
 
     # -----------------------------------------------------------------------
     # Helper: gcode interactions
@@ -1084,12 +1088,21 @@ class BufferFeeder:
         self._set_state(STATE_AUTO)
         self._respond("AUTO engaged")
 
-    cmd_BUFFER_AUTO_OFF_help = "Disable bang-bang auto mode"
+    cmd_BUFFER_AUTO_OFF_help = "Disable bang-bang auto mode (also clears JAM/runout-follow)"
     def cmd_BUFFER_AUTO_OFF(self, gcmd):
+        # Full-reset semantic: AUTO_OFF is the operator's "stop
+        # everything and acknowledge" lever. Clear recovery flags so
+        # the system is in a clean IDLE — no lingering JAM that would
+        # reject future commands.
         self._continuous_feed = False
         self._halt_motion()
+        self._jam_active = False
+        self._hall2_start_time = None
+        self._hall3_start_time = None
+        self._runout_follow_active = False
+        self._runout_filament_ref = None
         self._set_state(STATE_IDLE)
-        self._respond("AUTO off")
+        self._respond("AUTO off (all recovery flags cleared)")
 
     cmd_BUFFER_WAIT_IDLE_help = "Block until the feeder's current move is complete"
     def cmd_BUFFER_WAIT_IDLE(self, gcmd):
@@ -1133,6 +1146,7 @@ class BufferFeeder:
         speed        = gcmd.get_float('SPEED',        self.feed_speed,      above=0.)
         self._load_phase3_distance = 0.0
         self._load_phase3_max_distance = max_distance
+        self._load_phase3_speed = speed
         self._enable_stepper()
         self._set_state(STATE_LOAD_PHASE_3)
         self._start_continuous_motion(+1, speed, self.max_feed_time)
@@ -1146,7 +1160,7 @@ class BufferFeeder:
     def cmd_BUFFER_UNLOAD_PHASE2(self, gcmd):
         self._raise_if_locked_out(gcmd)
         distance = gcmd.get_float('DISTANCE', self.unload_sync_distance, above=0.)
-        speed    = gcmd.get_float('SPEED',    self.load_slow_speed,      above=0.)
+        speed    = gcmd.get_float('SPEED',    self.unload_fast_speed,    above=0.)
         self._set_state(STATE_UNLOAD_PHASE_2)
         self._enable_stepper()
         self._submit_move(-distance, speed)
@@ -1189,13 +1203,20 @@ class BufferFeeder:
 
     cmd_STOP_BUFFER_FILL_help = "Abort any ongoing fill/grip/manual and return to IDLE"
     def cmd_STOP_BUFFER_FILL(self, gcmd):
+        # Full-reset semantic: STOP_BUFFER_FILL aborts everything and
+        # clears recovery flags so we land in a clean IDLE state.
         self._continuous_feed = False
         self._halt_motion()
         self._initial_grip_end_time = None
         self._load_phase3_distance = 0.0
         self._measure_load_active = False
+        self._jam_active = False
+        self._hall2_start_time = None
+        self._hall3_start_time = None
+        self._runout_follow_active = False
+        self._runout_filament_ref = None
         self._set_state(STATE_IDLE)
-        self._respond("All feed loops stopped")
+        self._respond("All feed loops stopped (all recovery flags cleared)")
 
     cmd_BUFFER_STATE_DUMP_help = "Dump full buffer_feeder state to console"
     def cmd_BUFFER_STATE_DUMP(self, gcmd):
