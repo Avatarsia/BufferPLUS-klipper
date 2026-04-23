@@ -383,6 +383,24 @@ class BufferFeeder:
 
     def _on_idle_printing(self, *args):
         self._print_running = True
+        # Documented RESUME-clears-JAM path (spec §10, README §Jam).
+        # When Klipper transitions back to 'printing' (typically after
+        # a RESUME following our PAUSE-on-jam), drop the JAM lockout
+        # so the feeder resumes AUTO. HALL1 is still respected — if
+        # physical overflow is still present, we fall into OVERFLOW.
+        if self._state == STATE_JAM or self._jam_active:
+            self._respond("RESUME: clearing JAM lockout")
+            self._jam_active = False
+            self._hall2_start_time = None
+            self._hall3_start_time = None
+            if self.hall_overflow:
+                # Cannot resume while overflow physically present.
+                self._enter_overflow()
+            elif self.entrance_detected:
+                self._enable_stepper()
+                self._set_state(STATE_AUTO)
+            else:
+                self._set_state(STATE_IDLE)
 
     def _on_idle_ready(self, *args):
         self._print_running = False
@@ -659,20 +677,21 @@ class BufferFeeder:
                 self._enter_overflow()
                 return eventtime + MAIN_TICK_INTERVAL
 
-            # Feed-deadline safety (applies to any ongoing continuous feed).
+            # Hard-safety aborts route through _trigger_jam so the
+            # lockout is sticky: phase commands raise via WAIT_IDLE,
+            # and recovery requires explicit BUFFER_CLEAR_JAM /
+            # BUFFER_AUTO_OFF / STOP_BUFFER_FILL.
             if self._feed_deadline_time is not None and eventtime >= self._feed_deadline_time:
-                self._respond("Safety: max_feed_time reached — halting", force_display=True)
-                self._continuous_feed = False
-                self._halt_motion()
                 self._feed_deadline_time = None
-                self._set_state(STATE_IDLE)
+                self._trigger_jam(
+                    "SAFETY_TIMEOUT",
+                    "max_feed_time %ds reached without reaching HALL2" % int(self.max_feed_time))
 
-            if self._feed_distance_accumulator >= self.max_feed_distance:
-                self._respond("Safety: max_feed_distance reached — halting",
-                              force_display=True)
-                self._continuous_feed = False
-                self._halt_motion()
-                self._set_state(STATE_IDLE)
+            if (self._continuous_feed
+                    and self._feed_distance_accumulator >= self.max_feed_distance):
+                self._trigger_jam(
+                    "SAFETY_DISTANCE",
+                    "max_feed_distance %dmm reached in one continuous feed" % int(self.max_feed_distance))
 
             # Cooldown end: back to AUTO if entrance present.
             if self._cooldown_deadline is not None and eventtime >= self._cooldown_deadline:
