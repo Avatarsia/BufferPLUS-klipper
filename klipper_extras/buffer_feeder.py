@@ -142,22 +142,53 @@ class BufferFeeder:
         self._stepper_enable = None
 
         # ----- Sensor pin state -----
-        self._pin_raw_state     = {}   # name -> bool (raw button state True/False)
+        #
+        # Polarity convention (matches the old [gcode_button]-based config):
+        #
+        # The Mellow LLL Plus uses a single arm that swings through tilt
+        # positions based on buffer fill level. Each HALL is a photo-
+        # interrupter that is BLOCKED by the arm in its associated tilt
+        # position:
+        #   HALL3 blocked → buffer empty
+        #   HALL2 blocked → buffer full
+        #   HALL1 blocked → overflow
+        #
+        # Electrical: arm-blocked → phototransistor OFF → pullup holds
+        # pin HIGH. Klipper config uses `^!` (pullup + invert), so the
+        # Klipper button callback delivers state=False when pin is HIGH.
+        #   → arm blocked (threshold active)  ⇔  state=False
+        #   → arm not blocking (threshold idle) ⇔  state=True
+        #
+        # The extension then inverts ONCE more below (polarity_flip=True)
+        # so `hall_empty`/`hall_full`/`hall_overflow` return True when
+        # the corresponding threshold is active. This is NOT a double
+        # invert bug — the config `!` handles the PHYSICAL polarity,
+        # the Python flip handles the "button-language vs threshold-
+        # language" semantic shift.
+        #
+        # Entrance switch uses `^!` with state=True = filament present
+        # (standard filament_switch_sensor wiring).
+        # Buttons use `^!` with state=True = pressed.
+        self._pin_raw_state     = {}   # name -> bool (callback state)
         self._pin_change_time   = {}   # name -> eventtime of last raw change
-        self._pin_stable_state  = {}   # name -> debounced state
-        self._pin_polarity_flip = {    # map raw state to semantic "active"
-            'hall_empty':    True,   # semantic = not raw
-            'hall_full':     True,   # semantic = not raw
-            'hall_overflow': True,   # semantic = not raw
-            'entrance':      False,  # semantic = raw (filament present)
-            'feed_button':   False,  # semantic = raw (pressed)
-            'retract_button': False, # semantic = raw (pressed)
+        self._pin_stable_state  = {}   # name -> debounced callback state
+        self._pin_polarity_flip = {    # if True: semantic = not state
+            'hall_empty':    True,   # HALL3 arm-blocked → state=False → semantic True
+            'hall_full':     True,   # HALL2 arm-blocked → state=False → semantic True
+            'hall_overflow': True,   # HALL1 arm-blocked → state=False → semantic True
+            'entrance':      False,  # state=True already = filament present
+            'feed_button':   False,  # state=True already = pressed
+            'retract_button': False, # state=True already = pressed
         }
-        # Initial raw state assumption: all inactive (buttons un-pressed, no filament)
-        for name in self._pin_polarity_flip:
-            self._pin_raw_state[name] = False
+        # Initial raw state must correspond to "semantic inactive" so that
+        # OVERFLOW doesn't trigger at boot before the first real callback.
+        # For polarity_flip=True (HALLs): semantic = not raw → idle raw=True
+        # For polarity_flip=False (entrance/buttons): semantic = raw → idle raw=False
+        for name, flip in self._pin_polarity_flip.items():
+            idle_raw = True if flip else False
+            self._pin_raw_state[name] = idle_raw
             self._pin_change_time[name] = 0.0
-            self._pin_stable_state[name] = False
+            self._pin_stable_state[name] = idle_raw
 
         # ----- Register pins via buttons module -----
         buttons = self.printer.load_object(config, 'buttons')
@@ -179,6 +210,7 @@ class BufferFeeder:
         self._initial_grip_end_time = None
         self._load_phase3_target = None     # eventtime deadline for phase 3
         self._load_phase3_distance = 0.0
+        self._load_phase3_max_distance = 0.0
         self._continuous_feed = False       # True = keep submitting moves while active
         self._continuous_feed_direction = 0 # +1 or -1
         self._continuous_feed_speed = 0.0
@@ -195,6 +227,7 @@ class BufferFeeder:
 
         # ----- Runout follow state -----
         self._runout_filament_ref = None
+        self._runout_follow_active = False
 
         # ----- Cooldown timer -----
         self._cooldown_deadline = None    # reactor time after which auto re-enables
@@ -449,6 +482,11 @@ class BufferFeeder:
 
     def _on_entrance_insert(self, eventtime):
         self._respond("Filament at entrance detected")
+        # If we were mid-runout-follow (externer Sensor-Modus), abbrechen.
+        if self._runout_follow_active:
+            self._runout_follow_active = False
+            self._runout_filament_ref = None
+            self._respond("Runout-follow cancelled (filament re-inserted)")
         # Only trigger initial grip if we're in a state that welcomes it.
         if self._state in (STATE_IDLE, STATE_RUNOUT):
             self._start_initial_grip(eventtime)
@@ -480,14 +518,19 @@ class BufferFeeder:
             self._set_state(STATE_RUNOUT)
             self._gcode_run_script("PAUSE")
         else:
-            self._respond("Runout — external sensor mode, 100mm follow + stepper off")
-            # Record filament_used reference, bang-bang keeps running until we reach ref+100mm.
+            # runout_pause=0: externer Sensor übernimmt PAUSE. Wir lassen
+            # Bang-Bang in AUTO weiterlaufen (Feeder fördert noch den
+            # Rest-Weg hinterher), aber zählen die Extruder-Distanz
+            # mit. Nach runout_follow_mm Extrusion → Stepper aus.
+            # State bleibt wie er ist (typisch AUTO); _runout_follow_active
+            # Flag steuert die Distanz-Überwachung in _main_tick.
+            self._respond("Runout — external sensor mode, %dmm follow" % int(self.runout_follow_mm))
             try:
                 ps = self.printer.lookup_object('print_stats')
                 self._runout_filament_ref = ps.get_status(eventtime).get('filament_used', 0.0)
             except Exception:
                 self._runout_filament_ref = 0.0
-            self._set_state(STATE_RUNOUT)
+            self._runout_follow_active = True
 
     # -----------------------------------------------------------------------
     # Button events
@@ -655,8 +698,9 @@ class BufferFeeder:
             if self._state == STATE_AUTO:
                 self._bang_bang_tick(eventtime)
 
-            # RUNOUT follow (runout_pause=0 mode): track extruder delta, disable at 100mm.
-            if self._state == STATE_RUNOUT and self._runout_filament_ref is not None:
+            # RUNOUT follow (runout_pause=0 mode): bang-bang keeps
+            # running in AUTO; we just track extruder distance here.
+            if self._runout_follow_active and self._runout_filament_ref is not None:
                 try:
                     ps = self.printer.lookup_object('print_stats')
                     cur = ps.get_status(eventtime).get('filament_used', 0.0)
@@ -667,6 +711,7 @@ class BufferFeeder:
                         self._halt_motion()
                         self._disable_stepper()
                         self._runout_filament_ref = None
+                        self._runout_follow_active = False
                         self._set_state(STATE_IDLE)
                 except Exception:
                     pass
@@ -674,6 +719,14 @@ class BufferFeeder:
             # LOAD Phase 3 — feed until HALL2 or max distance.
             if self._state == STATE_LOAD_PHASE_3:
                 self._load_phase3_tick(eventtime)
+
+            # Auto-return to IDLE after non-blocking phase moves end.
+            # LOAD_PHASE_1 is synchronous and transitions itself.
+            # LOAD/UNLOAD_PHASE_2 are non-blocking: the macro calls
+            # BUFFER_WAIT_IDLE (which just waits on move_in_flight),
+            # and main_tick finalizes the state here.
+            if self._state in (STATE_LOAD_PHASE_2, STATE_UNLOAD_PHASE_2) and not self._move_in_flight():
+                self._set_state(STATE_IDLE)
 
             # Continuous feed: keep chunks streaming.
             if self._continuous_feed and not self._move_in_flight():
@@ -705,13 +758,12 @@ class BufferFeeder:
 
     def _load_phase3_tick(self, eventtime):
         if self.hall_full:
-            # Voll erreicht — Phase 3 beendet.
             self._continuous_feed = False
             self._halt_motion()
             self._respond("LOAD Phase 3: HALL2 reached, buffer full")
             self._set_state(STATE_AUTO)
             return
-        if self._load_phase3_distance >= self.load_buffer_max:
+        if self._load_phase3_distance >= self._load_phase3_max_distance:
             self._continuous_feed = False
             self._halt_motion()
             self._respond("LOAD Phase 3: max_distance reached without HALL2 — check sensor",
@@ -1032,15 +1084,15 @@ class BufferFeeder:
         self._set_state(STATE_IDLE)
         self._respond("AUTO off")
 
-    cmd_BUFFER_WAIT_IDLE_help = "Block until feeder is IDLE/AUTO and no move in flight"
+    cmd_BUFFER_WAIT_IDLE_help = "Block until the feeder's current move is complete"
     def cmd_BUFFER_WAIT_IDLE(self, gcmd):
-        # Busy-wait via reactor pause_seconds (small slices).
-        while True:
+        # Wait strictly for any in-flight feeder move to finish.
+        # State transitions are the responsibility of the invoking
+        # command (LOAD/UNLOAD phase commands transition back to IDLE
+        # themselves after calling this). OVERFLOW/JAM also trip the
+        # in-flight check because _halt_motion clears _current_move.
+        while self._move_in_flight():
             eventtime = self.reactor.monotonic()
-            if self._state in (STATE_IDLE, STATE_AUTO, STATE_OVERFLOW, STATE_JAM, STATE_RUNOUT):
-                if not self._move_in_flight():
-                    break
-            # Let reactor run for 50ms before re-check.
             self.reactor.pause(eventtime + 0.05)
 
     cmd_BUFFER_LOAD_PHASE1_help = "LOAD Phase 1 — feeder alone fast to toolhead. DISTANCE=mm"
@@ -1066,16 +1118,14 @@ class BufferFeeder:
     def cmd_BUFFER_LOAD_PHASE3(self, gcmd):
         max_distance = gcmd.get_float('MAX_DISTANCE', self.load_buffer_max, above=0.)
         speed        = gcmd.get_float('SPEED',        self.feed_speed,      above=0.)
-        self._set_state(STATE_LOAD_PHASE_3)
-        self._enable_stepper()
         self._load_phase3_distance = 0.0
+        self._load_phase3_max_distance = max_distance
+        self._enable_stepper()
+        self._set_state(STATE_LOAD_PHASE_3)
         self._start_continuous_motion(+1, speed, self.max_feed_time)
-        # Block until phase ends.
+        # Block until the tick-driven state machine exits STATE_LOAD_PHASE_3.
         while self._state == STATE_LOAD_PHASE_3:
-            eventtime = self.reactor.monotonic()
-            self.reactor.pause(eventtime + 0.1)
-            if self._load_phase3_distance >= max_distance:
-                break
+            self.reactor.pause(self.reactor.monotonic() + 0.1)
 
     cmd_BUFFER_UNLOAD_PHASE2_help = "UNLOAD Phase 2 — feeder retract parallel to extruder"
     def cmd_BUFFER_UNLOAD_PHASE2(self, gcmd):
@@ -1210,6 +1260,7 @@ class BufferFeeder:
 
     def get_status(self, eventtime):
         return {
+            # Live state
             'state':                    self._state,
             'hall_empty':               self.hall_empty,
             'hall_full':                self.hall_full,
@@ -1224,8 +1275,22 @@ class BufferFeeder:
             'commanded_pos_mm':         self._commanded_pos,
             'print_running':            self._print_running,
             'jam_active':               self._jam_active,
+            'runout_follow_active':     self._runout_follow_active,
             'measure_load_active':      self._measure_load_active,
             'measure_load_distance_mm': self._measure_load_distance,
+            # Config values (exposed so LOAD/UNLOAD macros don't hardcode)
+            'feed_speed':               self.feed_speed,
+            'manual_speed':             self.manual_speed,
+            'load_fast_speed':          self.load_fast_speed,
+            'load_slow_speed':          self.load_slow_speed,
+            'unload_fast_speed':        self.unload_fast_speed,
+            'load_fast_distance':       self.load_fast_distance,
+            'load_slow_distance':       self.load_slow_distance,
+            'load_buffer_max':          self.load_buffer_max,
+            'unload_sync_distance':     self.unload_sync_distance,
+            'unload_fast_max':          self.unload_fast_max,
+            'min_temp':                 self.min_temp,
+            'accel':                    self.accel,
         }
 
 
