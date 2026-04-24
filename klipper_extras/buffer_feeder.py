@@ -164,6 +164,15 @@ class BufferFeeder:
         self._feed_distance_accumulator = 0.0  # for safety max_feed_distance
         self._feed_start_time = None       # reactor time when continuous feed started
         self._accumulated_feed_distance = 0.0  # lifetime counter
+        # stepcompress for a stepper starts with last_step_clock=0 and stays
+        # there until the first step. On a printer that idles for long
+        # enough (>~17s — Klipper's CLOCK_DIFF_MAX), the first step's clock
+        # exceeds uint32_t and stepcompress emits an invalid queue_step
+        # ("stepcompress o=X i=... c=... a=...: Invalid sequence" → MCU
+        # shutdown). Prime the stepper once before the first real move by
+        # calling stepper.set_position — same pattern force_move.manual_move
+        # uses. Flag gates it so we do it exactly once.
+        self._stepcompress_primed = False
 
         # Stepper enable handle (resolved at connect)
         self._stepper_enable = None
@@ -470,14 +479,13 @@ class BufferFeeder:
             logging.exception("buffer_feeder: could not register idle events")
 
     def _handle_ready(self):
-        # Populate "last_move_end_time" based on current MCU print_time.
-        # (set_position is intentionally NOT called here — PrinterStepper
-        # defaults to position 0, and calling set_position on a stepper
-        # whose trapq has never been fed can cause unexpected step
-        # scheduling.)
-        mcu = self.stepper.get_mcu()
-        now_pt = mcu.estimated_print_time(self.reactor.monotonic())
-        self._last_move_end_time = now_pt + self.lead_time
+        # Anchor _last_move_end_time to the toolhead's current print_time
+        # rather than mcu.estimated_print_time. The two diverge after
+        # long idle periods, and our submissions must live in the same
+        # print-time space that stepcompress anchors against (which
+        # only advances via toolhead-driven flushes).
+        toolhead = self.printer.lookup_object('toolhead')
+        self._last_move_end_time = toolhead.get_last_move_time() + self.lead_time
 
         # Stay in STATE_INIT during startup grace. Bang-bang, insert
         # handling and OVERFLOW transitions are all gated on the grace
@@ -1314,11 +1322,34 @@ class BufferFeeder:
 
     def _submit_single_trapezoid(self, signed_distance, speed):
         """Append one trapezoid to our trapq. Low-level primitive."""
+        # Prime stepcompress on the very first submission. Without
+        # this, last_step_clock=0 and the first step (after minutes
+        # or hours of idle) sits at clock N×10⁹, which exceeds
+        # CLOCK_DIFF_MAX → stepcompress returns an invalid
+        # queue_step → MCU shutdown. set_position anchors itersolve's
+        # position state to (0,0,0); toolhead.get_last_move_time()
+        # below ties our t0 to print-time that the MCU's step-gen
+        # cursor can actually track.
+        if not self._stepcompress_primed:
+            self.stepper.set_position((0., 0., 0.))
+            self._commanded_pos = 0.0
+            self._stepcompress_primed = True
+
         self._enable_stepper()
 
-        mcu = self.stepper.get_mcu()
-        now_pt = mcu.estimated_print_time(self.reactor.monotonic())
-        t0 = max(now_pt + self.lead_time, self._last_move_end_time)
+        # Time base = toolhead.get_last_move_time(), NOT
+        # mcu.estimated_print_time(reactor.monotonic()). The latter
+        # drifts away from toolhead print_time during long idle
+        # periods; submitting at t0 = est_print_time + lead would
+        # land at a clock the MCU's step-gen cursor has no baseline
+        # for, producing an "Invalid sequence" (see 2026-04-24 log).
+        # get_last_move_time flushes only the lookahead planner —
+        # it does NOT drain the MCU step queue, so it is cheap
+        # enough to call from bang-bang/streaming paths during an
+        # active print. This mirrors manual_stepper/force_move.
+        toolhead = self.printer.lookup_object('toolhead')
+        th_time = toolhead.get_last_move_time()
+        t0 = max(th_time + self.lead_time, self._last_move_end_time)
 
         distance = abs(signed_distance)
         direction = 1.0 if signed_distance > 0 else -1.0
