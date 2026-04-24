@@ -180,8 +180,8 @@ in der Konsole oder aus Macros aufgerufen werden.
 | `BUFFER_FEED DISTANCE=<mm> SPEED=<mm/s>` | Feeder vorwärts. Ohne DISTANCE: Dauerlauf bis `BUFFER_HALT`. |
 | `BUFFER_RETRACT DISTANCE=<mm> SPEED=<mm/s>` | Feeder rückwärts. |
 | `BUFFER_HALT` | Sofort stoppen. |
-| `BUFFER_AUTO_ON` | Bang-Bang aktivieren. |
-| `BUFFER_AUTO_OFF` | Bang-Bang aus, State → IDLE. |
+| `BUFFER_AUTO_ON` | Bang-Bang aktivieren. Verweigert sich während Druck-PAUSE (`bang_bang_suspended=True`) — zuerst RESUME oder AUTO_OFF ausführen. |
+| `BUFFER_AUTO_OFF` | Bang-Bang aus, State → IDLE. Full-Reset inkl. `bang_bang_suspended`-Clear (Operator-Override, falls RESUME nie kommt). Armt `halt_requested` → wartende Macros abortiert. Setzt `auto_off_by_user` → Reinsert triggert keinen automatischen Grip mehr. |
 | `BUFFER_WAIT_IDLE` | Blockt bis Move fertig **und** State nicht mehr in einer LOAD/UNLOAD/GRIP-Phase. Raised auf OVERFLOW/JAM/HALT. |
 | `BUFFER_STATE_DUMP` | Vollständigen State (inkl. Recovery-Flags) in Konsole. |
 | `BUFFER_CLEAR_JAM` | Nach Jam-Event und Operator-Check: State → AUTO (falls entrance) oder IDLE (sonst). Während pausiertem Druck bleibt Bang-Bang suspended bis RESUME. |

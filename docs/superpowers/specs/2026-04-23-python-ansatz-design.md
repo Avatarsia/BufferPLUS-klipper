@@ -329,8 +329,18 @@ run_current: 0.450
   Overflow, dann den State.
 - **Druck-Pause** (vom Macro oder Jam-Action) pausiert Bang-Bang via
   `_bang_bang_suspended`-Flag. Flag wird auf `idle_timeout:ready/idle`
-  armiert (wenn vorher `_print_running=True`) und auf `idle_timeout:printing`
-  wieder gelöst. RESUME clearet zusätzlich einen aktiven JAM-Lockout.
+  armiert (wenn vorher `_print_running=True`) und regulär auf
+  `idle_timeout:printing` (RESUME / neuer Druck) wieder gelöst.
+  RESUME clearet zusätzlich einen aktiven JAM-Lockout.
+
+  **Operator-Override:** `BUFFER_AUTO_OFF` und `STOP_BUFFER_FILL`
+  clearen das Flag ebenfalls — gedacht als Notausgang, wenn ein
+  `idle_timeout:printing` nie kommt (z.B. Druck wurde extern
+  abgebrochen). Gleichzeitig setzen sie `_auto_off_by_user=True`,
+  sodass ein reiner Filament-Reinsert nicht trotzdem still AUTO
+  re-engagieren kann. `BUFFER_AUTO_ON` **weigert sich** solange
+  `_bang_bang_suspended=True` ist — der Operator muss RESUME oder
+  explizit AUTO_OFF durchlaufen.
 - **Manuelle Taster** haben Vorrang vor AUTO, aber nicht über LOAD/UNLOAD. Während
   LOAD/UNLOAD sind Taster gesperrt (M118 Warnung).
 

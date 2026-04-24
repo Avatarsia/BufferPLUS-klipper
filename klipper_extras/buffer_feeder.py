@@ -357,6 +357,9 @@ class BufferFeeder:
         gcode.register_command('BUFFER_CLEAR_JAM',
                                self.cmd_BUFFER_CLEAR_JAM,
                                desc="Clear JAM state after operator intervention")
+        gcode.register_command('BUFFER_RESTORE_STATE',
+                               self.cmd_BUFFER_RESTORE_STATE,
+                               desc="Best-effort restore of gcode-state saved by a failed LOAD/UNLOAD")
 
         logging.info("buffer_feeder '%s' initialised", self.name)
 
@@ -558,10 +561,15 @@ class BufferFeeder:
         if self._state != STATE_OVERFLOW:
             return
         self._respond("HALL1 cleared — overflow lockout released")
-        # Go to IDLE; user can call BUFFER_AUTO_ON or trigger via entrance re-insert.
+        # Go to IDLE first (the _set_state hook disables the stepper).
         self._set_state(STATE_IDLE)
-        if self.entrance_detected:
-            # Re-arm bang-bang if filament is there.
+        # Re-arm bang-bang ONLY if filament is there AND the operator
+        # hasn't taken manual control (via AUTO_OFF) AND the printer
+        # isn't paused. A simple HALL1-clear event must not silently
+        # override a prior operator AUTO_OFF or a print-PAUSE suspension.
+        if (self.entrance_detected
+                and not self._auto_off_by_user
+                and not self._bang_bang_suspended):
             self._enable_stepper()
             self._set_state(STATE_AUTO)
 
@@ -755,6 +763,23 @@ class BufferFeeder:
     # Initial grip phase
     # -----------------------------------------------------------------------
 
+    def _estimate_sequence_duration(self, distance, speed):
+        """Upper-bound wall-time for an async-streamed distance.
+
+        Each chunk in the streamer does accel → cruise → decel to 0,
+        so the true chunk time is `2*accel_time + cruise_time`, not
+        just `chunk_dist/speed`. Summing across all chunks yields a
+        per-move overhead of `chunks * 2 * accel_time`. Returning
+        this upper bound ensures callers that set a state-deadline
+        (INITIAL_GRIP, cooldown) don't flip out of the phase while
+        the final chunk is still playing.
+        """
+        if speed <= 0 or distance <= 0:
+            return 0.0
+        accel_time = speed / self.accel
+        chunks = int(math.ceil(distance / self.max_move_chunk_mm))
+        return distance / speed + chunks * 2.0 * accel_time
+
     def _start_initial_grip(self, eventtime):
         self._enable_stepper()
         self._set_state(STATE_INITIAL_GRIP)
@@ -762,15 +787,16 @@ class BufferFeeder:
         self._respond("Initial grip: %.0f mm @ %.0f mm/s"
                       % (distance, self.grip_speed))
         # Compute the full logical end time BEFORE submit — submit is
-        # now async and streams only the first chunk, so relying on
-        # _last_move_end_time would yield only chunk-1 end (~1s),
-        # causing INITIAL_GRIP to exit after the first chunk with the
-        # grip sequence still streaming under a different state.
+        # async and streams only the first chunk, so relying on
+        # _last_move_end_time would yield only chunk-1 end (~1s).
+        # Use the sequence-duration estimator which includes per-chunk
+        # accel/decel overhead.
         mcu = self.stepper.get_mcu()
         now_pt = mcu.estimated_print_time(self.reactor.monotonic())
         self._initial_grip_end_time = (now_pt
                                        + self.lead_time
-                                       + distance / self.grip_speed)
+                                       + self._estimate_sequence_duration(
+                                           distance, self.grip_speed))
         self._submit_move(distance, self.grip_speed)
 
     # -----------------------------------------------------------------------
@@ -1206,10 +1232,11 @@ class BufferFeeder:
         if cooldown is None:
             cooldown = self.reenable_cooldown
         # Account for BOTH the already-queued trapezoid and any
-        # pending chunks still to be streamed. Without the pending
-        # term, long manual/burst moves (triple-burst default 1300mm)
-        # would see the cooldown fire mid-streaming and the state
-        # would flip to AUTO/IDLE while motion is still active.
+        # pending chunks still to be streamed. Use the sequence
+        # estimator for the pending part so per-chunk accel/decel
+        # overhead is included — otherwise long manual/burst moves
+        # would see the cooldown fire ~1.3s before the last chunk
+        # finishes (1300mm burst at 50mm/s over 26 chunks).
         delay = 0.1 + cooldown
         if self._current_move is not None:
             mcu = self.stepper.get_mcu()
@@ -1217,7 +1244,8 @@ class BufferFeeder:
             remaining_current = max(0.0, self._current_move['end_time'] - now_pt)
             remaining_pending = 0.0
             if self._pending_remaining_mm > 0 and self._pending_speed > 0:
-                remaining_pending = self._pending_remaining_mm / self._pending_speed
+                remaining_pending = self._estimate_sequence_duration(
+                    self._pending_remaining_mm, self._pending_speed)
             delay = remaining_current + remaining_pending + cooldown
         self._cooldown_deadline = self.reactor.monotonic() + delay
 
@@ -1397,6 +1425,10 @@ class BufferFeeder:
         self._auto_off_by_user = True      # but reinsert auto-grip stays blocked
         self._halt_requested = True
         self._set_state(STATE_IDLE)
+        # Best-effort restore of any pending LOAD/UNLOAD gcode-state
+        # (E-mode etc.) so AUTO_OFF cleanly recovers after a failed
+        # LOAD/UNLOAD that couldn't reach its _RESTORE_E_MODE.
+        self._try_restore_gcode_state()
         self._respond("AUTO off — workflow will abort at next wait; recovery flags cleared")
 
     def _abort_signalled(self):
@@ -1657,6 +1689,8 @@ class BufferFeeder:
         self._auto_off_by_user = True
         self._halt_requested = True
         self._set_state(STATE_IDLE)
+        # Best-effort gcode-state restore after a failed LOAD/UNLOAD.
+        self._try_restore_gcode_state()
         self._respond("All feed loops stopped (workflow will abort at next wait)")
 
     cmd_BUFFER_STATE_DUMP_help = "Dump full buffer_feeder state to console"
@@ -1739,6 +1773,27 @@ class BufferFeeder:
     def cmd_DISABLE_RUNOUT_SENSOR(self, gcmd):
         self._print_running = False
         self._respond("print_running=0 (runout PAUSE suppressed)")
+
+    def _try_restore_gcode_state(self):
+        """Best-effort: restore the 'buffer_feeder_op' gcode state if
+        a LOAD/UNLOAD macro saved one. Idempotent — a missing save
+        is silently ignored. Called from cleanup paths (AUTO_OFF,
+        STOP_BUFFER_FILL, BUFFER_RESTORE_STATE)."""
+        try:
+            gcode_move = self.printer.lookup_object('gcode_move', None)
+            saved_states = getattr(gcode_move, 'saved_states', None) if gcode_move else None
+            if saved_states and 'buffer_feeder_op' in saved_states:
+                self._gcode_run_script("RESTORE_GCODE_STATE NAME=buffer_feeder_op MOVE=0")
+                return True
+        except Exception:
+            logging.exception("buffer_feeder: gcode-state restore failed")
+        return False
+
+    def cmd_BUFFER_RESTORE_STATE(self, gcmd):
+        if self._try_restore_gcode_state():
+            self._respond("Restored gcode-state from 'buffer_feeder_op'")
+        else:
+            self._respond("No 'buffer_feeder_op' gcode-state to restore")
 
     def cmd_BUFFER_CLEAR_JAM(self, gcmd):
         if self._state != STATE_JAM:
