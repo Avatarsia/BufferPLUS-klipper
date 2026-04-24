@@ -365,6 +365,7 @@ Alle mit `cmd_<NAME>` als Methoden der `BufferFeeder`-Klasse.
 | `BUFFER_UNLOAD_PHASE2` | `DISTANCE=<mm>` `SPEED=<mm/s>` | Non-blocking, analog PHASE2. |
 | `BUFFER_UNLOAD_PHASE3` | `MAX_DISTANCE=<mm>` | Chunked retract bis entrance frei, max MAX_DISTANCE. |
 | `BUFFER_WAIT_IDLE` | — | Blockiert bis Extension kein Busy-Phase-State mehr hat **und** kein Move in flight ist. Raised auf OVERFLOW/JAM/HALT. Early-exit bei Abort-Signal. |
+| `BUFFER_RESTORE_STATE` | — | Best-Effort-Restore des `SAVE_GCODE_STATE NAME=buffer_feeder_op` Saves, falls vorhanden. No-op sonst. Für Manual-Recovery nach abgebrochener LOAD/UNLOAD-Macro. |
 | `FORCE_BUFFER_FILL` | — | State → INITIAL_GRIP, startet Initial-Fill-Sequenz. |
 | `STOP_BUFFER_FILL` | — | State → IDLE, bricht alles ab. |
 | `BUFFER_STATE_DUMP` | — | M118 mit vollständigem State. |

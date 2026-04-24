@@ -184,7 +184,8 @@ in der Konsole oder aus Macros aufgerufen werden.
 | `BUFFER_AUTO_OFF` | Bang-Bang aus, State → IDLE. Full-Reset inkl. `bang_bang_suspended`-Clear (Operator-Override, falls RESUME nie kommt). Armt `halt_requested` → wartende Macros abortiert. Setzt `auto_off_by_user` → Reinsert triggert keinen automatischen Grip mehr. |
 | `BUFFER_WAIT_IDLE` | Blockt bis Move fertig **und** State nicht mehr in einer LOAD/UNLOAD/GRIP-Phase. Raised auf OVERFLOW/JAM/HALT. |
 | `BUFFER_STATE_DUMP` | Vollständigen State (inkl. Recovery-Flags) in Konsole. |
-| `BUFFER_CLEAR_JAM` | Nach Jam-Event und Operator-Check: State → AUTO (falls entrance) oder IDLE (sonst). Während pausiertem Druck bleibt Bang-Bang suspended bis RESUME. |
+| `BUFFER_CLEAR_JAM` | Nach Jam-Event und Operator-Check: State → AUTO (falls entrance) oder IDLE (sonst). Restauriert GCode-State (E-Mode) aus failed LOAD/UNLOAD. Während pausiertem Druck bleibt Bang-Bang suspended bis RESUME. |
+| `BUFFER_RESTORE_STATE` | Best-Effort GCode-State-Restore nach einem abgebrochenen LOAD_FILAMENT / UNLOAD_FILAMENT. Restauriert den bei `_SAVE_E_MODE` gespeicherten E-Mode. No-op wenn kein Save existiert. |
 
 ### LOAD/UNLOAD — Phasen-Primitive
 

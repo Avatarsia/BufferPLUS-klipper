@@ -563,13 +563,16 @@ class BufferFeeder:
         self._respond("HALL1 cleared — overflow lockout released")
         # Go to IDLE first (the _set_state hook disables the stepper).
         self._set_state(STATE_IDLE)
-        # Re-arm bang-bang ONLY if filament is there AND the operator
-        # hasn't taken manual control (via AUTO_OFF) AND the printer
-        # isn't paused. A simple HALL1-clear event must not silently
-        # override a prior operator AUTO_OFF or a print-PAUSE suspension.
+        # Re-arm bang-bang ONLY if filament is there AND no operator-
+        # control flag is active:
+        #   - _auto_off_by_user: operator explicitly disabled AUTO
+        #   - _bang_bang_suspended: print is paused
+        #   - _halt_requested: operator issued HALT/STOP_BUFFER_FILL
+        # A simple HALL1-clear must not silently override any of these.
         if (self.entrance_detected
                 and not self._auto_off_by_user
-                and not self._bang_bang_suspended):
+                and not self._bang_bang_suspended
+                and not self._halt_requested):
             self._enable_stepper()
             self._set_state(STATE_AUTO)
 
@@ -786,18 +789,17 @@ class BufferFeeder:
         distance = self.grip_speed * self.grip_duration
         self._respond("Initial grip: %.0f mm @ %.0f mm/s"
                       % (distance, self.grip_speed))
-        # Compute the full logical end time BEFORE submit — submit is
-        # async and streams only the first chunk, so relying on
-        # _last_move_end_time would yield only chunk-1 end (~1s).
-        # Use the sequence-duration estimator which includes per-chunk
-        # accel/decel overhead.
-        mcu = self.stepper.get_mcu()
-        now_pt = mcu.estimated_print_time(self.reactor.monotonic())
-        self._initial_grip_end_time = (now_pt
-                                       + self.lead_time
-                                       + self._estimate_sequence_duration(
-                                           distance, self.grip_speed))
+        # Submit first, then compute end_time from the ACTUAL queued
+        # chunk's end plus the pending-stream remainder. This accounts
+        # for the case where _last_move_end_time was in the future
+        # from a prior aborted move (trapq can't overwrite; new move
+        # starts at max(now+lead, _last_move_end_time)).
         self._submit_move(distance, self.grip_speed)
+        pending_duration = 0.0
+        if self._pending_remaining_mm > 0 and self._pending_speed > 0:
+            pending_duration = self._estimate_sequence_duration(
+                self._pending_remaining_mm, self._pending_speed)
+        self._initial_grip_end_time = self._last_move_end_time + pending_duration
 
     # -----------------------------------------------------------------------
     # Main tick — sensor debounce + bang-bang + state progression
@@ -1660,6 +1662,13 @@ class BufferFeeder:
                 "FORCE_BUFFER_FILL aborted: feeder busy (state=%s). "
                 "Call STOP_BUFFER_FILL or BUFFER_AUTO_OFF first."
                 % self._state)
+        # Operator explicitly invoked the fill — clear any stale HALT.
+        self._halt_requested = False
+        # Wait for any lingering in-flight chunk from a prior aborted
+        # move to drain. Otherwise the initial-grip's end_time would
+        # undershoot by the old chunk's remaining trapq duration
+        # (since _halt_motion leaves _last_move_end_time intact).
+        self._wait_for_move_done(gcmd)
         self._start_initial_grip(self.reactor.monotonic())
 
     cmd_STOP_BUFFER_FILL_help = "Abort any ongoing fill/grip/manual and return to IDLE"
@@ -1802,6 +1811,11 @@ class BufferFeeder:
         self._hall2_start_time = None
         self._hall3_start_time = None
         self._halt_requested = False
+        # Best-effort restore of any LOAD/UNLOAD gcode-state that was
+        # saved before the jam fired. Otherwise the operator would
+        # end up back in AUTO with the E-mode still flipped to M83
+        # from the failed macro.
+        self._try_restore_gcode_state()
         self._set_state(STATE_IDLE if not self.entrance_detected else STATE_AUTO)
         self._respond("JAM cleared — state=%s" % self._state)
 
