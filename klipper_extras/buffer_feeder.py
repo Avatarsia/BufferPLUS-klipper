@@ -761,9 +761,17 @@ class BufferFeeder:
         distance = self.grip_speed * self.grip_duration
         self._respond("Initial grip: %.0f mm @ %.0f mm/s"
                       % (distance, self.grip_speed))
+        # Compute the full logical end time BEFORE submit — submit is
+        # now async and streams only the first chunk, so relying on
+        # _last_move_end_time would yield only chunk-1 end (~1s),
+        # causing INITIAL_GRIP to exit after the first chunk with the
+        # grip sequence still streaming under a different state.
+        mcu = self.stepper.get_mcu()
+        now_pt = mcu.estimated_print_time(self.reactor.monotonic())
+        self._initial_grip_end_time = (now_pt
+                                       + self.lead_time
+                                       + distance / self.grip_speed)
         self._submit_move(distance, self.grip_speed)
-        # When move ends, main tick will transition to AUTO.
-        self._initial_grip_end_time = self._last_move_end_time
 
     # -----------------------------------------------------------------------
     # Main tick — sensor debounce + bang-bang + state progression
@@ -860,9 +868,14 @@ class BufferFeeder:
             # Auto-return to IDLE after non-blocking phase moves end.
             # LOAD_PHASE_1 is synchronous and transitions itself.
             # LOAD/UNLOAD_PHASE_2 are non-blocking: the macro calls
-            # BUFFER_WAIT_IDLE (which just waits on move_in_flight),
-            # and main_tick finalizes the state here.
-            if self._state in (STATE_LOAD_PHASE_2, STATE_UNLOAD_PHASE_2) and not self._move_in_flight():
+            # BUFFER_WAIT_IDLE and main_tick finalizes the state here.
+            # Must wait for BOTH in-flight trapezoid AND pending-stream
+            # to drain — with 180mm Phase 2 / 50mm chunks, the default
+            # case streams 3-4 chunks; finalizing after the first one
+            # releases the state mid-move.
+            if (self._state in (STATE_LOAD_PHASE_2, STATE_UNLOAD_PHASE_2)
+                    and not self._move_in_flight()
+                    and self._pending_remaining_mm <= 0):
                 self._set_state(STATE_IDLE)
 
             # Continuous feed: keep chunks streaming, but only in
@@ -1159,9 +1172,14 @@ class BufferFeeder:
         `_current_move` intact so `_move_in_flight` can still report
         accurately until the last submitted chunk plays out. For
         emergency stops, `_disable_stepper` is called separately to
-        cut motor power on the MCU-level. Typical latency between
-        halt request and actual motor-still: one chunk (≤0.5s at
-        manual_speed) plus MCU step-queue depth (ms).
+        cut motor power on the MCU-level.
+
+        Clears `_pending_remaining_mm` so a long async-streamed move
+        stops the moment halt_motion is called. Without this clear,
+        OVERFLOW / JAM would suspend streaming only as long as
+        _abort_signalled() returned True — a subsequent AUTO_ON or
+        HALL1-release would re-enable streaming of the leftover
+        distance mid-recovery.
 
         Also clears `_feed_deadline_time` so a deadline that was
         armed for a since-finished continuous feed does not later
@@ -1170,6 +1188,7 @@ class BufferFeeder:
         self._continuous_feed = False
         self._continuous_feed_direction = 0
         self._continuous_feed_speed = 0.0
+        self._pending_remaining_mm = 0.0
         self._feed_deadline_time = None
 
     def _start_continuous_motion(self, direction, speed, max_duration_s):
@@ -1186,14 +1205,20 @@ class BufferFeeder:
     def _schedule_return_to_auto_after_move(self, cooldown=None):
         if cooldown is None:
             cooldown = self.reenable_cooldown
-        # Use reactor-time-based cooldown starting after current move's end.
-        # Approximation: now + move-duration + cooldown.
+        # Account for BOTH the already-queued trapezoid and any
+        # pending chunks still to be streamed. Without the pending
+        # term, long manual/burst moves (triple-burst default 1300mm)
+        # would see the cooldown fire mid-streaming and the state
+        # would flip to AUTO/IDLE while motion is still active.
         delay = 0.1 + cooldown
         if self._current_move is not None:
             mcu = self.stepper.get_mcu()
             now_pt = mcu.estimated_print_time(self.reactor.monotonic())
-            remaining = max(0.0, self._current_move['end_time'] - now_pt)
-            delay = remaining + cooldown
+            remaining_current = max(0.0, self._current_move['end_time'] - now_pt)
+            remaining_pending = 0.0
+            if self._pending_remaining_mm > 0 and self._pending_speed > 0:
+                remaining_pending = self._pending_remaining_mm / self._pending_speed
+            delay = remaining_current + remaining_pending + cooldown
         self._cooldown_deadline = self.reactor.monotonic() + delay
 
     def _start_cooldown(self):
@@ -1329,20 +1354,32 @@ class BufferFeeder:
             raise self._cmd_error(
                 "Cannot enable AUTO while LOAD/UNLOAD in progress (state=%s). "
                 "Call STOP_BUFFER_FILL to abort first." % self._state)
-        # Clear all transient flags — user is explicitly starting fresh.
+        # Print-PAUSE suspension is owned by idle_timeout; user must
+        # RESUME the print before bang-bang can re-engage. Allowing
+        # AUTO_ON to clear this flag would defeat the documented
+        # pause-until-RESUME semantic (spec §5).
+        if self._bang_bang_suspended:
+            raise self._cmd_error(
+                "Cannot enable AUTO while print is paused (bang-bang "
+                "suspended). RESUME the print — bang-bang re-engages "
+                "automatically. If the print is already finished, "
+                "use BUFFER_AUTO_OFF first to clear the suspension.")
+        # Clear transient flags — user is explicitly starting fresh.
         self._halt_requested = False
-        self._bang_bang_suspended = False
         self._auto_off_by_user = False
         self._enable_stepper()
         self._set_state(STATE_AUTO)
         self._respond("AUTO engaged")
 
-    cmd_BUFFER_AUTO_OFF_help = "Disable bang-bang auto mode (also clears JAM/runout-follow)"
+    cmd_BUFFER_AUTO_OFF_help = "Disable bang-bang auto mode (also clears JAM/runout-follow/pause-suspend)"
     def cmd_BUFFER_AUTO_OFF(self, gcmd):
         # Full-reset semantic: AUTO_OFF is the operator's "stop
-        # everything and acknowledge" lever. Clears recovery flags
-        # BUT NOT _bang_bang_suspended — that one tracks print-PAUSE
-        # state and is owned exclusively by idle_timeout handlers.
+        # everything and take control" lever. Clears recovery flags
+        # AND the print-PAUSE suspension, so the user isn't stuck
+        # (e.g. if the print ended uncleanly and idle_timeout never
+        # fired :printing again). _auto_off_by_user is set to sticky-
+        # block auto-grip on reinsert; re-engaging AUTO requires an
+        # explicit BUFFER_AUTO_ON.
         # Also arms _halt_requested so any in-flight macro aborts
         # at its next wait-point (same contract as BUFFER_HALT).
         self._continuous_feed = False
@@ -1356,7 +1393,8 @@ class BufferFeeder:
         self._measure_load_active = False
         self._measure_feeding = False
         self._cooldown_deadline = None
-        self._auto_off_by_user = True   # sticky against reinsert → AUTO auto-rearm
+        self._bang_bang_suspended = False  # operator overrides PAUSE-suspend
+        self._auto_off_by_user = True      # but reinsert auto-grip stays blocked
         self._halt_requested = True
         self._set_state(STATE_IDLE)
         self._respond("AUTO off — workflow will abort at next wait; recovery flags cleared")
@@ -1596,11 +1634,12 @@ class BufferFeeder:
     def cmd_STOP_BUFFER_FILL(self, gcmd):
         # Full-reset semantic: STOP_BUFFER_FILL aborts everything and
         # clears recovery flags so we land in a clean IDLE state.
-        # Preserves _bang_bang_suspended — that flag tracks
-        # print-PAUSE state (owned by idle_timeout), not by this
-        # command. Like BUFFER_HALT, arms _halt_requested so any
-        # macro waiting on BUFFER_WAIT_IDLE raises and aborts rather
-        # than silently continuing to the next phase.
+        # Like BUFFER_AUTO_OFF, also clears _bang_bang_suspended so
+        # the operator can re-engage AUTO without a missing RESUME.
+        # _auto_off_by_user keeps reinsert-grip blocked.
+        # Like BUFFER_HALT, arms _halt_requested so any macro waiting
+        # on BUFFER_WAIT_IDLE raises and aborts rather than silently
+        # continuing to the next phase.
         self._continuous_feed = False
         self._halt_motion()
         self._pending_remaining_mm = 0.0
@@ -1614,6 +1653,7 @@ class BufferFeeder:
         self._runout_follow_active = False
         self._runout_filament_ref = None
         self._cooldown_deadline = None
+        self._bang_bang_suspended = False
         self._auto_off_by_user = True
         self._halt_requested = True
         self._set_state(STATE_IDLE)
