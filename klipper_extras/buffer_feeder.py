@@ -46,6 +46,12 @@ STATE_JAM            = "JAM"
 USER_STATES = {STATE_IDLE, STATE_AUTO, STATE_MANUAL_FEED,
                STATE_MANUAL_RETRACT, STATE_RUNOUT}
 
+# States where LOAD/UNLOAD is active — override commands
+# (BUFFER_FEED/RETRACT/AUTO_ON/FORCE_BUFFER_FILL) must refuse.
+BUSY_PHASE_STATES = {STATE_INITIAL_GRIP,
+                     STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2, STATE_LOAD_PHASE_3,
+                     STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2, STATE_UNLOAD_PHASE_3}
+
 # States where jam-detection watches for HALL dwell anomalies.
 JAM_WATCH_STATES = {STATE_AUTO, STATE_LOAD_PHASE_3}
 
@@ -206,7 +212,12 @@ class BufferFeeder:
 
         # ----- Operation flags -----
         self._state = STATE_INIT
-        self._prev_state_before_pause = None
+        # Bang-bang is paused while the printer is in a paused/ended
+        # print context (idle_timeout != printing). The flag is armed
+        # on idle_timeout:ready/idle only if we were actively printing,
+        # and cleared on idle_timeout:printing. Manual BUFFER_AUTO_ON
+        # outside a print stays active — the flag never gets armed.
+        self._bang_bang_suspended = False
         self._initial_grip_end_time = None
         self._load_phase3_target = None     # eventtime deadline for phase 3
         self._load_phase3_distance = 0.0
@@ -396,6 +407,8 @@ class BufferFeeder:
 
     def _on_idle_printing(self, *args):
         self._print_running = True
+        # RESUME / print-start: bang-bang resumes.
+        self._bang_bang_suspended = False
         # Documented RESUME-clears-JAM path (spec §10, README §Jam).
         # When Klipper transitions back to 'printing' (typically after
         # a RESUME following our PAUSE-on-jam), drop the JAM lockout
@@ -416,6 +429,15 @@ class BufferFeeder:
                 self._set_state(STATE_IDLE)
 
     def _on_idle_ready(self, *args):
+        # If we were actively printing, treat this as print-PAUSE or
+        # print-end: suspend bang-bang. Manual BUFFER_AUTO_ON from an
+        # idle console never sees print_running=True, so this guard
+        # keeps user-initiated AUTO active across idle events.
+        if self._print_running and self._state == STATE_AUTO:
+            self._bang_bang_suspended = True
+            self._continuous_feed = False
+            self._halt_motion()
+            self._respond("Print paused — bang-bang suspended")
         self._print_running = False
 
     # -----------------------------------------------------------------------
@@ -784,6 +806,9 @@ class BufferFeeder:
 
     def _bang_bang_tick(self, eventtime):
         """HALL-based bang-bang with hysteresis."""
+        if self._bang_bang_suspended:
+            # Print is paused — do nothing until idle_timeout:printing.
+            return
         if self.hall_full:
             # Buffer voll: stop feeding.
             if self._continuous_feed:
@@ -1101,6 +1126,12 @@ class BufferFeeder:
     def _cmd_feed_common(self, direction, distance, speed, timeout):
         if self._state in (STATE_OVERFLOW, STATE_JAM):
             raise self._cmd_error("BufferFeeder: state=%s blocks feed" % self._state)
+        if self._state in BUSY_PHASE_STATES:
+            raise self._cmd_error(
+                "BufferFeeder: busy (state=%s) — call STOP_BUFFER_FILL "
+                "or wait for LOAD/UNLOAD to finish" % self._state)
+        # Fresh manual command = operator acknowledges any stale HALT.
+        self._halt_requested = False
         if distance > 0:
             if distance > self.max_feed_distance:
                 raise self._cmd_error("DISTANCE exceeds max_feed_distance=%.0f"
@@ -1145,8 +1176,14 @@ class BufferFeeder:
             raise self._cmd_error(
                 "Cannot enable AUTO while JAM active. Inspect and call "
                 "BUFFER_CLEAR_JAM to resume, or BUFFER_AUTO_OFF first.")
-        # Clear a pending HALT flag — user is explicitly starting fresh.
+        if self._state in BUSY_PHASE_STATES:
+            raise self._cmd_error(
+                "Cannot enable AUTO while LOAD/UNLOAD in progress (state=%s). "
+                "Call STOP_BUFFER_FILL to abort first." % self._state)
+        # Clear pending HALT flag + any print-pause suspension — user
+        # is explicitly starting fresh.
         self._halt_requested = False
+        self._bang_bang_suspended = False
         self._enable_stepper()
         self._set_state(STATE_AUTO)
         self._respond("AUTO engaged")
@@ -1154,9 +1191,8 @@ class BufferFeeder:
     cmd_BUFFER_AUTO_OFF_help = "Disable bang-bang auto mode (also clears JAM/runout-follow)"
     def cmd_BUFFER_AUTO_OFF(self, gcmd):
         # Full-reset semantic: AUTO_OFF is the operator's "stop
-        # everything and acknowledge" lever. Clear recovery flags so
-        # the system is in a clean IDLE — no lingering JAM or HALT
-        # that would reject future commands.
+        # everything and acknowledge" lever. Clear ALL recovery and
+        # modal flags so the system is in a clean IDLE state.
         self._continuous_feed = False
         self._halt_motion()
         self._jam_active = False
@@ -1165,6 +1201,9 @@ class BufferFeeder:
         self._runout_follow_active = False
         self._runout_filament_ref = None
         self._halt_requested = False
+        self._bang_bang_suspended = False
+        self._measure_load_active = False
+        self._measure_feeding = False
         self._set_state(STATE_IDLE)
         self._respond("AUTO off (all recovery flags cleared)")
 
@@ -1184,6 +1223,7 @@ class BufferFeeder:
 
     cmd_BUFFER_LOAD_PHASE1_help = "LOAD Phase 1 — feeder alone fast to toolhead. DISTANCE=mm"
     def cmd_BUFFER_LOAD_PHASE1(self, gcmd):
+        self._halt_requested = False    # ack any stale console HALT
         self._raise_if_locked_out(gcmd)
         distance = gcmd.get_float('DISTANCE', self.load_fast_distance, above=0.)
         speed    = gcmd.get_float('SPEED',    self.load_fast_speed,    above=0.)
@@ -1196,6 +1236,7 @@ class BufferFeeder:
 
     cmd_BUFFER_LOAD_PHASE2_help = "LOAD Phase 2 — feeder parallel to extruder. Non-blocking, use BUFFER_WAIT_IDLE"
     def cmd_BUFFER_LOAD_PHASE2(self, gcmd):
+        self._halt_requested = False
         self._raise_if_locked_out(gcmd)
         distance = gcmd.get_float('DISTANCE', self.load_slow_distance, above=0.)
         speed    = gcmd.get_float('SPEED',    self.load_slow_speed,    above=0.)
@@ -1205,6 +1246,7 @@ class BufferFeeder:
 
     cmd_BUFFER_LOAD_PHASE3_help = "LOAD Phase 3 — feed until HALL2 or MAX_DISTANCE"
     def cmd_BUFFER_LOAD_PHASE3(self, gcmd):
+        self._halt_requested = False
         self._raise_if_locked_out(gcmd)
         max_distance = gcmd.get_float('MAX_DISTANCE', self.load_buffer_max, above=0.)
         speed        = gcmd.get_float('SPEED',        self.feed_speed,      above=0.)
@@ -1223,6 +1265,7 @@ class BufferFeeder:
     cmd_BUFFER_UNLOAD_PHASE1_help = ("UNLOAD Phase 1 — halt feeder and lock state for tip-forming "
                                      "(so buttons / FORCE_BUFFER_FILL don't interfere)")
     def cmd_BUFFER_UNLOAD_PHASE1(self, gcmd):
+        self._halt_requested = False
         self._raise_if_locked_out(gcmd)
         # Tip-Forming runs on the extruder alone. Feeder must stand
         # still, and the state must NOT be IDLE — otherwise manual
@@ -1244,6 +1287,7 @@ class BufferFeeder:
 
     cmd_BUFFER_UNLOAD_PHASE2_help = "UNLOAD Phase 2 — feeder retract parallel to extruder"
     def cmd_BUFFER_UNLOAD_PHASE2(self, gcmd):
+        self._halt_requested = False
         self._raise_if_locked_out(gcmd)
         distance = gcmd.get_float('DISTANCE', self.unload_sync_distance, above=0.)
         speed    = gcmd.get_float('SPEED',    self.unload_fast_speed,    above=0.)
@@ -1253,6 +1297,7 @@ class BufferFeeder:
 
     cmd_BUFFER_UNLOAD_PHASE3_help = "UNLOAD Phase 3 — chunked retract until entrance free"
     def cmd_BUFFER_UNLOAD_PHASE3(self, gcmd):
+        self._halt_requested = False
         self._raise_if_locked_out(gcmd)
         max_distance = gcmd.get_float('MAX_DISTANCE', self.unload_fast_max, above=0.)
         speed        = gcmd.get_float('SPEED',        self.unload_fast_speed, above=0.)
@@ -1310,11 +1355,13 @@ class BufferFeeder:
         self._initial_grip_end_time = None
         self._load_phase3_distance = 0.0
         self._measure_load_active = False
+        self._measure_feeding = False
         self._jam_active = False
         self._hall2_start_time = None
         self._hall3_start_time = None
         self._runout_follow_active = False
         self._runout_filament_ref = None
+        self._bang_bang_suspended = False
         self._halt_requested = True
         self._set_state(STATE_IDLE)
         self._respond("All feed loops stopped (workflow will abort at next wait)")
@@ -1450,6 +1497,8 @@ class BufferFeeder:
             'commanded_pos_mm':         self._commanded_pos,
             'print_running':            self._print_running,
             'jam_active':               self._jam_active,
+            'bang_bang_suspended':      self._bang_bang_suspended,
+            'halt_requested':           self._halt_requested,
             'runout_follow_active':     self._runout_follow_active,
             'measure_load_active':      self._measure_load_active,
             'measure_load_distance_mm': self._measure_load_distance,
