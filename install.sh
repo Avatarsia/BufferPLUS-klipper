@@ -285,8 +285,29 @@ for ACT in $ACTIONS; do
         inc)
             # Backup vorher
             cp -a "${PRINTER_CFG}" "${PRINTER_CFG}.bak.$(date +%Y%m%d-%H%M%S)"
-            printf '\n# Auto-eingefügt durch BufferPLUS-klipper installer\n[include lll.cfg]\n' >> "${PRINTER_CFG}"
-            ok "[include lll.cfg] an printer.cfg angehängt (Backup erstellt)."
+            # Klipper's SAVE_CONFIG schreibt automatisch generierte
+            # Config-Werte (PID, Probe-Offsets etc.) in einen Block am
+            # Dateiende, markiert durch `#*# <------ SAVE_CONFIG ----->`.
+            # Dieser Block MUSS die letzten Zeilen bleiben — alles
+            # dahinter wird beim nächsten SAVE_CONFIG zerschossen.
+            # Daher: Include VOR diesem Block einfügen, nicht anhängen.
+            if grep -qE '^#\*# <-+[[:space:]]*SAVE_CONFIG[[:space:]]*-+>' "${PRINTER_CFG}"; then
+                awk '
+                    /^#\*# <-+[[:space:]]*SAVE_CONFIG[[:space:]]*-+>/ && !inserted {
+                        print ""
+                        print "# Auto-eingefuegt durch BufferPLUS-klipper installer"
+                        print "[include lll.cfg]"
+                        print ""
+                        inserted = 1
+                    }
+                    { print }
+                ' "${PRINTER_CFG}" > "${PRINTER_CFG}.tmp"
+                mv "${PRINTER_CFG}.tmp" "${PRINTER_CFG}"
+                ok "[include lll.cfg] VOR SAVE_CONFIG-Block eingefügt (Backup erstellt)."
+            else
+                printf '\n# Auto-eingefuegt durch BufferPLUS-klipper installer\n[include lll.cfg]\n' >> "${PRINTER_CFG}"
+                ok "[include lll.cfg] an printer.cfg angehängt (Backup erstellt, kein SAVE_CONFIG-Block vorhanden)."
+            fi
             ;;
         mr)
             cp -a "${MOONRAKER_CONF}" "${MOONRAKER_CONF}.bak.$(date +%Y%m%d-%H%M%S)"
