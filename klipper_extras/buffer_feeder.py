@@ -704,7 +704,12 @@ class BufferFeeder:
                     "SAFETY_TIMEOUT",
                     "max_feed_time %ds reached without reaching HALL2" % int(self.max_feed_time))
 
+            # max_feed_distance is a forward-feed safety only. Manual
+            # retract (Retract-Taster Dauerlauf, BUFFER_RETRACT without
+            # DISTANCE) legitimately accumulates large distances in the
+            # opposite direction; tripping a JAM on those is a bug.
             if (self._continuous_feed
+                    and self._continuous_feed_direction == 1
                     and self._feed_distance_accumulator >= self.max_feed_distance):
                 self._trigger_jam(
                     "SAFETY_DISTANCE",
@@ -1117,6 +1122,11 @@ class BufferFeeder:
         # UNLOAD_FILAMENT macro aborts instead of silently continuing.
         self._continuous_feed = False
         self._halt_motion()
+        # Clear runout-follow so a lingering follow timer doesn't
+        # later disable the stepper mid-operation after a new workflow
+        # has already started.
+        self._runout_follow_active = False
+        self._runout_filament_ref = None
         # Preserve safety-lockout states (OVERFLOW / JAM); any other
         # state drops to IDLE. Our _set_state(STATE_IDLE) hook also
         # disables the stepper.
@@ -1222,6 +1232,13 @@ class BufferFeeder:
         self._continuous_feed = False
         self._halt_motion()
         self._set_state(STATE_UNLOAD_PHASE_1)
+        # Block until any in-flight chunk has finished. Otherwise
+        # tip-forming Push/Pull on the extruder could overlap with
+        # residual feeder motion (up to one chunk + MCU queue depth).
+        # _halt_motion does NOT truncate the trapq; the last-submitted
+        # chunk still plays out. BUFFER_WAIT_IDLE does the right
+        # thing (and raises on OVERFLOW/JAM).
+        self.cmd_BUFFER_WAIT_IDLE(gcmd)
         self._disable_stepper()
         self._respond("UNLOAD Phase 1: feeder halted for tip-forming")
 

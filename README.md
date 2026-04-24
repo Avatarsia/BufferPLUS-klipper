@@ -193,6 +193,7 @@ in der Konsole oder aus Macros aufgerufen werden.
 | `BUFFER_LOAD_PHASE1 DISTANCE=<mm>` | Feeder allein schnell zum Toolhead (blocking). |
 | `BUFFER_LOAD_PHASE2 DISTANCE=<mm> SPEED=<mm/s>` | Feeder parallel (non-blocking). |
 | `BUFFER_LOAD_PHASE3` | Feed bis HALL2 aktiv (blocking). |
+| `BUFFER_UNLOAD_PHASE1` | Feeder sauber anhalten, State → `UNLOAD_PHASE_1` für Tip-Forming (blocking). |
 | `BUFFER_UNLOAD_PHASE2 DISTANCE=<mm> SPEED=<mm/s>` | Feeder retract parallel (non-blocking). |
 | `BUFFER_UNLOAD_PHASE3` | Chunked retract bis entrance frei (blocking). |
 
@@ -294,7 +295,11 @@ Phase 3: BUFFER_LOAD_PHASE3
 
 ```
 Phase 1: Tip-Forming — Extruder macht Push/Pull-Zyklen ALLEIN.
-         Der Feeder steht still (BUFFER_HALT + BUFFER_AUTO_OFF).
+         BUFFER_UNLOAD_PHASE1 setzt den State auf UNLOAD_PHASE_1,
+         hält alle Moves auf dem Feeder an und wartet bis die
+         letzte Chunk-Bewegung ausgelaufen ist. In diesem State
+         sind Operator-Buttons und FORCE_BUFFER_FILL blockiert —
+         keine Kollision mit Tip-Forming.
          Abweichung zur alten Config: früher lief der Feeder mit;
          jetzt bleibt er still (die kleinen Moves im Hotend
          werden vom Buffer absorbiert).
