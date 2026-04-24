@@ -1683,6 +1683,16 @@ class BufferFeeder:
             raise self._cmd_error("FORCE_BUFFER_FILL aborted: HALL1 overflow active")
         if self._state == STATE_JAM or self._jam_active:
             raise self._cmd_error("FORCE_BUFFER_FILL aborted: JAM active. Use BUFFER_CLEAR_JAM first.")
+        # Refuse during print-PAUSE — FORCE_BUFFER_FILL is meant as a
+        # full "initial grip + fill" cycle, and issuing a real grip
+        # move while the printer is paused would queue unexpected
+        # motion (same reason the entrance-insert handler suppresses
+        # auto-grip during suspension).
+        if self._bang_bang_suspended:
+            raise self._cmd_error(
+                "FORCE_BUFFER_FILL aborted: print is paused (bang-bang "
+                "suspended). RESUME the print first, or use AUTO_OFF + "
+                "AUTO_ON to take manual control.")
         # State guard per spec §5: only valid transition from IDLE
         # or RUNOUT into INITIAL_GRIP. Reject otherwise — accidentally
         # re-entering while AUTO / MANUAL_* / a LOAD-UNLOAD phase is
@@ -1694,8 +1704,14 @@ class BufferFeeder:
                 "FORCE_BUFFER_FILL aborted: feeder busy (state=%s). "
                 "Call STOP_BUFFER_FILL or BUFFER_AUTO_OFF first."
                 % self._state)
-        # Operator explicitly invoked the fill — clear any stale HALT.
+        # Operator explicitly invoked the full fill cycle. Clear the
+        # stale HALT flag AND the AUTO_OFF-by-user flag, so the
+        # initial-grip post-condition transitions to AUTO (bang-bang
+        # continues until HALL2). Without clearing _auto_off_by_user
+        # the grip would drop to IDLE and the "fill" part never runs —
+        # BUFFER_AUTO_OFF → FORCE_BUFFER_FILL only grips 10s then stops.
         self._halt_requested = False
+        self._auto_off_by_user = False
         # Wait for any lingering in-flight chunk from a prior aborted
         # move to drain. Otherwise the initial-grip's end_time would
         # undershoot by the old chunk's remaining trapq duration
@@ -1759,6 +1775,7 @@ class BufferFeeder:
             "jam_active         = %s" % self._jam_active,
             "runout_follow      = %s ref=%s" % (self._runout_follow_active,
                                                 self._runout_filament_ref),
+            "macro_state_saved  = %s (buffer_feeder_op slot consumable)" % self._macro_state_saved,
             "measure_load       = active=%s feeding=%s dist=%.1f mm" % (
                 self._measure_load_active, self._measure_feeding,
                 self._measure_load_distance),
@@ -1935,6 +1952,7 @@ class BufferFeeder:
             'runout_follow_active':     self._runout_follow_active,
             'measure_load_active':      self._measure_load_active,
             'measure_load_distance_mm': self._measure_load_distance,
+            'macro_state_saved':        self._macro_state_saved,
             # Config values (exposed so LOAD/UNLOAD macros don't hardcode)
             'feed_speed':               self.feed_speed,
             'manual_speed':             self.manual_speed,
