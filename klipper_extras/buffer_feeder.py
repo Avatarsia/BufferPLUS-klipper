@@ -207,12 +207,34 @@ class BufferFeeder:
             'feed_button':   False,  # state=True already = pressed
             'retract_button': False, # state=True already = pressed
         }
-        # Initial raw state must correspond to "semantic inactive" so that
-        # OVERFLOW doesn't trigger at boot before the first real callback.
-        # For polarity_flip=True (HALLs): semantic = not raw → idle raw=True
-        # For polarity_flip=False (entrance/buttons): semantic = raw → idle raw=False
+        # Initial stable-state defaults — SAFETY-FIRST assumption:
+        # Klipper's buttons.register_buttons only fires initial callbacks
+        # for pins whose logical state != 0 at boot (last_button starts
+        # at 0, changed = new XOR 0). For pins that are in their "idle"
+        # logical state at boot, NO callback is delivered until the
+        # state actually changes.
+        #
+        # Consequence: if we defaulted to "inactive" and a HALL sensor
+        # was already physically active (e.g. HALL2 blocked because the
+        # buffer is already full at Klipper restart), we would never hear
+        # about it — and bang-bang would happily keep filling until
+        # overflow / safety-timeout.
+        #
+        # Fix: default HALLs to "active" (stable=False → semantic=True),
+        # triggering OVERFLOW lockout at boot. As soon as Klipper
+        # delivers an initial callback for pins that are actually idle
+        # (the common case for HALL1), we transition out of lockout.
+        # Entrance and buttons default to "not present / not pressed"
+        # — that is the actual idle state for those switches, and
+        # initial-insert events are further suppressed by the
+        # _startup_grace_done gate below.
         for name, flip in self._pin_polarity_flip.items():
-            idle_raw = True if flip else False
+            if flip:
+                # HALL sensors: start "active" (raw=False → semantic=True)
+                idle_raw = False
+            else:
+                # Entrance / buttons: start "not active" (raw=False → semantic=False)
+                idle_raw = False
             self._pin_raw_state[name] = idle_raw
             self._pin_change_time[name] = 0.0
             self._pin_stable_state[name] = idle_raw
@@ -289,6 +311,18 @@ class BufferFeeder:
         # cleared by BUFFER_AUTO_ON. Respects the user's explicit
         # "bang-bang off" choice even after manual calibration moves.
         self._auto_off_by_user = False
+
+        # ----- Startup grace period -----
+        # During the first _startup_grace_seconds after klippy:ready,
+        # sensor callbacks silently update stable_states but do NOT
+        # fire insert/overflow/etc. events. Prevents:
+        #   (a) boot-time "insert" event for a filament that was
+        #       already in the buffer before restart triggering an
+        #       unwanted INITIAL_GRIP + auto-fill.
+        #   (b) spurious OVERFLOW if HALL1's "idle" callback arrives
+        #       just after main_tick already called _enter_overflow.
+        self._startup_grace_seconds = 2.0
+        self._startup_grace_done = False
 
         # ----- Macro gcode-state tracking -----
         # Klipper's SAVE_GCODE_STATE writes a saved_states entry;
@@ -438,15 +472,39 @@ class BufferFeeder:
         now_pt = mcu.estimated_print_time(self.reactor.monotonic())
         self._last_move_end_time = now_pt + self.lead_time
 
-        # Transition to IDLE.
-        self._set_state(STATE_IDLE)
+        # Stay in STATE_INIT during startup grace. Bang-bang, insert
+        # handling and OVERFLOW transitions are all gated on the grace
+        # period — the first 2s just passively accumulate sensor
+        # callbacks so we learn the real hardware state without
+        # acting on boot-time edges.
 
-        # Start reactor timers.
+        # Start reactor timers. Main tick silently updates debounce;
+        # all higher-level logic (bang-bang, phase ticks, continuous
+        # feed, safety) early-exits while _startup_grace_done is False.
         self._main_timer = self.reactor.register_timer(self._main_tick,
                                                        self.reactor.NOW)
         self._jam_timer = self.reactor.register_timer(self._jam_tick,
                                                       self.reactor.NOW)
-        self._respond("BufferFeeder: ready — state=%s" % self._state)
+        # Schedule grace-period completion.
+        self.reactor.register_callback(
+            self._end_startup_grace,
+            self.reactor.monotonic() + self._startup_grace_seconds)
+        self._respond("BufferFeeder: ready — entering %.1fs sensor-settle grace" %
+                      self._startup_grace_seconds)
+
+    def _end_startup_grace(self, eventtime):
+        self._startup_grace_done = True
+        # Log the settled sensor picture so operators can sanity-check
+        # polarity against physical reality on a fresh boot.
+        self._respond(
+            "Startup grace done — hall_empty=%s hall_full=%s "
+            "hall_overflow=%s entrance=%s"
+            % (self.hall_empty, self.hall_full,
+               self.hall_overflow, self.entrance_detected),
+            force_display=True)
+        # Drop into normal operation. If HALL1 is currently active,
+        # main_tick will immediately transition to OVERFLOW.
+        self._set_state(STATE_IDLE)
 
     def _handle_shutdown(self):
         # Stop timers and halt motion.
@@ -588,6 +646,13 @@ class BufferFeeder:
 
     def _on_stable_sensor_change(self, eventtime, name, raw_state):
         """Dispatch stable sensor change to the right handler."""
+        if not self._startup_grace_done:
+            # During startup grace: state was already updated by
+            # _check_debounce; swallow the event so we don't fire
+            # insert / overflow / etc. handlers based on initial
+            # sensor readouts. After grace, main_tick and regular
+            # event paths handle the settled state normally.
+            return
         if name == 'hall_overflow':
             if self.hall_overflow:
                 self._enter_overflow()
@@ -878,6 +943,13 @@ class BufferFeeder:
     def _main_tick(self, eventtime):
         try:
             self._check_debounce(eventtime)
+
+            # During startup grace, only sensor polling runs. No state
+            # transitions, no bang-bang, no continuous feed — we wait
+            # for Klipper to deliver initial sensor callbacks so we
+            # learn the real hardware picture.
+            if not self._startup_grace_done:
+                return eventtime + MAIN_TICK_INTERVAL
 
             # HALL1 has absolute priority.
             if self.hall_overflow and self._state != STATE_OVERFLOW:
