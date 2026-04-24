@@ -315,14 +315,21 @@ class BufferFeeder:
         # ----- Startup grace period -----
         # During the first _startup_grace_seconds after klippy:ready,
         # sensor callbacks silently update stable_states but do NOT
-        # fire insert/overflow/etc. events. Prevents:
-        #   (a) boot-time "insert" event for a filament that was
-        #       already in the buffer before restart triggering an
-        #       unwanted INITIAL_GRIP + auto-fill.
-        #   (b) spurious OVERFLOW if HALL1's "idle" callback arrives
-        #       just after main_tick already called _enter_overflow.
+        # fire insert/overflow/etc. events. Prevents spurious OVERFLOW
+        # if HALL1's "idle" callback arrives just after main_tick
+        # already called _enter_overflow.
         self._startup_grace_seconds = 2.0
         self._startup_grace_done = False
+
+        # Edge-triggered auto-grip on entrance insert.
+        # Time-based grace alone is unreliable here because Klipper's
+        # MCU button query for the entrance pin can land after our
+        # 2s grace window. Instead we gate auto-grip on HAVING SEEN
+        # the entrance-False state at some point first. Boot with
+        # filament already present → only ever True callbacks arrive
+        # → flag stays False → no grip. User pulls filament → False
+        # → flag becomes True → re-insert → grip. Clean edge detect.
+        self._entrance_was_empty = False
 
         # ----- Macro gcode-state tracking -----
         # Klipper's SAVE_GCODE_STATE writes a saved_states entry;
@@ -715,6 +722,21 @@ class BufferFeeder:
             self._runout_follow_active = False
             self._runout_filament_ref = None
             self._respond("Runout-follow cancelled (filament re-inserted)")
+        # Edge-triggered auto-grip: only proceed with the default
+        # IDLE→INITIAL_GRIP path if we've observed the entrance being
+        # EMPTY at some point since boot. Boot with filament already
+        # at the entrance → _entrance_was_empty stays False → no
+        # silent auto-grip. User can still trigger manually via
+        # FORCE_BUFFER_FILL. Explicit runout / user-pull events
+        # flip the flag so the next real re-insert auto-grips.
+        # RUNOUT/suspend/auto_off/halt path guards below still apply.
+        will_auto_grip = (self._state == STATE_IDLE
+                          and not self._bang_bang_suspended
+                          and not self._auto_off_by_user
+                          and not self._halt_requested
+                          and self._entrance_was_empty)
+        # Reset the flag now — we've consumed the edge.
+        self._entrance_was_empty = False
         # RUNOUT (runout_pause=1): the print has been PAUSE'd. Spec §5
         # says a reinsert clears RUNOUT but does NOT auto-grip —
         # grip during a paused print would queue unexpected motion.
@@ -743,11 +765,24 @@ class BufferFeeder:
             self._respond("Reinsert while AUTO is off (operator-disabled) — "
                           "auto-grip suppressed. Use FORCE_BUFFER_FILL to trigger.")
             return
-        # Normal idle-state reinsert: kick off initial grip.
-        if self._state == STATE_IDLE:
+        # Normal idle-state reinsert: kick off initial grip, but
+        # only if we've actually seen an empty→present transition
+        # (edge flag above). Boot with filament already present does
+        # NOT trigger grip — operator runs FORCE_BUFFER_FILL if they
+        # want a fresh fill.
+        if will_auto_grip:
             self._start_initial_grip(eventtime)
+        else:
+            self._respond("Entrance already had filament at boot — "
+                          "no auto-grip. Use FORCE_BUFFER_FILL to "
+                          "fill the buffer manually.")
 
     def _on_entrance_runout(self, eventtime):
+        # Arm the edge-detect flag: we've now seen the entrance go
+        # empty. The NEXT entrance-True callback (re-insert) will be
+        # treated as a genuine operator insert event and will
+        # auto-grip (subject to the usual lockout / AUTO_OFF checks).
+        self._entrance_was_empty = True
         # Planned filament exit: suppress during LOAD/UNLOAD/MANUAL.
         if self._state in (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2, STATE_LOAD_PHASE_3,
                            STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2,
