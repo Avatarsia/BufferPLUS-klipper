@@ -359,6 +359,38 @@ Phase 3: BUFFER_UNLOAD_PHASE3 — chunked 50mm-Retracts bis
 
 ## Fehlerbehebung
 
+### Vorgehen bei einem Crash / Shutdown
+
+Klipper öffnet `klippy.log` beim Start im Truncate-Modus — jeder Neustart
+überschreibt das alte Log. Wenn ein Shutdown auftritt, **zuerst das Log
+sichern**, bevor irgendein Restart ausgelöst wird (weder „FIRMWARE_RESTART"
+noch `sudo systemctl restart klipper`, kein Reboot):
+
+```bash
+# 1) Log sofort wegkopieren
+sudo cp /var/log/klipper_logs/klippy.log /tmp/klippy_crash_$(date +%H%M).log
+
+# 2) Python-Traceback extrahieren (die Shutdown-Meldung in Mainsail ist
+#    nur der Epilog — der eigentliche Stacktrace steht im Log davor)
+CR=$(ls -1t /tmp/klippy_crash_*.log | head -1)
+grep -n -B3 -A50 "Traceback\|flush_handler\|Invalid sequence\|Shutdown" "$CR" | tail -300
+```
+
+Wichtige Marker im Log:
+
+- **`MCU 'X' shutdown: Command request`** — der Host hat den MCU
+  heruntergefahren (nicht MCU-seitig entstanden). Der auslösende
+  Python-Fehler steht vor dem Shutdown.
+- **`Traceback (most recent call last)`** direkt vor dem Shutdown-
+  Block — das ist die Ursache.
+- **`stepcompress o=X i=Y c=Z a=W: Invalid sequence`** — Step-Generierung
+  hat eine ungültige Sequenz produziert. Siehe „Exception in flush_handler"
+  unten.
+- **`Filament Sensor ... runout event detected`** — separater Sensor
+  (nicht unser HALL), löst meist das user-eigene Runout-Macro aus.
+
+Erst nach Log-Sicherung den Drucker wieder starten.
+
 ### Extension lädt nicht / Klipper-Error beim Start
 
 - Logs prüfen: `tail -f ~/printer_data/logs/klippy.log`
@@ -395,6 +427,31 @@ Phase 3: BUFFER_UNLOAD_PHASE3 — chunked 50mm-Retracts bis
   sollte `True` werden.
 - Während LOAD/UNLOAD/OVERFLOW/JAM sind Taster blockiert (by design).
 
+### „Exception in flush_handler" / Shutdown beim ersten Feed
+
+Symptom: alle MCUs shutdownen gleichzeitig mit `Command request`. Im
+Log steht `stepcompress o=X i=0 c=N a=0: Invalid sequence` kurz vor
+dem Shutdown.
+
+Ursache (historisch, Fix ab Commit `52a5ba6`): stepcompress initialisiert
+`last_step_clock = 0` und bleibt dort, bis der erste Step emittiert
+wird. Wenn der Drucker vor dem ersten Buffer-Move mehr als ~17s
+idle ist (Klippers `CLOCK_DIFF_MAX`), überschreitet der erste Step
+die uint32-Interval-Grenze, der Bisect-Compressor erzeugt eine
+degenerate Sequenz und `check_line()` rejected sie.
+
+Fix ist in der Extension eingebaut:
+
+- `stepper.set_position((0,0,0))` wird einmalig vor dem ersten Move
+  aufgerufen (primed stepcompress).
+- Zeitbasis ist `toolhead.get_last_move_time()` statt
+  `mcu.estimated_print_time()` — das resynct intern gegen die aktuelle
+  MCU-Clock.
+
+Sollte der Fehler trotz aktueller Version wieder auftreten: Log
+sichern (siehe oben), `BUFFER_STATE_DUMP` vor dem Crash prüfen,
+Issue öffnen mit Traceback + Config-Snippet.
+
 ---
 
 ## Architektur-Details
@@ -411,22 +468,45 @@ Eine **eigene trapq** (wie Klipper's `manual_stepper` sie anlegt) wird
 vom Background-Flusher separat bedient. Steps werden generiert, ohne
 die Toolhead-Queue zu konsultieren.
 
-**Entscheidend ist die Zeitbasis:** statt `toolhead.get_last_move_time()`
-(was den Toolhead synchronisiert) nutzt die Extension
-`mcu.estimated_print_time(reactor.monotonic()) + lead_time` — rein
-MCU-clock-basiert, null Toolhead-Berührung.
+**Zeitbasis:** die Extension nutzt `toolhead.get_last_move_time()` als
+t0-Anker (wie auch `manual_stepper` und `force_move` es tun). Diese
+Funktion flusht **ausschließlich** den Lookahead-Planner — sie drained
+**nicht** die MCU-Step-Queue (das wäre `flush_step_generation()`, was
+wir explizit vermeiden). Der Lookahead-Flush passiert im Druckbetrieb
+sowieso ständig; zusätzlicher Overhead ist minimal.
 
-### Move-Submit-Pfad (flush-frei)
+Warum nicht einfach `mcu.estimated_print_time(reactor.monotonic())`?
+Weil stepcompress' interne `last_step_clock` bis zum ersten Step auf
+0 bleibt und Klippers `CLOCK_DIFF_MAX` bei ~17s liegt. Ein erster Move
+nach langem Idle würde ein Interval > uint32 erzeugen → „Invalid
+sequence" → Shutdown. `toolhead.get_last_move_time()` resynct intern
+gegen `estimated_print_time + BUFFER_TIME_START` bzw.
+`motion_queuing.calc_step_gen_restart()` — das Ergebnis liegt immer
+im Zeitraum, den die Step-Gen-Maschinerie tracken kann.
+
+Zusätzlich wird beim allerersten Move `stepper.set_position((0,0,0))`
+aufgerufen (primed itersolve + gibt stepcompress einen Clock-Baseline),
+gleiches Muster wie `force_move.manual_move`.
+
+### Move-Submit-Pfad
 
 ```python
-now_pt = mcu.estimated_print_time(reactor.monotonic())
-t0 = max(now_pt + lead_time, last_move_end_time)
+# Priming nur beim allerersten Move
+if not self._stepcompress_primed:
+    self.stepper.set_position((0., 0., 0.))
+    self._stepcompress_primed = True
+
+toolhead = printer.lookup_object('toolhead')
+th_time = toolhead.get_last_move_time()   # nur Lookahead-Flush
+t0 = max(th_time + lead_time, last_move_end_time)
 trapq_append(own_trapq, t0, accel_t, cruise_t, decel_t, ...)
 motion_queuing.note_mcu_movequeue_activity(t0 + total_time)
 ```
 
-Kein `toolhead.*`-Call. Background-Flusher generiert Steps,
-MCU führt sie parallel zu den Toolhead-Steps aus.
+Keine `flush_step_generation()`-Aufrufe. Background-Flusher generiert
+Steps, MCU führt sie parallel zu den Toolhead-Steps aus. Der
+Lookahead-Flush unterbricht den Toolhead-Motion-Planner nicht sichtbar —
+Retracts/PA-Moves laufen durch, als wäre der Buffer nicht da.
 
 ### Sensor-Polling
 
@@ -449,6 +529,7 @@ HALL1-Overflow hat absolute Priorität über allem.
 |---|---|
 | `motion_queuing`-API ist interne Klipper-API (nicht stabilisiert) | Bei jedem Klipper-Update testen |
 | Keine Prior Art in Klipper-Community | Spec in `docs/superpowers/specs/2026-04-23-python-ansatz-design.md` dokumentiert alle Design-Entscheidungen |
+| `toolhead.get_last_move_time()` flusht Lookahead-Planner | Nur Lookahead, **kein** Step-Gen-Drain — im Druck läuft das sowieso ständig, Overhead vernachlässigbar |
 | Lead-Time-Fehlkalibrierung | `lead_time` konfigurierbar, Default 0.3s |
 | Bug in Reactor-Logik → Endlosfeed | HALL1 Hard-Stop + `max_feed_time` / `max_feed_distance` |
 
