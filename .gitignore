@@ -4,3 +4,4 @@ Nicht bestätigt*.crdownload
 
 # Referenz-Downloads (Klipper-Source, PDFs) — nicht committen
 vergleich/
+__pycache__/
