@@ -1480,12 +1480,19 @@ class BufferFeeder:
             logging.exception("buffer_feeder: gcode run_script failed (%s)", script)
 
     def _respond(self, message, force_display=False):
+        # Log + console echo only. We deliberately do NOT emit M117
+        # from here any more: _respond is called from both reactor-
+        # event handlers AND gcode command handlers, and gc.run_script
+        # re-acquires the gcode mutex. From a command handler (where
+        # the mutex is already held), that call deadlocks Klipper's
+        # entire gcode pipeline — all subsequent commands (including
+        # print-start from Mainsail) queue up but never execute.
+        # The `force_display` parameter is kept for call-site
+        # backwards compatibility but is now a no-op.
         logging.info("buffer_feeder: %s", message)
         try:
             gc = self.printer.lookup_object('gcode')
             gc.respond_info("BufferFeeder: %s" % message)
-            if self.display_status_enabled or force_display:
-                gc.run_script("M117 %s" % message[:20])  # display is short
         except Exception:
             pass
 
