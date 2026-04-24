@@ -397,6 +397,7 @@ Alle mit `cmd_<NAME>` als Methoden der `BufferFeeder`-Klasse.
     "runout_follow_active": False,            # runout_pause=0 follow window
     "measure_load_active": False,             # MEASURE_LOAD mode on
     "measure_load_distance_mm": 0.0,          # mm measured
+    "macro_state_saved": False,               # buffer_feeder_op gcode-state consumable
     # Config values (stable, read from config)
     "feed_speed": 30.0, "manual_speed": 15.0, "load_fast_speed": 50.0,
     "load_slow_speed": 5.0, "unload_fast_speed": 50.0,

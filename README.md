@@ -185,7 +185,7 @@ in der Konsole oder aus Macros aufgerufen werden.
 | `BUFFER_WAIT_IDLE` | Blockt bis Move fertig **und** State nicht mehr in einer LOAD/UNLOAD/GRIP-Phase. Raised auf OVERFLOW/JAM/HALT. |
 | `BUFFER_STATE_DUMP` | Vollständigen State (inkl. Recovery-Flags) in Konsole. |
 | `BUFFER_CLEAR_JAM` | Nach Jam-Event und Operator-Check: State → AUTO (falls entrance) oder IDLE (sonst). Restauriert GCode-State (E-Mode) aus failed LOAD/UNLOAD. Während pausiertem Druck bleibt Bang-Bang suspended bis RESUME. |
-| `BUFFER_RESTORE_STATE` | Best-Effort GCode-State-Restore nach einem abgebrochenen LOAD_FILAMENT / UNLOAD_FILAMENT. Restauriert den bei `_SAVE_E_MODE` gespeicherten E-Mode. No-op wenn kein Save existiert. |
+| `BUFFER_RESTORE_STATE` | Best-Effort Restore des vollen GCode-States (E-Mode, Position, Feedrate etc.) nach einem abgebrochenen LOAD_FILAMENT / UNLOAD_FILAMENT. Basiert auf Klippers `SAVE_GCODE_STATE` / `RESTORE_GCODE_STATE MOVE=0` unter `NAME=buffer_feeder_op`. Single-Shot (verbraucht den Save). No-op wenn kein Save anstehend. |
 
 ### LOAD/UNLOAD — Phasen-Primitive
 
@@ -256,6 +256,7 @@ Zugriff aus Macros via `printer["buffer_feeder mellow"].<feld>`:
 | `runout_follow_active` | bool | runout_pause=0 Nachlauf-Timer läuft |
 | `measure_load_active` | bool | MEASURE_LOAD-Modus |
 | `measure_load_distance_mm` | float | Im Mess-Modus gefördert |
+| `macro_state_saved` | bool | `buffer_feeder_op` GCode-State Save liegt an (konsumierbar via `BUFFER_RESTORE_STATE` / `BUFFER_CLEAR_JAM` / `AUTO_OFF` / `STOP_BUFFER_FILL` / RESUME) |
 
 **Config-Werte (für Macro-Delegation):**
 

@@ -462,7 +462,8 @@ class BufferFeeder:
         # a RESUME following our PAUSE-on-jam), drop the JAM lockout
         # so the feeder resumes AUTO. HALL1 is still respected — if
         # physical overflow is still present, we fall into OVERFLOW.
-        if self._state == STATE_JAM or self._jam_active:
+        jam_recovery = self._state == STATE_JAM or self._jam_active
+        if jam_recovery:
             self._respond("RESUME: clearing JAM lockout")
             self._jam_active = False
             self._hall2_start_time = None
@@ -480,6 +481,24 @@ class BufferFeeder:
                 self._set_state(STATE_AUTO)
             else:
                 self._set_state(STATE_IDLE)
+            return
+
+        # RUNOUT-recovery path (runout_pause=1 case):
+        #   Runout → STATE_RUNOUT + PAUSE → idle_timeout:ready armed
+        #       _bang_bang_suspended.
+        #   Reinsert → STATE_IDLE (with "use RESUME" hint).
+        #   RESUME: fall into this branch. If filament is now at the
+        #       entrance and the operator hasn't disabled AUTO, run
+        #       grip+fill so the buffer is full before the print
+        #       resumes actual extrusion. Without this, the
+        #       FORCE_BUFFER_FILL-during-suspension guard would have
+        #       left the operator with no documented recovery path.
+        if (self._state == STATE_IDLE
+                and self.entrance_detected
+                and not self._auto_off_by_user
+                and not self.hall_overflow):
+            self._respond("RESUME with filament at entrance — starting grip + fill")
+            self._start_initial_grip(self.reactor.monotonic())
 
     def _on_idle_ready(self, *args):
         # Treat any transition out of an active print (PAUSE, jam-PAUSE,
@@ -610,12 +629,18 @@ class BufferFeeder:
             self._respond("Runout-follow cancelled (filament re-inserted)")
         # RUNOUT (runout_pause=1): the print has been PAUSE'd. Spec §5
         # says a reinsert clears RUNOUT but does NOT auto-grip —
-        # user must call FORCE_BUFFER_FILL or RESUME explicitly.
-        # Grip during paused print would queue unexpected motion.
+        # grip during a paused print would queue unexpected motion.
+        # RESUME is the natural recovery path: _on_idle_printing sees
+        # the IDLE+entrance+unsuspended state and triggers grip+fill.
+        # Operators who want a manual fill before RESUME can call
+        # BUFFER_AUTO_OFF + FORCE_BUFFER_FILL (the AUTO_OFF clears
+        # _bang_bang_suspended; FORCE_BUFFER_FILL then runs).
         if self._state == STATE_RUNOUT:
             self._set_state(STATE_IDLE)
             self._respond("Reinsert during RUNOUT — cleared. Call "
-                          "FORCE_BUFFER_FILL manually if re-fill is desired.")
+                          "RESUME to continue (grip + fill runs "
+                          "automatically), or BUFFER_AUTO_OFF + "
+                          "FORCE_BUFFER_FILL for manual refill first.")
             return
         # Suppress auto-grip while bang-bang is suspended (print-PAUSE).
         if self._bang_bang_suspended:
