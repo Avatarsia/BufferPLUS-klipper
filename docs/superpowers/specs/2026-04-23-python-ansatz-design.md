@@ -552,7 +552,10 @@ Implementierung: Wir lesen die Pin-Zustände über `mcu.lookup_pin()` + `MCU_end
 - **runout** (entrance wird inaktiv):
   - Wenn State ∈ {LOAD/UNLOAD/MANUAL_*}: ignorieren (geplantes Filament-Ende).
   - Sonst und `print_running == 1`:
-    - `runout_pause == 1`: Stepper sofort disable, State → IDLE, `PAUSE` + M117
+    - `runout_pause == 1`: Stepper sofort disable, State → RUNOUT, `PAUSE` + M117.
+      RUNOUT wird beim nächsten Reinsert (entrance_insert) nach IDLE geräumt —
+      Spec §5: RUNOUT → IDLE via RESUME / FORCE_BUFFER_FILL / Reinsert.
+      Kein automatischer Grip aus RUNOUT.
     - `runout_pause == 0`: Merke `filament_used_ref`. Starte Polling-Timer. Nach 100mm Extruder-Progress: Stepper disable. Externer Sensor kümmert sich um PAUSE.
 
 ### HALL-Events

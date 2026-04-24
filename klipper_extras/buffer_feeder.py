@@ -236,6 +236,17 @@ class BufferFeeder:
         self._load_phase3_distance = 0.0
         self._load_phase3_max_distance = 0.0
         self._load_phase3_speed = 0.0       # per-call feed speed in phase 3
+
+        # Pending-chunk streaming for single-shot moves larger than
+        # max_move_chunk_mm. _submit_move submits the first chunk
+        # synchronously and records the remaining distance here;
+        # main_tick submits subsequent chunks as prior ones approach
+        # completion. This keeps _last_move_end_time bounded to
+        # roughly 1.5 chunks ahead, so HALT/OVERFLOW stop remaining
+        # chunks from ever being queued to the MCU.
+        self._pending_remaining_mm = 0.0
+        self._pending_direction = 0.0
+        self._pending_speed = 0.0
         self._continuous_feed = False       # True = keep submitting moves while active
         self._continuous_feed_direction = 0 # +1 or -1
         self._continuous_feed_speed = 0.0
@@ -574,11 +585,17 @@ class BufferFeeder:
             self._respond("Reinsert during RUNOUT — cleared. Call "
                           "FORCE_BUFFER_FILL manually if re-fill is desired.")
             return
-        # Also suppress auto-grip while bang-bang is suspended (paused
-        # print via idle_timeout:ready). Operator can manually trigger.
+        # Suppress auto-grip while bang-bang is suspended (print-PAUSE).
         if self._bang_bang_suspended:
             self._respond("Reinsert during paused print — auto-grip suppressed. "
                           "Use FORCE_BUFFER_FILL to trigger manually after RESUME.")
+            return
+        # Respect explicit operator decision to keep AUTO off.
+        # Reinsert after BUFFER_AUTO_OFF should NOT auto-grip —
+        # the user specifically disabled the feeder.
+        if self._auto_off_by_user:
+            self._respond("Reinsert while AUTO is off (operator-disabled) — "
+                          "auto-grip suppressed. Use FORCE_BUFFER_FILL to trigger.")
             return
         # Normal idle-state reinsert: kick off initial grip.
         if self._state == STATE_IDLE:
@@ -795,17 +812,24 @@ class BufferFeeder:
                     else:
                         self._set_state(STATE_IDLE)
 
-            # Initial grip done -> AUTO.
+            # Initial grip done -> AUTO (or IDLE if operator-off).
             if self._state == STATE_INITIAL_GRIP and self._initial_grip_end_time is not None:
                 mcu = self.stepper.get_mcu()
                 now_pt = mcu.estimated_print_time(eventtime)
                 if now_pt >= self._initial_grip_end_time:
                     self._initial_grip_end_time = None
-                    self._set_state(STATE_AUTO)
-                    self._respond("Initial grip done — AUTO engaged")
-                    # Optional auto-LOAD if hotend warm.
-                    if self.auto_load_after_follow and self._hotend_warm():
-                        self._gcode_run_script("LOAD_FILAMENT")
+                    # Respect explicit AUTO_OFF / print-pause — do not
+                    # silently re-engage bang-bang.
+                    if self._auto_off_by_user or self._bang_bang_suspended:
+                        self._set_state(STATE_IDLE)
+                        self._respond("Initial grip done — staying IDLE "
+                                      "(AUTO off by operator or print paused)")
+                    else:
+                        self._set_state(STATE_AUTO)
+                        self._respond("Initial grip done — AUTO engaged")
+                        # Optional auto-LOAD if hotend warm.
+                        if self.auto_load_after_follow and self._hotend_warm():
+                            self._gcode_run_script("LOAD_FILAMENT")
 
             # Bang-bang in AUTO.
             if self._state == STATE_AUTO:
@@ -853,6 +877,31 @@ class BufferFeeder:
                                  self._continuous_feed_speed * 0.5)
                 self._submit_move(self._continuous_feed_direction * chunk_dist,
                                   self._continuous_feed_speed)
+
+            # Pending-chunk streaming for long single-shot moves.
+            # Schedule the next chunk when the current one is within
+            # half-a-chunk-duration of ending, so chunks abut with
+            # no visible gap in motion. Abort signals zero out the
+            # pending counter — draining remaining chunks happens
+            # only on the MCU for the already-queued trapezoid.
+            if self._pending_remaining_mm > 0:
+                if self._abort_signalled():
+                    self._pending_remaining_mm = 0.0
+                elif self._pending_speed > 0:
+                    chunk_duration = (self.max_move_chunk_mm
+                                      / self._pending_speed)
+                    mcu = self.stepper.get_mcu()
+                    now_pt = mcu.estimated_print_time(eventtime)
+                    # Submit next chunk when <= half-a-chunk remains
+                    # in the currently-queued move, so next trapezoid
+                    # starts right at the prior one's end_time.
+                    if (self._last_move_end_time - now_pt) <= chunk_duration * 0.5:
+                        chunk = min(self._pending_remaining_mm,
+                                    self.max_move_chunk_mm)
+                        self._submit_single_trapezoid(
+                            self._pending_direction * chunk,
+                            self._pending_speed)
+                        self._pending_remaining_mm -= chunk
 
         except Exception:
             logging.exception("buffer_feeder main_tick error")
@@ -996,18 +1045,22 @@ class BufferFeeder:
             logging.exception("buffer_feeder: disable_stepper failed")
 
     def _submit_move(self, signed_distance, speed):
-        """Submit a move to our trapq. Chunks long moves.
+        """Submit a move. Chunks long moves asynchronously.
 
-        Flush-free. A long single-shot distance is split into chunks
-        of `max_move_chunk_mm` so `_last_move_end_time` never sits
-        more than one chunk in the future — that bounds the HALT
-        response latency to roughly one chunk duration regardless
-        of how large the caller requested.
+        Flush-free. For distances ≤ max_move_chunk_mm this queues
+        one trapezoid and returns. For longer distances it queues
+        the first chunk only and records the remainder in
+        _pending_remaining_mm; main_tick streams subsequent chunks
+        as prior ones approach completion.
 
-        Each chunk is a self-contained trapezoid (accel up / cruise /
-        decel to zero). Motion between chunks is audibly choppy at
-        high speeds; for smooth bulk moves, callers should pass the
-        move in via the continuous-feed path instead.
+        The async streaming is what keeps HALT responsive. A
+        synchronous loop would queue the whole sequence to the MCU
+        at once — _last_move_end_time would land at the end of the
+        full distance, and HALT could no longer prevent chunks that
+        are already in the MCU step queue from playing out. By
+        only ever holding ~1.5 chunks ahead in the trapq, HALT can
+        zero out _pending_remaining_mm and let the in-flight chunk
+        drain out — max latency one chunk duration.
         """
         if signed_distance == 0 or speed <= 0:
             return
@@ -1015,19 +1068,22 @@ class BufferFeeder:
             logging.warning("buffer_feeder: move rejected — HALL1 active "
                             "(distance=%.1f speed=%.1f)", signed_distance, speed)
             self._continuous_feed = False
+            self._pending_remaining_mm = 0.0
             return
 
+        # Cancel any previously-streaming sequence before starting new.
+        self._pending_remaining_mm = 0.0
+
+        distance_abs = abs(signed_distance)
         direction = 1.0 if signed_distance > 0 else -1.0
-        remaining = abs(signed_distance)
-        while remaining > 0:
-            chunk = min(remaining, self.max_move_chunk_mm)
-            self._submit_single_trapezoid(direction * chunk, speed)
-            remaining -= chunk
-            # If a HALT / lockout fires mid-sequence, stop appending
-            # further chunks. The already-appended chunk plays out on
-            # the MCU until its end_time (or the stepper is disabled).
-            if self._abort_signalled():
-                break
+
+        first_chunk = min(distance_abs, self.max_move_chunk_mm)
+        self._submit_single_trapezoid(direction * first_chunk, speed)
+        remaining = distance_abs - first_chunk
+        if remaining > 0:
+            self._pending_remaining_mm = remaining
+            self._pending_direction = direction
+            self._pending_speed = speed
 
     def _submit_single_trapezoid(self, signed_distance, speed):
         """Append one trapezoid to our trapq. Low-level primitive."""
@@ -1284,22 +1340,23 @@ class BufferFeeder:
     cmd_BUFFER_AUTO_OFF_help = "Disable bang-bang auto mode (also clears JAM/runout-follow)"
     def cmd_BUFFER_AUTO_OFF(self, gcmd):
         # Full-reset semantic: AUTO_OFF is the operator's "stop
-        # everything and acknowledge" lever. Clear ALL recovery and
-        # modal flags so the system is in a clean IDLE state.
+        # everything and acknowledge" lever. Clears recovery flags
+        # BUT NOT _bang_bang_suspended — that one tracks print-PAUSE
+        # state and is owned exclusively by idle_timeout handlers.
         # Also arms _halt_requested so any in-flight macro aborts
         # at its next wait-point (same contract as BUFFER_HALT).
         self._continuous_feed = False
         self._halt_motion()
+        self._pending_remaining_mm = 0.0
         self._jam_active = False
         self._hall2_start_time = None
         self._hall3_start_time = None
         self._runout_follow_active = False
         self._runout_filament_ref = None
-        self._bang_bang_suspended = False
         self._measure_load_active = False
         self._measure_feeding = False
         self._cooldown_deadline = None
-        self._auto_off_by_user = True   # disable the cooldown->AUTO auto-rearm
+        self._auto_off_by_user = True   # sticky against reinsert → AUTO auto-rearm
         self._halt_requested = True
         self._set_state(STATE_IDLE)
         self._respond("AUTO off — workflow will abort at next wait; recovery flags cleared")
@@ -1313,8 +1370,8 @@ class BufferFeeder:
                 or self.hall_overflow)
 
     def _wait_for_move_done(self, gcmd=None):
-        """Internal: block until any in-flight move finishes OR an
-        emergency condition trips.
+        """Internal: block until both in-flight and pending-stream
+        moves are done, OR an emergency condition trips.
 
         Used by blocking phase commands that legitimately hold the
         busy-phase state during the wait. External callers should
@@ -1323,11 +1380,9 @@ class BufferFeeder:
 
         Early-exits on HALT / OVERFLOW / JAM because at that point
         the motor has already been disabled (or is about to be) and
-        waiting out the nominal trapq end_time is pointless — for a
-        long single-shot BUFFER_FEED DISTANCE=1000 at 15mm/s that
-        would mean a 60s zombie-wait.
+        waiting out the nominal trapq end_time is pointless.
         """
-        while self._move_in_flight():
+        while self._move_in_flight() or self._pending_remaining_mm > 0:
             if self._abort_signalled():
                 break
             self.reactor.pause(self.reactor.monotonic() + 0.05)
@@ -1338,11 +1393,12 @@ class BufferFeeder:
                                  "AND state has exited busy-phase (IDLE / AUTO / RUNOUT / lockout)")
     def cmd_BUFFER_WAIT_IDLE(self, gcmd):
         # Public contract (README / spec): wait for move-fertig AND
-        # state=IDLE/AUTO. Waiting on move-in-flight alone returns
-        # during the brief gap between LOAD/UNLOAD_PHASE_2 move end
-        # and main_tick's auto-transition back to IDLE.
+        # state=IDLE/AUTO. Also wait for pending-streamed chunks
+        # to drain so the full logical move is done.
         # Early-exit on emergency conditions so abort propagates fast.
-        while self._move_in_flight() or self._state in BUSY_PHASE_STATES:
+        while (self._move_in_flight()
+               or self._pending_remaining_mm > 0
+               or self._state in BUSY_PHASE_STATES):
             if self._abort_signalled():
                 break
             self.reactor.pause(self.reactor.monotonic() + 0.05)
@@ -1368,7 +1424,12 @@ class BufferFeeder:
         # Blocking: wait for move done (state stays LOAD_PHASE_1 during
         # the wait, so we need the internal helper — BUFFER_WAIT_IDLE
         # would deadlock because it also waits for state != busy-phase).
-        self._wait_for_move_done(gcmd)
+        try:
+            self._wait_for_move_done(gcmd)
+        except Exception:
+            # Release the phase state on error so it doesn't stay sticky.
+            self._set_state(STATE_IDLE)
+            raise
         self._set_state(STATE_IDLE)
 
     cmd_BUFFER_LOAD_PHASE2_help = "LOAD Phase 2 — feeder parallel to extruder. Non-blocking, use BUFFER_WAIT_IDLE"
@@ -1419,6 +1480,10 @@ class BufferFeeder:
     def cmd_BUFFER_UNLOAD_PHASE1(self, gcmd):
         self._halt_requested = False
         self._raise_if_locked_out(gcmd)
+        if self._state in BUSY_PHASE_STATES:
+            raise self._cmd_error(
+                "UNLOAD_PHASE1 rejected — another phase already active (state=%s)"
+                % self._state)
         # Tip-Forming runs on the extruder alone. Feeder must stand
         # still, and the state must NOT be IDLE — otherwise manual
         # buttons and FORCE_BUFFER_FILL would accept input and stomp
@@ -1430,7 +1495,14 @@ class BufferFeeder:
         # Block until any in-flight chunk has finished (internal
         # helper — state stays UNLOAD_PHASE_1 during the wait, so
         # the public BUFFER_WAIT_IDLE would deadlock).
-        self._wait_for_move_done(gcmd)
+        try:
+            self._wait_for_move_done(gcmd)
+        except Exception:
+            # On error (HALT/JAM/OVERFLOW raising), release the phase
+            # state so it doesn't stay sticky. OVERFLOW/JAM will be
+            # reasserted by the next main_tick if still active.
+            self._set_state(STATE_IDLE)
+            raise
         self._disable_stepper()
         self._respond("UNLOAD Phase 1: feeder halted for tip-forming")
 
@@ -1524,11 +1596,14 @@ class BufferFeeder:
     def cmd_STOP_BUFFER_FILL(self, gcmd):
         # Full-reset semantic: STOP_BUFFER_FILL aborts everything and
         # clears recovery flags so we land in a clean IDLE state.
-        # Like BUFFER_HALT, this also arms _halt_requested so any
+        # Preserves _bang_bang_suspended — that flag tracks
+        # print-PAUSE state (owned by idle_timeout), not by this
+        # command. Like BUFFER_HALT, arms _halt_requested so any
         # macro waiting on BUFFER_WAIT_IDLE raises and aborts rather
         # than silently continuing to the next phase.
         self._continuous_feed = False
         self._halt_motion()
+        self._pending_remaining_mm = 0.0
         self._initial_grip_end_time = None
         self._load_phase3_distance = 0.0
         self._measure_load_active = False
@@ -1538,7 +1613,6 @@ class BufferFeeder:
         self._hall3_start_time = None
         self._runout_follow_active = False
         self._runout_filament_ref = None
-        self._bang_bang_suspended = False
         self._cooldown_deadline = None
         self._auto_off_by_user = True
         self._halt_requested = True
@@ -1558,11 +1632,14 @@ class BufferFeeder:
             "retract_button     = %s" % self.retract_button_pressed,
             "continuous_feed    = %s dir=%d" % (self._continuous_feed,
                                                 self._continuous_feed_direction),
+            "pending_remaining  = %.1f mm" % self._pending_remaining_mm,
             "feed_distance_acc  = %.1f mm" % self._feed_distance_accumulator,
             "accumulated total  = %.1f mm" % self._accumulated_feed_distance,
             "commanded_pos      = %.1f mm" % self._commanded_pos,
             "print_running      = %s" % self._print_running,
             "bang_bang_suspended= %s" % self._bang_bang_suspended,
+            "auto_off_by_user   = %s" % self._auto_off_by_user,
+            "cooldown_deadline  = %s" % (self._cooldown_deadline,),
             "halt_requested     = %s" % self._halt_requested,
             "jam_active         = %s" % self._jam_active,
             "runout_follow      = %s ref=%s" % (self._runout_follow_active,
