@@ -268,6 +268,11 @@ class BufferFeeder:
         # ----- Runout follow state -----
         self._runout_filament_ref = None
         self._runout_follow_active = False
+        # Armed when STATE_RUNOUT was cleared via entrance-reinsert
+        # during a paused print. Lets _on_idle_printing distinguish
+        # "RESUME after runout_pause=1 reinsert" (trigger grip+fill)
+        # from "any other RESUME with IDLE state" (leave as-is).
+        self._runout_recovery_pending = False
 
         # ----- Cooldown timer -----
         self._cooldown_deadline = None    # reactor time after which auto re-enables
@@ -486,18 +491,26 @@ class BufferFeeder:
         # RUNOUT-recovery path (runout_pause=1 case):
         #   Runout → STATE_RUNOUT + PAUSE → idle_timeout:ready armed
         #       _bang_bang_suspended.
-        #   Reinsert → STATE_IDLE (with "use RESUME" hint).
-        #   RESUME: fall into this branch. If filament is now at the
-        #       entrance and the operator hasn't disabled AUTO, run
+        #   Reinsert during RUNOUT → STATE_IDLE + _runout_recovery_pending.
+        #   RESUME: if the flag is armed AND filament is still at the
+        #       entrance AND no operator-control flag is set, run
         #       grip+fill so the buffer is full before the print
-        #       resumes actual extrusion. Without this, the
-        #       FORCE_BUFFER_FILL-during-suspension guard would have
-        #       left the operator with no documented recovery path.
-        if (self._state == STATE_IDLE
+        #       resumes actual extrusion.
+        #
+        # Gated by _runout_recovery_pending so that RESUME for other
+        # idle-state reasons (MEASURE_LOAD_STOP, an idle console
+        # session, BUFFER_HALT drop-to-IDLE, AUTO_OFF) does NOT queue
+        # surprise grip motion. Respects _halt_requested for the same
+        # reason. Flag is consumed by the grip or by any subsequent
+        # state change away from IDLE.
+        if (self._runout_recovery_pending
+                and self._state == STATE_IDLE
                 and self.entrance_detected
                 and not self._auto_off_by_user
+                and not self._halt_requested
                 and not self.hall_overflow):
-            self._respond("RESUME with filament at entrance — starting grip + fill")
+            self._runout_recovery_pending = False
+            self._respond("RESUME after runout-reinsert — starting grip + fill")
             self._start_initial_grip(self.reactor.monotonic())
 
     def _on_idle_ready(self, *args):
@@ -630,13 +643,14 @@ class BufferFeeder:
         # RUNOUT (runout_pause=1): the print has been PAUSE'd. Spec §5
         # says a reinsert clears RUNOUT but does NOT auto-grip —
         # grip during a paused print would queue unexpected motion.
-        # RESUME is the natural recovery path: _on_idle_printing sees
-        # the IDLE+entrance+unsuspended state and triggers grip+fill.
-        # Operators who want a manual fill before RESUME can call
-        # BUFFER_AUTO_OFF + FORCE_BUFFER_FILL (the AUTO_OFF clears
-        # _bang_bang_suspended; FORCE_BUFFER_FILL then runs).
+        # Arm _runout_recovery_pending so that the next RESUME
+        # (_on_idle_printing) specifically triggers grip+fill for
+        # THIS reinsert, not for any unrelated IDLE-state entering
+        # printing. Operators who want a manual fill before RESUME
+        # can call BUFFER_AUTO_OFF + FORCE_BUFFER_FILL.
         if self._state == STATE_RUNOUT:
             self._set_state(STATE_IDLE)
+            self._runout_recovery_pending = True
             self._respond("Reinsert during RUNOUT — cleared. Call "
                           "RESUME to continue (grip + fill runs "
                           "automatically), or BUFFER_AUTO_OFF + "
@@ -909,6 +923,15 @@ class BufferFeeder:
                     else:
                         self._set_state(STATE_AUTO)
                         self._respond("Initial grip done — AUTO engaged")
+                        # Guarantee the spec's "initial fill sequence":
+                        # bang-bang's deadband hysteresis would stop
+                        # immediately if the arm landed between HALL3
+                        # and HALL2 after the grip. Explicitly kick
+                        # continuous feed so the buffer fills to HALL2
+                        # before bang-bang's stop-on-full triggers.
+                        if not self.hall_full:
+                            self._start_continuous_motion(
+                                +1, self.feed_speed, self.max_feed_time)
                         # Optional auto-LOAD if hotend warm.
                         if self.auto_load_after_follow and self._hotend_warm():
                             self._gcode_run_script("LOAD_FILAMENT")
@@ -1417,6 +1440,8 @@ class BufferFeeder:
         # has already started.
         self._runout_follow_active = False
         self._runout_filament_ref = None
+        # HALT supersedes a pending RUNOUT-recovery auto-grip.
+        self._runout_recovery_pending = False
         # Wipe any cooldown timer so it can't later flip state.
         self._cooldown_deadline = None
         # Preserve safety-lockout states (OVERFLOW / JAM); any other
@@ -1482,6 +1507,7 @@ class BufferFeeder:
         self._cooldown_deadline = None
         self._bang_bang_suspended = False  # operator overrides PAUSE-suspend
         self._auto_off_by_user = True      # but reinsert auto-grip stays blocked
+        self._runout_recovery_pending = False
         self._halt_requested = True
         self._set_state(STATE_IDLE)
         # Best-effort restore of any pending LOAD/UNLOAD gcode-state
@@ -1769,6 +1795,7 @@ class BufferFeeder:
         self._cooldown_deadline = None
         self._bang_bang_suspended = False
         self._auto_off_by_user = True
+        self._runout_recovery_pending = False
         self._halt_requested = True
         self._set_state(STATE_IDLE)
         # Best-effort gcode-state restore after a failed LOAD/UNLOAD.
@@ -1981,6 +2008,7 @@ class BufferFeeder:
             # Config values (exposed so LOAD/UNLOAD macros don't hardcode)
             'feed_speed':               self.feed_speed,
             'manual_speed':             self.manual_speed,
+            'burst_speed':              self.burst_speed,
             'load_fast_speed':          self.load_fast_speed,
             'load_slow_speed':          self.load_slow_speed,
             'unload_fast_speed':        self.unload_fast_speed,
