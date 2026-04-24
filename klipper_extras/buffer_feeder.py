@@ -112,6 +112,11 @@ class BufferFeeder:
         self.max_feed_distance  = config.getfloat('max_feed_distance',  3000., above=0.)
         self.hall_debounce_ms   = config.getint  ('hall_debounce_ms',    50,   minval=0)
         self.lead_time          = config.getfloat('lead_time',            0.3, above=0.)
+        # Caps pending trapq time for any single move-submit. Long
+        # BUFFER_FEED DISTANCE=1000 style moves get chunked so that
+        # HALT / OVERFLOW can take effect within one chunk instead
+        # of waiting out the full nominal move duration.
+        self.max_move_chunk_mm  = config.getfloat('max_move_chunk_mm',  50.0,  above=0.)
 
         # ----- Config: jam detection -----
         self.jam_detection_enabled = config.getboolean('jam_detection_enabled', True)
@@ -255,6 +260,11 @@ class BufferFeeder:
 
         # ----- Cooldown timer -----
         self._cooldown_deadline = None    # reactor time after which auto re-enables
+        # When True, the cooldown-after-manual-move flow returns to
+        # IDLE instead of AUTO. Set by BUFFER_AUTO_OFF / STOP_BUFFER_FILL,
+        # cleared by BUFFER_AUTO_ON. Respects the user's explicit
+        # "bang-bang off" choice even after manual calibration moves.
+        self._auto_off_by_user = False
 
         # ----- Abort signalling (set by HALT / STOP_BUFFER_FILL) -----
         # When True, _raise_if_locked_out() raises once, then auto-clears
@@ -772,11 +782,15 @@ class BufferFeeder:
                     "SAFETY_DISTANCE",
                     "max_feed_distance %dmm reached in one continuous feed" % int(self.max_feed_distance))
 
-            # Cooldown end: back to AUTO if entrance present.
+            # Cooldown end: back to AUTO if entrance present AND the
+            # operator hasn't explicitly disabled AUTO.
             if self._cooldown_deadline is not None and eventtime >= self._cooldown_deadline:
                 self._cooldown_deadline = None
                 if self._state in (STATE_MANUAL_FEED, STATE_MANUAL_RETRACT, STATE_INITIAL_GRIP):
-                    if self.entrance_detected and not self.hall_overflow:
+                    if (self.entrance_detected
+                            and not self.hall_overflow
+                            and not self._auto_off_by_user
+                            and not self._bang_bang_suspended):
                         self._set_state(STATE_AUTO)
                     else:
                         self._set_state(STATE_IDLE)
@@ -982,23 +996,41 @@ class BufferFeeder:
             logging.exception("buffer_feeder: disable_stepper failed")
 
     def _submit_move(self, signed_distance, speed):
-        """Submit a single trapezoidal move to our trapq. Flush-free."""
+        """Submit a move to our trapq. Chunks long moves.
+
+        Flush-free. A long single-shot distance is split into chunks
+        of `max_move_chunk_mm` so `_last_move_end_time` never sits
+        more than one chunk in the future — that bounds the HALT
+        response latency to roughly one chunk duration regardless
+        of how large the caller requested.
+
+        Each chunk is a self-contained trapezoid (accel up / cruise /
+        decel to zero). Motion between chunks is audibly choppy at
+        high speeds; for smooth bulk moves, callers should pass the
+        move in via the continuous-feed path instead.
+        """
         if signed_distance == 0 or speed <= 0:
             return
-        # Final belt-and-suspenders safety: refuse any move while
-        # HALL1 is physically active, regardless of state. AUTO_OFF/
-        # STOP_BUFFER_FILL may have transitioned away from STATE_OVERFLOW
-        # before the next main_tick has re-asserted it. Also covers
-        # button-pulse / burst paths that submit outside the
-        # command-level _raise_if_locked_out guard. Silent refuse
-        # (no raise) since this is also called from reactor timers
-        # and button callbacks, where a raise would just log noisily.
         if self.hall_overflow:
             logging.warning("buffer_feeder: move rejected — HALL1 active "
                             "(distance=%.1f speed=%.1f)", signed_distance, speed)
             self._continuous_feed = False
             return
 
+        direction = 1.0 if signed_distance > 0 else -1.0
+        remaining = abs(signed_distance)
+        while remaining > 0:
+            chunk = min(remaining, self.max_move_chunk_mm)
+            self._submit_single_trapezoid(direction * chunk, speed)
+            remaining -= chunk
+            # If a HALT / lockout fires mid-sequence, stop appending
+            # further chunks. The already-appended chunk plays out on
+            # the MCU until its end_time (or the stepper is disabled).
+            if self._abort_signalled():
+                break
+
+    def _submit_single_trapezoid(self, signed_distance, speed):
+        """Append one trapezoid to our trapq. Low-level primitive."""
         self._enable_stepper()
 
         mcu = self.stepper.get_mcu()
@@ -1009,8 +1041,6 @@ class BufferFeeder:
         direction = 1.0 if signed_distance > 0 else -1.0
 
         accel = self.accel
-        # Trapezoidal profile: accel up to cruise_v, cruise, decel to 0.
-        # accel_t = cruise_v / accel; accel_dist = 0.5 * accel_t * cruise_v
         cruise_v = speed
         accel_time = cruise_v / accel
         accel_dist = 0.5 * accel_time * cruise_v
@@ -1029,14 +1059,8 @@ class BufferFeeder:
             decel_time = accel_time
 
         start_pos_x = self._commanded_pos
-        # Direction vector along our single axis 'x'
         axes_r_x = direction
 
-        # trapq_append signature:
-        # (trapq, print_time, accel_t, cruise_t, decel_t,
-        #  start_x, start_y, start_z,
-        #  axes_r_x, axes_r_y, axes_r_z,
-        #  start_v, cruise_v, accel)
         self.trapq_append(self.trapq, t0,
                           accel_time, cruise_time, decel_time,
                           start_pos_x, 0., 0.,
@@ -1058,11 +1082,9 @@ class BufferFeeder:
         self._feed_distance_accumulator += distance
         self._accumulated_feed_distance += distance
 
-        # Measurement counter.
         if self._measure_load_active and direction > 0:
             self._measure_load_distance += distance
 
-        # Kick background flusher.
         self.motion_queuing.note_mcu_movequeue_activity(end_time)
 
     def _move_in_flight(self):
@@ -1090,6 +1112,8 @@ class BufferFeeder:
         trip SAFETY_TIMEOUT on a quiescent feeder.
         """
         self._continuous_feed = False
+        self._continuous_feed_direction = 0
+        self._continuous_feed_speed = 0.0
         self._feed_deadline_time = None
 
     def _start_continuous_motion(self, direction, speed, max_duration_s):
@@ -1196,16 +1220,19 @@ class BufferFeeder:
                 "or wait for LOAD/UNLOAD to finish" % self._state)
         # Fresh manual command = operator acknowledges any stale HALT.
         self._halt_requested = False
+        # Always start from a clean continuous-feed state — don't let
+        # leftover bang-bang / old dauerfeed pump chunks into (or past)
+        # this new command.
+        self._continuous_feed = False
+        target_state = STATE_MANUAL_FEED if direction > 0 else STATE_MANUAL_RETRACT
         if distance > 0:
             if distance > self.max_feed_distance:
                 raise self._cmd_error("DISTANCE exceeds max_feed_distance=%.0f"
                                       % self.max_feed_distance)
-            target_state = STATE_MANUAL_FEED if direction > 0 else STATE_MANUAL_RETRACT
             self._set_state(target_state)
             self._submit_move(direction * distance, speed)
             self._schedule_return_to_auto_after_move()
         else:
-            target_state = STATE_MANUAL_FEED if direction > 0 else STATE_MANUAL_RETRACT
             self._set_state(target_state)
             self._start_continuous_motion(direction, speed, timeout)
 
@@ -1222,6 +1249,8 @@ class BufferFeeder:
         # has already started.
         self._runout_follow_active = False
         self._runout_filament_ref = None
+        # Wipe any cooldown timer so it can't later flip state.
+        self._cooldown_deadline = None
         # Preserve safety-lockout states (OVERFLOW / JAM); any other
         # state drops to IDLE. Our _set_state(STATE_IDLE) hook also
         # disables the stepper.
@@ -1244,10 +1273,10 @@ class BufferFeeder:
             raise self._cmd_error(
                 "Cannot enable AUTO while LOAD/UNLOAD in progress (state=%s). "
                 "Call STOP_BUFFER_FILL to abort first." % self._state)
-        # Clear pending HALT flag + any print-pause suspension — user
-        # is explicitly starting fresh.
+        # Clear all transient flags — user is explicitly starting fresh.
         self._halt_requested = False
         self._bang_bang_suspended = False
+        self._auto_off_by_user = False
         self._enable_stepper()
         self._set_state(STATE_AUTO)
         self._respond("AUTO engaged")
@@ -1257,6 +1286,8 @@ class BufferFeeder:
         # Full-reset semantic: AUTO_OFF is the operator's "stop
         # everything and acknowledge" lever. Clear ALL recovery and
         # modal flags so the system is in a clean IDLE state.
+        # Also arms _halt_requested so any in-flight macro aborts
+        # at its next wait-point (same contract as BUFFER_HALT).
         self._continuous_feed = False
         self._halt_motion()
         self._jam_active = False
@@ -1264,12 +1295,14 @@ class BufferFeeder:
         self._hall3_start_time = None
         self._runout_follow_active = False
         self._runout_filament_ref = None
-        self._halt_requested = False
         self._bang_bang_suspended = False
         self._measure_load_active = False
         self._measure_feeding = False
+        self._cooldown_deadline = None
+        self._auto_off_by_user = True   # disable the cooldown->AUTO auto-rearm
+        self._halt_requested = True
         self._set_state(STATE_IDLE)
-        self._respond("AUTO off (all recovery flags cleared)")
+        self._respond("AUTO off — workflow will abort at next wait; recovery flags cleared")
 
     def _abort_signalled(self):
         """True if a wait should cut short — HALT armed or safety lockout."""
@@ -1325,9 +1358,10 @@ class BufferFeeder:
                 % self._state)
         distance = gcmd.get_float('DISTANCE', self.load_fast_distance, above=0.)
         speed    = gcmd.get_float('SPEED',    self.load_fast_speed,    above=0.)
-        # Stop any inherited bang-bang / manual dauerfeed; main_tick
-        # would otherwise append chunks to this phase's single move.
+        # Stop any inherited bang-bang / manual dauerfeed and drain
+        # any in-flight chunk so residual motion doesn't extend Phase 1.
         self._continuous_feed = False
+        self._wait_for_move_done(gcmd)
         self._set_state(STATE_LOAD_PHASE_1)
         self._enable_stepper()
         self._submit_move(+distance, speed)
@@ -1348,6 +1382,7 @@ class BufferFeeder:
         distance = gcmd.get_float('DISTANCE', self.load_slow_distance, above=0.)
         speed    = gcmd.get_float('SPEED',    self.load_slow_speed,    above=0.)
         self._continuous_feed = False
+        self._wait_for_move_done(gcmd)
         self._set_state(STATE_LOAD_PHASE_2)
         self._enable_stepper()
         self._submit_move(+distance, speed)
@@ -1356,8 +1391,17 @@ class BufferFeeder:
     def cmd_BUFFER_LOAD_PHASE3(self, gcmd):
         self._halt_requested = False
         self._raise_if_locked_out(gcmd)
+        if self._state in BUSY_PHASE_STATES:
+            raise self._cmd_error(
+                "LOAD_PHASE3 rejected — another phase already active (state=%s)"
+                % self._state)
         max_distance = gcmd.get_float('MAX_DISTANCE', self.load_buffer_max, above=0.)
         speed        = gcmd.get_float('SPEED',        self.feed_speed,      above=0.)
+        # Clean start: stop any inherited continuous feed and wait for
+        # any in-flight manual move to finish before we begin chunk
+        # streaming. Prevents residual motion from tacking onto Phase 3.
+        self._continuous_feed = False
+        self._wait_for_move_done(gcmd)
         self._load_phase3_distance = 0.0
         self._load_phase3_max_distance = max_distance
         self._load_phase3_speed = speed
@@ -1401,6 +1445,7 @@ class BufferFeeder:
         distance = gcmd.get_float('DISTANCE', self.unload_sync_distance, above=0.)
         speed    = gcmd.get_float('SPEED',    self.unload_fast_speed,    above=0.)
         self._continuous_feed = False
+        self._wait_for_move_done(gcmd)
         self._set_state(STATE_UNLOAD_PHASE_2)
         self._enable_stepper()
         self._submit_move(-distance, speed)
@@ -1409,9 +1454,17 @@ class BufferFeeder:
     def cmd_BUFFER_UNLOAD_PHASE3(self, gcmd):
         self._halt_requested = False
         self._raise_if_locked_out(gcmd)
+        if self._state in BUSY_PHASE_STATES:
+            raise self._cmd_error(
+                "UNLOAD_PHASE3 rejected — another phase already active (state=%s)"
+                % self._state)
         max_distance = gcmd.get_float('MAX_DISTANCE', self.unload_fast_max, above=0.)
         speed        = gcmd.get_float('SPEED',        self.unload_fast_speed, above=0.)
         nominal_chunk = 50.0
+        # Clean start: cancel any inherited continuous feed and drain
+        # any in-flight move so residual motion doesn't join the retract.
+        self._continuous_feed = False
+        self._wait_for_move_done(gcmd)
         self._set_state(STATE_UNLOAD_PHASE_3)
         self._enable_stepper()
         retracted = 0.0
@@ -1486,6 +1539,8 @@ class BufferFeeder:
         self._runout_follow_active = False
         self._runout_filament_ref = None
         self._bang_bang_suspended = False
+        self._cooldown_deadline = None
+        self._auto_off_by_user = True
         self._halt_requested = True
         self._set_state(STATE_IDLE)
         self._respond("All feed loops stopped (workflow will abort at next wait)")

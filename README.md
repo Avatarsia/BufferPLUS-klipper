@@ -232,22 +232,39 @@ Zugriff aus Macros via `printer["buffer_feeder mellow"].<feld>`:
 
 | Feld | Typ | Bedeutung |
 |---|---|---|
-| `state` | str | INIT / IDLE / AUTO / MANUAL_FEED / ... / OVERFLOW / JAM |
+**Live State:**
+
+| Feld | Typ | Bedeutung |
+|---|---|---|
+| `state` | str | INIT / IDLE / INITIAL_GRIP / AUTO / MANUAL_FEED / MANUAL_RETRACT / LOAD_PHASE_1..3 / UNLOAD_PHASE_1..3 / OVERFLOW / RUNOUT / JAM |
 | `hall_empty` | bool | HALL3 aktiv (Buffer leer) |
 | `hall_full` | bool | HALL2 aktiv (Buffer voll) |
 | `hall_overflow` | bool | HALL1 aktiv (Überlauf) |
 | `entrance_detected` | bool | Filament am Eingang |
 | `feed_button_pressed` | bool | Live-Status |
 | `retract_button_pressed` | bool | Live-Status |
-| `continuous_feed` | bool | Extension fährt gerade |
+| `continuous_feed` | bool | Extension fährt gerade Dauerfeed |
 | `feed_direction` | int | +1/-1/0 |
-| `feed_distance_acc_mm` | float | Akkumulierte Distanz im aktuellen Feed-Zyklus (Safety) |
+| `feed_distance_acc_mm` | float | Akkumulierte Distanz im aktuellen Dauerfeed (Safety) |
 | `total_accumulated_mm` | float | Lifetime-Counter |
 | `commanded_pos_mm` | float | Internal position tracking |
-| `print_running` | bool | Externe Runout-Semantik |
-| `jam_active` | bool | Jam erkannt |
+| `print_running` | bool | Druck aktiv (aus idle_timeout) |
+| `jam_active` | bool | Jam erkannt, Lockout scharf |
+| `bang_bang_suspended` | bool | Bang-Bang pausiert (Druck-PAUSE bis RESUME) |
+| `halt_requested` | bool | HALT/STOP_BUFFER_FILL/AUTO_OFF hat Abort armiert |
+| `runout_follow_active` | bool | runout_pause=0 Nachlauf-Timer läuft |
 | `measure_load_active` | bool | MEASURE_LOAD-Modus |
 | `measure_load_distance_mm` | float | Im Mess-Modus gefördert |
+
+**Config-Werte (für Macro-Delegation):**
+
+| Feld | Typ | Bedeutung |
+|---|---|---|
+| `feed_speed`, `manual_speed`, `burst_speed` | float | mm/s — Auto/Manual/Burst |
+| `load_fast_speed`, `load_slow_speed`, `unload_fast_speed` | float | mm/s |
+| `load_fast_distance`, `load_slow_distance`, `load_buffer_max` | float | mm — LOAD-Distanzen |
+| `unload_sync_distance`, `unload_fast_max` | float | mm — UNLOAD-Distanzen |
+| `min_temp`, `accel` | float | °C / mm/s² |
 
 ---
 

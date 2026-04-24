@@ -327,8 +327,10 @@ run_current: 0.450
 
 - **HALL1 (Overflow)** hat Vorrang vor allem außer OVERFLOW selbst. Jeder Tick prüft erst
   Overflow, dann den State.
-- **Druck-Pause** (vom Macro oder Jam-Action) pausiert Bang-Bang. Extension merkt sich
-  `pending_state` und resumed bei RESUME.
+- **Druck-Pause** (vom Macro oder Jam-Action) pausiert Bang-Bang via
+  `_bang_bang_suspended`-Flag. Flag wird auf `idle_timeout:ready/idle`
+  armiert (wenn vorher `_print_running=True`) und auf `idle_timeout:printing`
+  wieder gelöst. RESUME clearet zusätzlich einen aktiven JAM-Lockout.
 - **Manuelle Taster** haben Vorrang vor AUTO, aber nicht über LOAD/UNLOAD. Während
   LOAD/UNLOAD sind Taster gesperrt (M118 Warnung).
 
@@ -352,7 +354,7 @@ Alle mit `cmd_<NAME>` als Methoden der `BufferFeeder`-Klasse.
 | `BUFFER_LOAD_PHASE3` | `MAX_DISTANCE=<mm>` | Feed bis HALL2 aktiv, max MAX_DISTANCE. |
 | `BUFFER_UNLOAD_PHASE2` | `DISTANCE=<mm>` `SPEED=<mm/s>` | Non-blocking, analog PHASE2. |
 | `BUFFER_UNLOAD_PHASE3` | `MAX_DISTANCE=<mm>` | Chunked retract bis entrance frei, max MAX_DISTANCE. |
-| `BUFFER_WAIT_IDLE` | — | Blockiert bis Extension-State = IDLE oder AUTO. |
+| `BUFFER_WAIT_IDLE` | — | Blockiert bis Extension kein Busy-Phase-State mehr hat **und** kein Move in flight ist. Raised auf OVERFLOW/JAM/HALT. Early-exit bei Abort-Signal. |
 | `FORCE_BUFFER_FILL` | — | State → INITIAL_GRIP, startet Initial-Fill-Sequenz. |
 | `STOP_BUFFER_FILL` | — | State → IDLE, bricht alles ab. |
 | `BUFFER_STATE_DUMP` | — | M118 mit vollständigem State. |
