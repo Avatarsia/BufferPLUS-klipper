@@ -277,6 +277,16 @@ class BufferFeeder:
         # "bang-bang off" choice even after manual calibration moves.
         self._auto_off_by_user = False
 
+        # ----- Macro gcode-state tracking -----
+        # Klipper's SAVE_GCODE_STATE writes a saved_states entry;
+        # RESTORE_GCODE_STATE reads but does NOT delete. Without our
+        # own flag, a successful LOAD/UNLOAD restore leaves a valid
+        # slot behind, and the next _try_restore_gcode_state() (on a
+        # completely unrelated AUTO_OFF or CLEAR_JAM) would re-apply
+        # an ancient state. The flag is set by BUFFER_SAVE_MACRO_STATE
+        # and cleared after any restore succeeds.
+        self._macro_state_saved = False
+
         # ----- Abort signalling (set by HALT / STOP_BUFFER_FILL) -----
         # When True, _raise_if_locked_out() raises once, then auto-clears
         # the flag. Lets HALT propagate through any pending WAIT_IDLE
@@ -360,6 +370,12 @@ class BufferFeeder:
         gcode.register_command('BUFFER_RESTORE_STATE',
                                self.cmd_BUFFER_RESTORE_STATE,
                                desc="Best-effort restore of gcode-state saved by a failed LOAD/UNLOAD")
+        gcode.register_command('BUFFER_SAVE_MACRO_STATE',
+                               self.cmd_BUFFER_SAVE_MACRO_STATE,
+                               desc="Internal: mark gcode-state as saved (used by _SAVE_E_MODE)")
+        gcode.register_command('BUFFER_RESTORE_MACRO_STATE',
+                               self.cmd_BUFFER_RESTORE_MACRO_STATE,
+                               desc="Internal: restore + clear gcode-state save (used by _RESTORE_E_MODE)")
 
         logging.info("buffer_feeder '%s' initialised", self.name)
 
@@ -451,6 +467,11 @@ class BufferFeeder:
             self._jam_active = False
             self._hall2_start_time = None
             self._hall3_start_time = None
+            # If the jam interrupted a LOAD/UNLOAD macro mid-flight,
+            # the macro's SAVE_GCODE_STATE is still pending. Restore
+            # it now so the user's E-mode isn't stuck on M83 after
+            # RESUME. Parity with BUFFER_CLEAR_JAM's recovery path.
+            self._try_restore_gcode_state()
             if self.hall_overflow:
                 # Cannot resume while overflow physically present.
                 self._enter_overflow()
@@ -1276,9 +1297,20 @@ class BufferFeeder:
     # Helper: gcode interactions
     # -----------------------------------------------------------------------
 
-    def _gcode_run_script(self, script):
+    def _gcode_run_script(self, script, from_command=False):
+        """Run a gcode script, choosing the mutex-safe variant.
+
+        Inside a gcode command handler, we already hold the gcode
+        mutex — `run_script_from_command` avoids re-acquire issues.
+        Outside (reactor timer / event handler), use `run_script`
+        which acquires the mutex.
+        """
         try:
-            self.printer.lookup_object('gcode').run_script(script)
+            gc = self.printer.lookup_object('gcode')
+            if from_command:
+                gc.run_script_from_command(script)
+            else:
+                gc.run_script(script)
         except Exception:
             logging.exception("buffer_feeder: gcode run_script failed (%s)", script)
 
@@ -1430,7 +1462,7 @@ class BufferFeeder:
         # Best-effort restore of any pending LOAD/UNLOAD gcode-state
         # (E-mode etc.) so AUTO_OFF cleanly recovers after a failed
         # LOAD/UNLOAD that couldn't reach its _RESTORE_E_MODE.
-        self._try_restore_gcode_state()
+        self._try_restore_gcode_state(from_command=True)
         self._respond("AUTO off — workflow will abort at next wait; recovery flags cleared")
 
     def _abort_signalled(self):
@@ -1699,7 +1731,7 @@ class BufferFeeder:
         self._halt_requested = True
         self._set_state(STATE_IDLE)
         # Best-effort gcode-state restore after a failed LOAD/UNLOAD.
-        self._try_restore_gcode_state()
+        self._try_restore_gcode_state(from_command=True)
         self._respond("All feed loops stopped (workflow will abort at next wait)")
 
     cmd_BUFFER_STATE_DUMP_help = "Dump full buffer_feeder state to console"
@@ -1783,26 +1815,52 @@ class BufferFeeder:
         self._print_running = False
         self._respond("print_running=0 (runout PAUSE suppressed)")
 
-    def _try_restore_gcode_state(self):
+    def _try_restore_gcode_state(self, from_command=False):
         """Best-effort: restore the 'buffer_feeder_op' gcode state if
-        a LOAD/UNLOAD macro saved one. Idempotent — a missing save
-        is silently ignored. Called from cleanup paths (AUTO_OFF,
-        STOP_BUFFER_FILL, BUFFER_RESTORE_STATE)."""
+        a LOAD/UNLOAD macro saved one and we haven't already consumed
+        it. Klipper's RESTORE_GCODE_STATE doesn't delete the slot,
+        so without our own _macro_state_saved flag any later call
+        would re-apply a stale state. Idempotent across cleanup paths.
+        """
+        if not self._macro_state_saved:
+            return False
         try:
-            gcode_move = self.printer.lookup_object('gcode_move', None)
-            saved_states = getattr(gcode_move, 'saved_states', None) if gcode_move else None
-            if saved_states and 'buffer_feeder_op' in saved_states:
-                self._gcode_run_script("RESTORE_GCODE_STATE NAME=buffer_feeder_op MOVE=0")
-                return True
+            self._gcode_run_script(
+                "RESTORE_GCODE_STATE NAME=buffer_feeder_op MOVE=0",
+                from_command=from_command)
+            self._macro_state_saved = False
+            return True
         except Exception:
             logging.exception("buffer_feeder: gcode-state restore failed")
-        return False
+            return False
 
     def cmd_BUFFER_RESTORE_STATE(self, gcmd):
-        if self._try_restore_gcode_state():
+        if self._try_restore_gcode_state(from_command=True):
             self._respond("Restored gcode-state from 'buffer_feeder_op'")
         else:
             self._respond("No 'buffer_feeder_op' gcode-state to restore")
+
+    def cmd_BUFFER_SAVE_MACRO_STATE(self, gcmd):
+        """Invoked by the _SAVE_E_MODE macro. Saves gcode state AND
+        marks it as valid-to-restore. Running again before a restore
+        simply overwrites the slot."""
+        self._gcode_run_script(
+            "SAVE_GCODE_STATE NAME=buffer_feeder_op",
+            from_command=True)
+        self._macro_state_saved = True
+
+    def cmd_BUFFER_RESTORE_MACRO_STATE(self, gcmd):
+        """Invoked by the _RESTORE_E_MODE macro on the normal success
+        path. Restores and clears the flag so later cleanup paths
+        don't re-apply the same stale state."""
+        if not self._macro_state_saved:
+            # Normal success case: macro saved then restored exactly
+            # once. Silent no-op if called without a save (defensive).
+            return
+        self._gcode_run_script(
+            "RESTORE_GCODE_STATE NAME=buffer_feeder_op MOVE=0",
+            from_command=True)
+        self._macro_state_saved = False
 
     def cmd_BUFFER_CLEAR_JAM(self, gcmd):
         if self._state != STATE_JAM:
@@ -1815,7 +1873,7 @@ class BufferFeeder:
         # saved before the jam fired. Otherwise the operator would
         # end up back in AUTO with the E-mode still flipped to M83
         # from the failed macro.
-        self._try_restore_gcode_state()
+        self._try_restore_gcode_state(from_command=True)
         self._set_state(STATE_IDLE if not self.entrance_detected else STATE_AUTO)
         self._respond("JAM cleared — state=%s" % self._state)
 
