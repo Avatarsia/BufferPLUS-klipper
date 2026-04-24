@@ -429,15 +429,21 @@ class BufferFeeder:
                 self._set_state(STATE_IDLE)
 
     def _on_idle_ready(self, *args):
-        # If we were actively printing, treat this as print-PAUSE or
-        # print-end: suspend bang-bang. Manual BUFFER_AUTO_ON from an
-        # idle console never sees print_running=True, so this guard
-        # keeps user-initiated AUTO active across idle events.
-        if self._print_running and self._state == STATE_AUTO:
+        # Treat any transition out of an active print (PAUSE, jam-PAUSE,
+        # print end) as bang-bang-suspension. The flag is cleared on
+        # idle_timeout:printing (next RESUME or new print). Condition
+        # is independent of current state: during a jam we're in
+        # STATE_JAM, and BUFFER_CLEAR_JAM would otherwise re-start
+        # bang-bang while the print is still paused. Manual
+        # BUFFER_AUTO_ON from an idle console never sees
+        # _print_running=True, so this does not affect user-initiated
+        # AUTO during idle.
+        if self._print_running:
             self._bang_bang_suspended = True
-            self._continuous_feed = False
-            self._halt_motion()
-            self._respond("Print paused — bang-bang suspended")
+            if self._continuous_feed:
+                self._continuous_feed = False
+                self._halt_motion()
+            self._respond("Print paused — bang-bang suspended until RESUME")
         self._print_running = False
 
     # -----------------------------------------------------------------------
@@ -1126,6 +1132,8 @@ class BufferFeeder:
     def _cmd_feed_common(self, direction, distance, speed, timeout):
         if self._state in (STATE_OVERFLOW, STATE_JAM):
             raise self._cmd_error("BufferFeeder: state=%s blocks feed" % self._state)
+        if self.hall_overflow:
+            raise self._cmd_error("BufferFeeder: HALL1 overflow physically active — blocked")
         if self._state in BUSY_PHASE_STATES:
             raise self._cmd_error(
                 "BufferFeeder: busy (state=%s) — call STOP_BUFFER_FILL "
@@ -1207,18 +1215,20 @@ class BufferFeeder:
         self._set_state(STATE_IDLE)
         self._respond("AUTO off (all recovery flags cleared)")
 
-    cmd_BUFFER_WAIT_IDLE_help = "Block until the feeder's current move is complete"
+    cmd_BUFFER_WAIT_IDLE_help = ("Block until the feeder's current move is complete "
+                                 "AND state has exited busy-phase (IDLE / AUTO / RUNOUT / lockout)")
     def cmd_BUFFER_WAIT_IDLE(self, gcmd):
-        # Wait strictly for any in-flight feeder move to finish.
-        # State transitions are the responsibility of the invoking
-        # command (LOAD/UNLOAD phase commands transition back to IDLE
-        # themselves after calling this).
-        while self._move_in_flight():
+        # Public contract (README / spec): wait for move-fertig AND
+        # state=IDLE/AUTO. Waiting on move-in-flight alone returns
+        # during the brief gap between LOAD/UNLOAD_PHASE_2 move end
+        # and main_tick's auto-transition back to IDLE, which the
+        # caller sees as a race.
+        while self._move_in_flight() or self._state in BUSY_PHASE_STATES:
             eventtime = self.reactor.monotonic()
             self.reactor.pause(eventtime + 0.05)
-        # If a safety lockout tripped while we were waiting, abort the
-        # caller. The Klipper error propagates up and halts the macro,
-        # preventing subsequent phases from running.
+        # If a safety lockout tripped while we were waiting, abort
+        # the caller. The Klipper error propagates up and halts the
+        # macro, preventing subsequent phases from running.
         self._raise_if_locked_out(gcmd)
 
     cmd_BUFFER_LOAD_PHASE1_help = "LOAD Phase 1 — feeder alone fast to toolhead. DISTANCE=mm"
@@ -1471,7 +1481,12 @@ class BufferFeeder:
         if self._halt_requested:
             self._halt_requested = False
             raise self._cmd_error("BufferFeeder: HALT requested — aborting workflow")
-        if self._state == STATE_OVERFLOW:
+        # Check hall_overflow directly, not just state, to catch the
+        # race where AUTO_OFF / STOP_BUFFER_FILL reset state to IDLE
+        # while HALL1 is still physically active (the next main_tick
+        # would transition back to OVERFLOW, but until then a
+        # freshly-arriving motion command could sneak a move in).
+        if self._state == STATE_OVERFLOW or self.hall_overflow:
             raise self._cmd_error("BufferFeeder: HALL1 OVERFLOW active — aborting. Clear overflow, then retry.")
         if self._state == STATE_JAM or self._jam_active:
             raise self._cmd_error("BufferFeeder: JAM active — aborting. Use BUFFER_CLEAR_JAM after inspection.")
