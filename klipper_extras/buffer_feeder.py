@@ -173,6 +173,16 @@ class BufferFeeder:
         # calling stepper.set_position — same pattern force_move.manual_move
         # uses. Flag gates it so we do it exactly once.
         self._stepcompress_primed = False
+        # Monotonic clock tracker for motor_enable/disable scheduling.
+        # queue_digital_out commands on the same pin MUST be scheduled
+        # with strictly non-decreasing MCU clocks: a disable at clock A
+        # followed by an enable at clock B < A makes the MCU re-schedule
+        # the second toggle in the past ("Timer too close" → shutdown).
+        # This happened in the 2026-04-24 HALL1-during-pause crash, where
+        # _disable_stepper and a subsequent _enable_stepper used slightly
+        # different time bases (est_print_time vs. toolhead print_time)
+        # and clock-sync jitter during the stall caused a regression.
+        self._last_enable_schedule_time = 0.0
 
         # Stepper enable handle (resolved at connect)
         self._stepper_enable = None
@@ -1259,13 +1269,32 @@ class BufferFeeder:
     # Stepper control (flush-free move submit)
     # -----------------------------------------------------------------------
 
+    def _schedule_time_for_enable_toggle(self):
+        """Pick a safe print_time for the next motor_enable/disable.
+
+        Must satisfy ALL of:
+          - ≥ toolhead print_time + lead_time (avoids "in the past"
+            relative to the MCU's step-gen cursor)
+          - ≥ _last_move_end_time (so a disable never lands before a
+            queued step, which would force the MCU to reorder)
+          - ≥ previous enable/disable schedule time + ε (strictly
+            monotonic — else the MCU sees an out-of-order toggle and
+            crashes with "Timer too close").
+        """
+        toolhead = self.printer.lookup_object('toolhead')
+        th_time = toolhead.get_last_move_time()
+        pt = max(th_time + self.lead_time,
+                 self._last_move_end_time,
+                 self._last_enable_schedule_time + 1e-6)
+        self._last_enable_schedule_time = pt
+        return pt
+
     def _enable_stepper(self):
         if self._stepper_enable is None:
             return
         try:
-            mcu = self.stepper.get_mcu()
-            now_pt = mcu.estimated_print_time(self.reactor.monotonic())
-            self._stepper_enable.motor_enable(now_pt + self.lead_time)
+            pt = self._schedule_time_for_enable_toggle()
+            self._stepper_enable.motor_enable(pt)
         except Exception:
             logging.exception("buffer_feeder: enable_stepper failed")
 
@@ -1273,9 +1302,8 @@ class BufferFeeder:
         if self._stepper_enable is None:
             return
         try:
-            mcu = self.stepper.get_mcu()
-            now_pt = mcu.estimated_print_time(self.reactor.monotonic())
-            self._stepper_enable.motor_disable(now_pt + self.lead_time)
+            pt = self._schedule_time_for_enable_toggle()
+            self._stepper_enable.motor_disable(pt)
         except Exception:
             logging.exception("buffer_feeder: disable_stepper failed")
 
