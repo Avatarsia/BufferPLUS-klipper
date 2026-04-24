@@ -218,6 +218,10 @@ class BufferFeeder:
         self._feed_deadline_time = None     # max feed deadline (reactor time)
         self._measure_load_active = False
         self._measure_load_distance = 0.0
+        # Explicit toggle tracking so the first button click after
+        # MEASURE_LOAD_START always starts the feed, regardless of
+        # whatever _continuous_feed was doing in AUTO before.
+        self._measure_feeding = False
         self._print_running = False
         self._jam_active = False
 
@@ -277,6 +281,9 @@ class BufferFeeder:
         gcode.register_command('BUFFER_LOAD_PHASE3',
                                self.cmd_BUFFER_LOAD_PHASE3,
                                desc=self.cmd_BUFFER_LOAD_PHASE3_help)
+        gcode.register_command('BUFFER_UNLOAD_PHASE1',
+                               self.cmd_BUFFER_UNLOAD_PHASE1,
+                               desc=self.cmd_BUFFER_UNLOAD_PHASE1_help)
         gcode.register_command('BUFFER_UNLOAD_PHASE2',
                                self.cmd_BUFFER_UNLOAD_PHASE2,
                                desc=self.cmd_BUFFER_UNLOAD_PHASE2_help)
@@ -581,9 +588,12 @@ class BufferFeeder:
             return
 
         # MEASURE_LOAD toggle-mode overrides normal click logic on feed button.
+        # _measure_feeding drives the toggle explicitly so a prior AUTO
+        # bang-bang state does not pre-bias the first click.
         if button_name == BUTTON_FEED and self._measure_load_active:
-            if self._continuous_feed and self._continuous_feed_direction == 1:
+            if self._measure_feeding:
                 # 2nd click — stop.
+                self._measure_feeding = False
                 self._continuous_feed = False
                 self._halt_motion()
                 self._measure_report()
@@ -591,6 +601,7 @@ class BufferFeeder:
                 self._set_state(STATE_IDLE)
             else:
                 # 1st click — start.
+                self._measure_feeding = True
                 self._measure_load_distance = 0.0
                 self._start_continuous_motion(+1, self.manual_speed, None)
                 self._set_state(STATE_MANUAL_FEED)
@@ -981,8 +992,13 @@ class BufferFeeder:
         cut motor power on the MCU-level. Typical latency between
         halt request and actual motor-still: one chunk (≤0.5s at
         manual_speed) plus MCU step-queue depth (ms).
+
+        Also clears `_feed_deadline_time` so a deadline that was
+        armed for a since-finished continuous feed does not later
+        trip SAFETY_TIMEOUT on a quiescent feeder.
         """
         self._continuous_feed = False
+        self._feed_deadline_time = None
 
     def _start_continuous_motion(self, direction, speed, max_duration_s):
         self._continuous_feed = True
@@ -1194,6 +1210,21 @@ class BufferFeeder:
         # Exit reason might be normal (AUTO) or safety lockout — check.
         self._raise_if_locked_out(gcmd)
 
+    cmd_BUFFER_UNLOAD_PHASE1_help = ("UNLOAD Phase 1 — halt feeder and lock state for tip-forming "
+                                     "(so buttons / FORCE_BUFFER_FILL don't interfere)")
+    def cmd_BUFFER_UNLOAD_PHASE1(self, gcmd):
+        self._raise_if_locked_out(gcmd)
+        # Tip-Forming runs on the extruder alone. Feeder must stand
+        # still, and the state must NOT be IDLE — otherwise manual
+        # buttons and FORCE_BUFFER_FILL would accept input and stomp
+        # the unload sequence. STATE_UNLOAD_PHASE_1 is one of the
+        # phase states blocked by the button handler.
+        self._continuous_feed = False
+        self._halt_motion()
+        self._set_state(STATE_UNLOAD_PHASE_1)
+        self._disable_stepper()
+        self._respond("UNLOAD Phase 1: feeder halted for tip-forming")
+
     cmd_BUFFER_UNLOAD_PHASE2_help = "UNLOAD Phase 2 — feeder retract parallel to extruder"
     def cmd_BUFFER_UNLOAD_PHASE2(self, gcmd):
         self._raise_if_locked_out(gcmd)
@@ -1314,7 +1345,14 @@ class BufferFeeder:
     def cmd_MEASURE_LOAD_START(self, gcmd):
         if self._state not in (STATE_IDLE, STATE_AUTO):
             raise self._cmd_error("MEASURE_LOAD_START requires IDLE or AUTO state")
+        # If AUTO was already actively feeding (HALL3-triggered
+        # bang-bang), stop it and reset to IDLE so the first button
+        # press is unambiguously "start measurement feed".
+        self._continuous_feed = False
+        self._halt_motion()
+        self._set_state(STATE_IDLE)
         self._measure_load_active = True
+        self._measure_feeding = False
         self._measure_load_distance = 0.0
         self._respond("MEASURE_LOAD active — press feed button to start/stop")
 
@@ -1324,12 +1362,10 @@ class BufferFeeder:
         self._halt_motion()
         self._measure_report()
         self._measure_load_active = False
-        # Reset state: if the feeder was started via the feed-button in
-        # toggle-mode, state was MANUAL_FEED. Drop it back to IDLE (or
-        # AUTO if filament is present and no safety flags) so a
-        # subsequent MEASURE_LOAD_START doesn't fail its precondition.
-        if self._state in (STATE_MANUAL_FEED, STATE_MANUAL_RETRACT):
-            self._set_state(STATE_IDLE)
+        self._measure_feeding = False
+        # Always return to IDLE — the operator can explicitly
+        # BUFFER_AUTO_ON again if they want the bang-bang loop back.
+        self._set_state(STATE_IDLE)
 
     def cmd_ENABLE_RUNOUT_SENSOR(self, gcmd):
         self._print_running = True
