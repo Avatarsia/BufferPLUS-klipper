@@ -844,9 +844,12 @@ class BufferFeeder:
             self._set_state(STATE_AUTO)
             return
         if not self._move_in_flight():
-            chunk = 10.0
-            self._submit_move(chunk, self._load_phase3_speed)
-            self._load_phase3_distance += chunk
+            # Clip chunk so the per-call MAX_DISTANCE is a hard cap.
+            remaining = self._load_phase3_max_distance - self._load_phase3_distance
+            chunk = min(10.0, remaining)
+            if chunk > 0:
+                self._submit_move(chunk, self._load_phase3_speed)
+                self._load_phase3_distance += chunk
 
     # -----------------------------------------------------------------------
     # Jam detection tick
@@ -941,6 +944,19 @@ class BufferFeeder:
     def _submit_move(self, signed_distance, speed):
         """Submit a single trapezoidal move to our trapq. Flush-free."""
         if signed_distance == 0 or speed <= 0:
+            return
+        # Final belt-and-suspenders safety: refuse any move while
+        # HALL1 is physically active, regardless of state. AUTO_OFF/
+        # STOP_BUFFER_FILL may have transitioned away from STATE_OVERFLOW
+        # before the next main_tick has re-asserted it. Also covers
+        # button-pulse / burst paths that submit outside the
+        # command-level _raise_if_locked_out guard. Silent refuse
+        # (no raise) since this is also called from reactor timers
+        # and button callbacks, where a raise would just log noisily.
+        if self.hall_overflow:
+            logging.warning("buffer_feeder: move rejected — HALL1 active "
+                            "(distance=%.1f speed=%.1f)", signed_distance, speed)
+            self._continuous_feed = False
             return
 
         self._enable_stepper()
@@ -1215,6 +1231,19 @@ class BufferFeeder:
         self._set_state(STATE_IDLE)
         self._respond("AUTO off (all recovery flags cleared)")
 
+    def _wait_for_move_done(self, gcmd=None):
+        """Internal: block until any in-flight move finishes.
+
+        Used by blocking phase commands that legitimately hold the
+        busy-phase state during the wait. External callers should
+        use cmd_BUFFER_WAIT_IDLE instead, which additionally waits
+        for the busy-phase state to be vacated.
+        """
+        while self._move_in_flight():
+            self.reactor.pause(self.reactor.monotonic() + 0.05)
+        if gcmd is not None:
+            self._raise_if_locked_out(gcmd)
+
     cmd_BUFFER_WAIT_IDLE_help = ("Block until the feeder's current move is complete "
                                  "AND state has exited busy-phase (IDLE / AUTO / RUNOUT / lockout)")
     def cmd_BUFFER_WAIT_IDLE(self, gcmd):
@@ -1240,8 +1269,10 @@ class BufferFeeder:
         self._set_state(STATE_LOAD_PHASE_1)
         self._enable_stepper()
         self._submit_move(+distance, speed)
-        # Blocking: wait until done. WAIT_IDLE raises on OVERFLOW/JAM.
-        self.cmd_BUFFER_WAIT_IDLE(gcmd)
+        # Blocking: wait for move done (state stays LOAD_PHASE_1 during
+        # the wait, so we need the internal helper — BUFFER_WAIT_IDLE
+        # would deadlock because it also waits for state != busy-phase).
+        self._wait_for_move_done(gcmd)
         self._set_state(STATE_IDLE)
 
     cmd_BUFFER_LOAD_PHASE2_help = "LOAD Phase 2 — feeder parallel to extruder. Non-blocking, use BUFFER_WAIT_IDLE"
@@ -1285,13 +1316,10 @@ class BufferFeeder:
         self._continuous_feed = False
         self._halt_motion()
         self._set_state(STATE_UNLOAD_PHASE_1)
-        # Block until any in-flight chunk has finished. Otherwise
-        # tip-forming Push/Pull on the extruder could overlap with
-        # residual feeder motion (up to one chunk + MCU queue depth).
-        # _halt_motion does NOT truncate the trapq; the last-submitted
-        # chunk still plays out. BUFFER_WAIT_IDLE does the right
-        # thing (and raises on OVERFLOW/JAM).
-        self.cmd_BUFFER_WAIT_IDLE(gcmd)
+        # Block until any in-flight chunk has finished (internal
+        # helper — state stays UNLOAD_PHASE_1 during the wait, so
+        # the public BUFFER_WAIT_IDLE would deadlock).
+        self._wait_for_move_done(gcmd)
         self._disable_stepper()
         self._respond("UNLOAD Phase 1: feeder halted for tip-forming")
 
@@ -1311,22 +1339,32 @@ class BufferFeeder:
         self._raise_if_locked_out(gcmd)
         max_distance = gcmd.get_float('MAX_DISTANCE', self.unload_fast_max, above=0.)
         speed        = gcmd.get_float('SPEED',        self.unload_fast_speed, above=0.)
-        chunk        = 50.0
+        nominal_chunk = 50.0
         self._set_state(STATE_UNLOAD_PHASE_3)
         self._enable_stepper()
         retracted = 0.0
+        overshoot = False
         while retracted < max_distance:
-            # Abort immediately on lockout (WAIT_IDLE also catches, but
-            # check before the next submit to avoid a race).
+            # Abort immediately on lockout.
             self._raise_if_locked_out(gcmd)
             if not self.entrance_detected:
                 self._respond("UNLOAD Phase 3: entrance clear after %.0f mm" % retracted)
                 break
+            # Clip last chunk so MAX_DISTANCE is a HARD cap, not a
+            # best-effort ceiling (previously could overshoot by up
+            # to one full chunk).
+            chunk = min(nominal_chunk, max_distance - retracted)
+            if chunk <= 0:
+                overshoot = True
+                break
             self._submit_move(-chunk, speed)
             retracted += chunk
-            # WAIT_IDLE raises if OVERFLOW/JAM happens during this chunk.
-            self.cmd_BUFFER_WAIT_IDLE(gcmd)
+            # Wait on move-only; state stays UNLOAD_PHASE_3 until we
+            # exit the loop. _wait_for_move_done raises on OVERFLOW/JAM.
+            self._wait_for_move_done(gcmd)
         else:
+            overshoot = True
+        if overshoot:
             self._respond("UNLOAD Phase 3: MAX_DISTANCE reached without entrance clear",
                           force_display=True)
         self._disable_stepper()
