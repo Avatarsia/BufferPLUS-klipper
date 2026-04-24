@@ -148,6 +148,14 @@ class BufferFeeder:
         self.stepper = stepper.PrinterStepper(config, units_in_radians=False)
         self.stepper.setup_itersolve('cartesian_stepper_alloc', b'x')
         self.stepper.set_trapq(self.trapq)
+        # Make motion_queuing recompute step-generation scan windows
+        # with our new stepper. Without this call, the internal
+        # step-gen timing budget doesn't account for our stepper and
+        # the first generated step lands past the MCU deadline,
+        # triggering "Timer too close" on the LLL_PLUS MCU at boot.
+        # Same pattern Klipper's kinematics/extruder.py uses in
+        # sync_to_extruder after changing trapq bindings.
+        self.motion_queuing.check_step_generation_scan_windows()
 
         # Stepper position tracking (mm)
         self._commanded_pos = 0.0          # head of planned moves (end)
@@ -421,9 +429,11 @@ class BufferFeeder:
             logging.exception("buffer_feeder: could not register idle events")
 
     def _handle_ready(self):
-        # Set initial stepper position to zero in our frame.
-        self.stepper.set_position([0., 0., 0.])
         # Populate "last_move_end_time" based on current MCU print_time.
+        # (set_position is intentionally NOT called here — PrinterStepper
+        # defaults to position 0, and calling set_position on a stepper
+        # whose trapq has never been fed can cause unexpected step
+        # scheduling.)
         mcu = self.stepper.get_mcu()
         now_pt = mcu.estimated_print_time(self.reactor.monotonic())
         self._last_move_end_time = now_pt + self.lead_time
