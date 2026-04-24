@@ -1409,8 +1409,12 @@ class BufferFeeder:
             raise self._cmd_error(
                 "BufferFeeder: busy (state=%s) — call STOP_BUFFER_FILL "
                 "or wait for LOAD/UNLOAD to finish" % self._state)
-        # Fresh manual command = operator acknowledges any stale HALT.
+        # Fresh manual command = operator acknowledges any stale HALT
+        # AND any pending runout-recovery auto-grip. Operator picked a
+        # different recovery path (manual feed/retract) — RESUME should
+        # not later queue a surprise grip.
         self._halt_requested = False
+        self._runout_recovery_pending = False
         # Always start from a clean continuous-feed state — don't let
         # leftover bang-bang / old dauerfeed pump chunks into (or past)
         # this new command.
@@ -1477,8 +1481,12 @@ class BufferFeeder:
                 "automatically. If the print is already finished, "
                 "use BUFFER_AUTO_OFF first to clear the suspension.")
         # Clear transient flags — user is explicitly starting fresh.
+        # Also consume any pending RUNOUT-recovery: operator chose
+        # to engage AUTO directly, so RESUME should not later insert
+        # a grip on top.
         self._halt_requested = False
         self._auto_off_by_user = False
+        self._runout_recovery_pending = False
         self._enable_stepper()
         self._set_state(STATE_AUTO)
         self._respond("AUTO engaged")
@@ -1761,8 +1769,11 @@ class BufferFeeder:
         # continues until HALL2). Without clearing _auto_off_by_user
         # the grip would drop to IDLE and the "fill" part never runs —
         # BUFFER_AUTO_OFF → FORCE_BUFFER_FILL only grips 10s then stops.
+        # Also consume any pending RUNOUT-recovery: this manual fill
+        # IS the recovery, no need for RESUME to re-trigger.
         self._halt_requested = False
         self._auto_off_by_user = False
+        self._runout_recovery_pending = False
         # Wait for any lingering in-flight chunk from a prior aborted
         # move to drain. Otherwise the initial-grip's end_time would
         # undershoot by the old chunk's remaining trapq duration
@@ -1827,6 +1838,7 @@ class BufferFeeder:
             "jam_active         = %s" % self._jam_active,
             "runout_follow      = %s ref=%s" % (self._runout_follow_active,
                                                 self._runout_filament_ref),
+            "runout_recov_pending= %s (RESUME will grip+fill if armed)" % self._runout_recovery_pending,
             "macro_state_saved  = %s (buffer_feeder_op slot consumable)" % self._macro_state_saved,
             "measure_load       = active=%s feeding=%s dist=%.1f mm" % (
                 self._measure_load_active, self._measure_feeding,
@@ -1859,6 +1871,10 @@ class BufferFeeder:
         # press is unambiguously "start measurement feed".
         self._continuous_feed = False
         self._halt_motion()
+        # Operator is entering a distinct calibration workflow —
+        # consume any pending RUNOUT-recovery so RESUME afterwards
+        # doesn't surprise-grip on top of the measurement.
+        self._runout_recovery_pending = False
         self._set_state(STATE_IDLE)
         self._measure_load_active = True
         self._measure_feeding = False
@@ -2002,6 +2018,7 @@ class BufferFeeder:
             'bang_bang_suspended':      self._bang_bang_suspended,
             'halt_requested':           self._halt_requested,
             'runout_follow_active':     self._runout_follow_active,
+            'runout_recovery_pending':  self._runout_recovery_pending,
             'measure_load_active':      self._measure_load_active,
             'measure_load_distance_mm': self._measure_load_distance,
             'macro_state_saved':        self._macro_state_saved,

@@ -207,7 +207,7 @@ orchestriert. Direkter Aufruf nur für Debug.
 |---|---|
 | `LOAD_FILAMENT` | Komplette Ladesequenz (3 Phasen). Hotend-Check. |
 | `UNLOAD_FILAMENT` | Tip-Forming + Sync-Retract + Feeder-Rückzug. |
-| `FORCE_BUFFER_FILL` | Initial-Grip starten (falls nicht via entrance-Event). |
+| `FORCE_BUFFER_FILL` | Full Initial-Fill-Cycle: Grip-Phase, dann Continuous-Feed bis HALL2 aktiv (Buffer voll) → AUTO. Cleart `auto_off_by_user`, sodass die Bang-Bang-Regelung danach weiterläuft. Refused während Druck-PAUSE. |
 | `STOP_BUFFER_FILL` | Alles abbrechen, zurück in IDLE. |
 
 ### Kalibrierung
@@ -254,6 +254,7 @@ Zugriff aus Macros via `printer["buffer_feeder mellow"].<feld>`:
 | `bang_bang_suspended` | bool | Bang-Bang pausiert (Druck-PAUSE bis RESUME) |
 | `halt_requested` | bool | HALT/STOP_BUFFER_FILL/AUTO_OFF hat Abort armiert |
 | `runout_follow_active` | bool | runout_pause=0 Nachlauf-Timer läuft |
+| `runout_recovery_pending` | bool | Reinsert nach RUNOUT armiert — nächstes RESUME triggert grip+fill |
 | `measure_load_active` | bool | MEASURE_LOAD-Modus |
 | `measure_load_distance_mm` | float | Im Mess-Modus gefördert |
 | `macro_state_saved` | bool | `buffer_feeder_op` GCode-State Save liegt an (konsumierbar via `BUFFER_RESTORE_STATE` / `BUFFER_CLEAR_JAM` / `AUTO_OFF` / `STOP_BUFFER_FILL` / RESUME) |
