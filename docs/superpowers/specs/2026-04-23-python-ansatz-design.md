@@ -364,18 +364,32 @@ Alle mit `cmd_<NAME>` als Methoden der `BufferFeeder`-Klasse.
 
 ```python
 {
-    "state": "AUTO",                    # str
-    "hall_empty": False,                # HALL3
-    "hall_full": True,                  # HALL2
-    "hall_overflow": False,             # HALL1
-    "entrance_detected": True,          # buffer_entrance
-    "feeder_moving": False,             # bool
-    "feeder_direction": 0,              # -1, 0, +1
-    "manual_distance_counter": 0.0,     # mm (für MEASURE_LOAD)
-    "last_jam_check_time": 12345.67,    # reactor time
-    "jam_active": False,                # bool
-    "print_running": False,             # bool (aus Macros gesetzt)
-    "accumulated_feed_distance": 1234.5,# mm lifetime
+    # Live state
+    "state": "AUTO",                          # str
+    "hall_empty": False,                      # HALL3
+    "hall_full": True,                        # HALL2
+    "hall_overflow": False,                   # HALL1
+    "entrance_detected": True,                # buffer_entrance
+    "feed_button_pressed": False,             # bool
+    "retract_button_pressed": False,          # bool
+    "continuous_feed": False,                 # bool
+    "feed_direction": 0,                      # -1, 0, +1
+    "feed_distance_acc_mm": 0.0,              # mm in current continuous feed
+    "total_accumulated_mm": 1234.5,           # mm lifetime
+    "commanded_pos_mm": 0.0,                  # internal position tracking
+    "print_running": False,                   # from idle_timeout:printing
+    "jam_active": False,                      # bool
+    "bang_bang_suspended": False,             # True during print-PAUSE
+    "halt_requested": False,                  # armed by HALT/STOP_BUFFER_FILL
+    "runout_follow_active": False,            # runout_pause=0 follow window
+    "measure_load_active": False,             # MEASURE_LOAD mode on
+    "measure_load_distance_mm": 0.0,          # mm measured
+    # Config values (stable, read from config)
+    "feed_speed": 30.0, "manual_speed": 15.0, "load_fast_speed": 50.0,
+    "load_slow_speed": 5.0, "unload_fast_speed": 50.0,
+    "load_fast_distance": 1000.0, "load_slow_distance": 180.0,
+    "load_buffer_max": 2000.0, "unload_sync_distance": 180.0,
+    "unload_fast_max": 2510.0, "min_temp": 180.0, "accel": 1000.0,
 }
 ```
 

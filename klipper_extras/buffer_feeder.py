@@ -52,6 +52,14 @@ BUSY_PHASE_STATES = {STATE_INITIAL_GRIP,
                      STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2, STATE_LOAD_PHASE_3,
                      STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2, STATE_UNLOAD_PHASE_3}
 
+# States where the main_tick continuous-feed chunk-pump is allowed
+# to run. In any other state, a stale _continuous_feed must NOT
+# cause new chunks to be submitted — otherwise a previously-active
+# bang-bang or manual dauerfeed leaks into subsequent phases.
+CONTINUOUS_FEED_STATES = {STATE_AUTO, STATE_MANUAL_FEED,
+                          STATE_MANUAL_RETRACT, STATE_LOAD_PHASE_3,
+                          STATE_INITIAL_GRIP}
+
 # States where jam-detection watches for HALL dwell anomalies.
 JAM_WATCH_STATES = {STATE_AUTO, STATE_LOAD_PHASE_3}
 
@@ -547,8 +555,23 @@ class BufferFeeder:
             self._runout_follow_active = False
             self._runout_filament_ref = None
             self._respond("Runout-follow cancelled (filament re-inserted)")
-        # Only trigger initial grip if we're in a state that welcomes it.
-        if self._state in (STATE_IDLE, STATE_RUNOUT):
+        # RUNOUT (runout_pause=1): the print has been PAUSE'd. Spec §5
+        # says a reinsert clears RUNOUT but does NOT auto-grip —
+        # user must call FORCE_BUFFER_FILL or RESUME explicitly.
+        # Grip during paused print would queue unexpected motion.
+        if self._state == STATE_RUNOUT:
+            self._set_state(STATE_IDLE)
+            self._respond("Reinsert during RUNOUT — cleared. Call "
+                          "FORCE_BUFFER_FILL manually if re-fill is desired.")
+            return
+        # Also suppress auto-grip while bang-bang is suspended (paused
+        # print via idle_timeout:ready). Operator can manually trigger.
+        if self._bang_bang_suspended:
+            self._respond("Reinsert during paused print — auto-grip suppressed. "
+                          "Use FORCE_BUFFER_FILL to trigger manually after RESUME.")
+            return
+        # Normal idle-state reinsert: kick off initial grip.
+        if self._state == STATE_IDLE:
             self._start_initial_grip(eventtime)
 
     def _on_entrance_runout(self, eventtime):
@@ -608,11 +631,17 @@ class BufferFeeder:
 
     def _on_button_press(self, button_name, eventtime):
         # Block manual buttons during LOAD/UNLOAD/OVERFLOW/JAM.
+        # Also block if HALL1 is physically active — covers the race
+        # where AUTO_OFF/STOP_BUFFER_FILL reset state to IDLE before
+        # the next main_tick re-asserts OVERFLOW.
         if self._state in (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2, STATE_LOAD_PHASE_3,
                            STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2,
                            STATE_UNLOAD_PHASE_3, STATE_OVERFLOW, STATE_JAM,
                            STATE_INITIAL_GRIP):
             self._respond("Button ignored — state=%s" % self._state)
+            return
+        if self.hall_overflow:
+            self._respond("Button ignored — HALL1 overflow physically active")
             return
 
         # MEASURE_LOAD toggle-mode overrides normal click logic on feed button.
@@ -798,8 +827,14 @@ class BufferFeeder:
             if self._state in (STATE_LOAD_PHASE_2, STATE_UNLOAD_PHASE_2) and not self._move_in_flight():
                 self._set_state(STATE_IDLE)
 
-            # Continuous feed: keep chunks streaming.
-            if self._continuous_feed and not self._move_in_flight():
+            # Continuous feed: keep chunks streaming, but only in
+            # states where continuous motion is the intended behavior.
+            # Otherwise a stale _continuous_feed=True would leak into
+            # LOAD_PHASE_1/2 / UNLOAD_PHASE_2 single-shot moves and
+            # keep pumping extra chunks after the phase's own move.
+            if (self._continuous_feed
+                    and self._state in CONTINUOUS_FEED_STATES
+                    and not self._move_in_flight()):
                 chunk_dist = max(self.manual_chunk_distance,
                                  self._continuous_feed_speed * 0.5)
                 self._submit_move(self._continuous_feed_direction * chunk_dist,
@@ -839,9 +874,14 @@ class BufferFeeder:
         if self._load_phase3_distance >= self._load_phase3_max_distance:
             self._continuous_feed = False
             self._halt_motion()
-            self._respond("LOAD Phase 3: max_distance reached without HALL2 — check sensor",
-                          force_display=True)
-            self._set_state(STATE_AUTO)
+            # Route through _trigger_jam so the blocking LOAD_PHASE3
+            # command's post-loop _raise_if_locked_out raises and
+            # aborts the LOAD_FILAMENT macro instead of letting it
+            # print "LOAD abgeschlossen".
+            self._trigger_jam(
+                "LOAD_TIMEOUT",
+                "LOAD Phase 3: max_distance %dmm reached without HALL2 — check sensor/buffer"
+                % int(self._load_phase3_max_distance))
             return
         if not self._move_in_flight():
             # Clip chunk so the per-call MAX_DISTANCE is a hard cap.
@@ -1231,15 +1271,32 @@ class BufferFeeder:
         self._set_state(STATE_IDLE)
         self._respond("AUTO off (all recovery flags cleared)")
 
+    def _abort_signalled(self):
+        """True if a wait should cut short — HALT armed or safety lockout."""
+        return (self._halt_requested
+                or self._state == STATE_OVERFLOW
+                or self._state == STATE_JAM
+                or self._jam_active
+                or self.hall_overflow)
+
     def _wait_for_move_done(self, gcmd=None):
-        """Internal: block until any in-flight move finishes.
+        """Internal: block until any in-flight move finishes OR an
+        emergency condition trips.
 
         Used by blocking phase commands that legitimately hold the
         busy-phase state during the wait. External callers should
         use cmd_BUFFER_WAIT_IDLE instead, which additionally waits
         for the busy-phase state to be vacated.
+
+        Early-exits on HALT / OVERFLOW / JAM because at that point
+        the motor has already been disabled (or is about to be) and
+        waiting out the nominal trapq end_time is pointless — for a
+        long single-shot BUFFER_FEED DISTANCE=1000 at 15mm/s that
+        would mean a 60s zombie-wait.
         """
         while self._move_in_flight():
+            if self._abort_signalled():
+                break
             self.reactor.pause(self.reactor.monotonic() + 0.05)
         if gcmd is not None:
             self._raise_if_locked_out(gcmd)
@@ -1250,22 +1307,27 @@ class BufferFeeder:
         # Public contract (README / spec): wait for move-fertig AND
         # state=IDLE/AUTO. Waiting on move-in-flight alone returns
         # during the brief gap between LOAD/UNLOAD_PHASE_2 move end
-        # and main_tick's auto-transition back to IDLE, which the
-        # caller sees as a race.
+        # and main_tick's auto-transition back to IDLE.
+        # Early-exit on emergency conditions so abort propagates fast.
         while self._move_in_flight() or self._state in BUSY_PHASE_STATES:
-            eventtime = self.reactor.monotonic()
-            self.reactor.pause(eventtime + 0.05)
-        # If a safety lockout tripped while we were waiting, abort
-        # the caller. The Klipper error propagates up and halts the
-        # macro, preventing subsequent phases from running.
+            if self._abort_signalled():
+                break
+            self.reactor.pause(self.reactor.monotonic() + 0.05)
         self._raise_if_locked_out(gcmd)
 
     cmd_BUFFER_LOAD_PHASE1_help = "LOAD Phase 1 — feeder alone fast to toolhead. DISTANCE=mm"
     def cmd_BUFFER_LOAD_PHASE1(self, gcmd):
         self._halt_requested = False    # ack any stale console HALT
         self._raise_if_locked_out(gcmd)
+        if self._state in BUSY_PHASE_STATES:
+            raise self._cmd_error(
+                "LOAD_PHASE1 rejected — another phase already active (state=%s)"
+                % self._state)
         distance = gcmd.get_float('DISTANCE', self.load_fast_distance, above=0.)
         speed    = gcmd.get_float('SPEED',    self.load_fast_speed,    above=0.)
+        # Stop any inherited bang-bang / manual dauerfeed; main_tick
+        # would otherwise append chunks to this phase's single move.
+        self._continuous_feed = False
         self._set_state(STATE_LOAD_PHASE_1)
         self._enable_stepper()
         self._submit_move(+distance, speed)
@@ -1279,8 +1341,13 @@ class BufferFeeder:
     def cmd_BUFFER_LOAD_PHASE2(self, gcmd):
         self._halt_requested = False
         self._raise_if_locked_out(gcmd)
+        if self._state in BUSY_PHASE_STATES:
+            raise self._cmd_error(
+                "LOAD_PHASE2 rejected — another phase already active (state=%s)"
+                % self._state)
         distance = gcmd.get_float('DISTANCE', self.load_slow_distance, above=0.)
         speed    = gcmd.get_float('SPEED',    self.load_slow_speed,    above=0.)
+        self._continuous_feed = False
         self._set_state(STATE_LOAD_PHASE_2)
         self._enable_stepper()
         self._submit_move(+distance, speed)
@@ -1327,8 +1394,13 @@ class BufferFeeder:
     def cmd_BUFFER_UNLOAD_PHASE2(self, gcmd):
         self._halt_requested = False
         self._raise_if_locked_out(gcmd)
+        if self._state in BUSY_PHASE_STATES:
+            raise self._cmd_error(
+                "UNLOAD_PHASE2 rejected — another phase already active (state=%s)"
+                % self._state)
         distance = gcmd.get_float('DISTANCE', self.unload_sync_distance, above=0.)
         speed    = gcmd.get_float('SPEED',    self.unload_fast_speed,    above=0.)
+        self._continuous_feed = False
         self._set_state(STATE_UNLOAD_PHASE_2)
         self._enable_stepper()
         self._submit_move(-distance, speed)
@@ -1364,11 +1436,15 @@ class BufferFeeder:
             self._wait_for_move_done(gcmd)
         else:
             overshoot = True
-        if overshoot:
-            self._respond("UNLOAD Phase 3: MAX_DISTANCE reached without entrance clear",
-                          force_display=True)
         self._disable_stepper()
         self._set_state(STATE_IDLE)
+        if overshoot:
+            # Explicit failure — do not let UNLOAD_FILAMENT print
+            # "UNLOAD abgeschlossen" after an unsuccessful retract.
+            raise self._cmd_error(
+                "UNLOAD Phase 3: MAX_DISTANCE %dmm reached without "
+                "entrance clear — check buffer / filament path"
+                % int(max_distance))
 
     cmd_FORCE_BUFFER_FILL_help = "Manually trigger initial grip + fill cycle"
     def cmd_FORCE_BUFFER_FILL(self, gcmd):
@@ -1431,9 +1507,14 @@ class BufferFeeder:
             "accumulated total  = %.1f mm" % self._accumulated_feed_distance,
             "commanded_pos      = %.1f mm" % self._commanded_pos,
             "print_running      = %s" % self._print_running,
+            "bang_bang_suspended= %s" % self._bang_bang_suspended,
+            "halt_requested     = %s" % self._halt_requested,
             "jam_active         = %s" % self._jam_active,
-            "measure_load       = active=%s dist=%.1f mm" % (self._measure_load_active,
-                                                              self._measure_load_distance),
+            "runout_follow      = %s ref=%s" % (self._runout_follow_active,
+                                                self._runout_filament_ref),
+            "measure_load       = active=%s feeding=%s dist=%.1f mm" % (
+                self._measure_load_active, self._measure_feeding,
+                self._measure_load_distance),
             "click_count        = feed=%d retract=%d" % (self._click_count[BUTTON_FEED],
                                                          self._click_count[BUTTON_RETRACT]),
             "---- END STATE ----",

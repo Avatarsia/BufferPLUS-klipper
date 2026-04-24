@@ -182,9 +182,9 @@ in der Konsole oder aus Macros aufgerufen werden.
 | `BUFFER_HALT` | Sofort stoppen. |
 | `BUFFER_AUTO_ON` | Bang-Bang aktivieren. |
 | `BUFFER_AUTO_OFF` | Bang-Bang aus, State → IDLE. |
-| `BUFFER_WAIT_IDLE` | Blockt bis Move fertig und State=IDLE/AUTO. |
-| `BUFFER_STATE_DUMP` | Vollständigen State in Konsole. |
-| `BUFFER_CLEAR_JAM` | Nach Jam-Event und Operator-Check zurück in AUTO. |
+| `BUFFER_WAIT_IDLE` | Blockt bis Move fertig **und** State nicht mehr in einer LOAD/UNLOAD/GRIP-Phase. Raised auf OVERFLOW/JAM/HALT. |
+| `BUFFER_STATE_DUMP` | Vollständigen State (inkl. Recovery-Flags) in Konsole. |
+| `BUFFER_CLEAR_JAM` | Nach Jam-Event und Operator-Check: State → AUTO (falls entrance) oder IDLE (sonst). Während pausiertem Druck bleibt Bang-Bang suspended bis RESUME. |
 
 ### LOAD/UNLOAD — Phasen-Primitive
 
