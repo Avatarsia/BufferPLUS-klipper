@@ -596,6 +596,26 @@ class BufferFeeder:
             % (self.hall_empty, self.hall_full,
                self.hall_overflow, self.entrance_detected),
             force_display=True)
+        # P7-18: Anchor-Step beim Boot — etabliert stepcompress
+        # last_step_clock auf einen echten Wert. Hintergrund: ohne
+        # ersten Step seit Klipper-Boot bleibt last_step_clock=0
+        # (allocator init-state). Spaeter, wenn der erste echte Move
+        # (z.B. UNLOAD Phase 2 retract oder Bang-Bang feed) >17s nach
+        # Boot kommt, scheitert das Re-Prime via flush+set_position
+        # zuverlaessig zurueckzusetzen → "stepcompress Invalid sequence"
+        # im flush_handler. Solange wir den ersten Step beim Boot
+        # machen (MCU-Clock noch klein, last_step_clock=0 → gap klein),
+        # laeuft der Move ohne Crash und last_step_clock ist etabliert.
+        # 0.05mm Retract: kollidiert nicht mit HALL1-Forward-Reject,
+        # ist physisch unsichtbar (~250 Steps), Buffer verliert
+        # 0.05mm — bei einem 600mm-Buffer irrelevant.
+        try:
+            self._enable_stepper()
+            self._submit_move(-0.05, 10.0)
+            self._wait_for_move_done(direction=-1)
+            self._respond("Stepcompress anchor primed (boot retract 0.05mm)")
+        except Exception:
+            logging.exception("buffer_feeder: boot anchor failed")
         # Drop into normal operation. If HALL1 is currently active,
         # main_tick will immediately transition to OVERFLOW.
         # P7-15: optional direkt zu AUTO wenn Filament da ist — manuelle
@@ -605,7 +625,6 @@ class BufferFeeder:
         if (self.auto_engage_on_boot
                 and self.entrance_detected
                 and not self.hall_overflow):
-            self._enable_stepper()
             self._set_state(STATE_AUTO)
             self._respond("AUTO engaged on boot — filament at entrance, "
                           "buffer follows extruder demand")
