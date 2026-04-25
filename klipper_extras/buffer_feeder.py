@@ -101,6 +101,8 @@ class BufferFeeder:
         self.manual_chunk_distance = config.getfloat('manual_chunk_distance', 10.,  above=0.)
         self.burst_distance        = config.getfloat('burst_distance',       1300., above=0.)
         self.grip_duration         = config.getfloat('grip_duration',          10., above=0.)
+        self.grip_follow_distance  = config.getfloat('grip_follow_distance',   0., minval=0.)
+        self.grip_follow_speed     = config.getfloat('grip_follow_speed',      30., above=0.)
         self.load_fast_distance    = config.getfloat('load_fast_distance',   1000., above=0.)
         self.load_slow_distance    = config.getfloat('load_slow_distance',    180., above=0.)
         self.load_buffer_max       = config.getfloat('load_buffer_max',      2000., above=0.)
@@ -281,6 +283,12 @@ class BufferFeeder:
         # outside a print stays active — the flag never gets armed.
         self._bang_bang_suspended = False
         self._initial_grip_end_time = None
+        self._grip_follow_active = False
+        # Saved move state for post-overflow resume (follow + LOAD_PHASE_1).
+        self._overflow_resume_mm  = 0.0
+        self._overflow_resume_dir = 0
+        self._overflow_resume_spd = 0.0
+        self._overflow_interrupted_state = None
         self._load_phase3_target = None     # eventtime deadline for phase 3
         self._load_phase3_distance = 0.0
         self._load_phase3_max_distance = 0.0
@@ -299,6 +307,7 @@ class BufferFeeder:
         self._continuous_feed = False       # True = keep submitting moves while active
         self._continuous_feed_direction = 0 # +1 or -1
         self._continuous_feed_speed = 0.0
+        self._pending_disable = False       # deferred stepper disable (while move in flight)
         self._feed_deadline_time = None     # max feed deadline (reactor time)
         self._measure_load_active = False
         self._measure_load_distance = 0.0
@@ -330,6 +339,7 @@ class BufferFeeder:
         # cleared by BUFFER_AUTO_ON. Respects the user's explicit
         # "bang-bang off" choice even after manual calibration moves.
         self._auto_off_by_user = False
+        self._retract_burst_done = False  # go IDLE after retract burst, not AUTO
 
         # ----- Startup grace period -----
         # During the first _startup_grace_seconds after klippy:ready,
@@ -519,6 +529,13 @@ class BufferFeeder:
 
     def _end_startup_grace(self, eventtime):
         self._startup_grace_done = True
+        # If no filament is present at the entrance on boot, arm the
+        # edge-detect flag so the first real insert triggers auto-grip
+        # without requiring a pull-and-reinsert cycle. Without this,
+        # _entrance_was_empty stays False (its init value) and the first
+        # insert is silently ignored because no "empty" edge was ever seen.
+        if not self.entrance_detected:
+            self._entrance_was_empty = True
         # Log the settled sensor picture so operators can sanity-check
         # polarity against physical reality on a fresh boot.
         self._respond(
@@ -552,6 +569,17 @@ class BufferFeeder:
             logging.exception("buffer_feeder: shutdown stepper disable failed")
 
     def _on_idle_printing(self, *args):
+        # Klipper fires idle_timeout:printing during MCU init even without
+        # an active print (print_stats state = 'standby'). Guard against
+        # this boot artifact so _print_running is only armed for real prints.
+        try:
+            ps = self.printer.lookup_object('print_stats', None)
+            if ps is not None:
+                if ps.get_status(self.reactor.monotonic()).get(
+                        'state', '') == 'standby':
+                    return
+        except Exception:
+            pass
         self._print_running = True
         # RESUME / print-start: bang-bang resumes.
         self._bang_bang_suspended = False
@@ -616,6 +644,14 @@ class BufferFeeder:
         # BUFFER_AUTO_ON from an idle console never sees
         # _print_running=True, so this does not affect user-initiated
         # AUTO during idle.
+        #
+        # Guard: Klipper fires idle_timeout:printing then :ready during
+        # MCU init, which would set _print_running=True and then arm
+        # _bang_bang_suspended before any real print has started.
+        # Ignore all idle_timeout events until the startup grace is done.
+        if not self._startup_grace_done:
+            self._print_running = False
+            return
         if self._print_running:
             self._bang_bang_suspended = True
             if self._continuous_feed:
@@ -706,22 +742,44 @@ class BufferFeeder:
         self._respond("*** HALL1 OVERFLOW — Feeder disabled, lockout engaged ***",
                       force_display=True)
         self._continuous_feed = False
+        # Save the interrupted state and pending distance BEFORE
+        # _halt_motion() zeroes _pending_remaining_mm, so _exit_overflow
+        # can resume the move after HALL1 clears.
+        self._overflow_interrupted_state = self._state
+        self._overflow_resume_mm  = self._pending_remaining_mm
+        self._overflow_resume_dir = self._pending_direction
+        self._overflow_resume_spd = self._pending_speed
+        self._grip_follow_active = False
+        self._initial_grip_end_time = None
         self._halt_motion()
-        self._disable_stepper()
+        self._schedule_stepper_disable()
         self._set_state(STATE_OVERFLOW)
 
     def _exit_overflow(self):
         if self._state != STATE_OVERFLOW:
             return
         self._respond("HALL1 cleared — overflow lockout released")
-        # Go to IDLE first (the _set_state hook disables the stepper).
+        # Go to IDLE (the _set_state hook calls _halt_motion + stepper-disable).
         self._set_state(STATE_IDLE)
-        # Re-arm bang-bang ONLY if filament is there AND no operator-
-        # control flag is active:
-        #   - _auto_off_by_user: operator explicitly disabled AUTO
-        #   - _bang_bang_suspended: print is paused
-        #   - _halt_requested: operator issued HALT/STOP_BUFFER_FILL
-        # A simple HALL1-clear must not silently override any of these.
+        interrupted = self._overflow_interrupted_state
+        self._overflow_interrupted_state = None
+
+        # --- Resume LOAD_PHASE_1 interrupted by overflow ---
+        if interrupted == STATE_LOAD_PHASE_1 and self._overflow_resume_mm > 0:
+            # Restore pending so _wait_for_move_done_resume_on_overflow
+            # (still blocking in the gcode greenlet) resumes naturally,
+            # and _main_tick streams the remaining chunks.
+            self._enable_stepper()
+            self._set_state(STATE_LOAD_PHASE_1)
+            self._pending_remaining_mm = self._overflow_resume_mm
+            self._pending_direction    = self._overflow_resume_dir
+            self._pending_speed        = self._overflow_resume_spd
+            self._overflow_resume_mm   = 0.0
+            return
+
+        # --- Normal overflow recovery: no move to resume ---
+        self._overflow_resume_mm = 0.0
+        # Re-arm bang-bang ONLY if filament present and no operator lockout.
         if (self.entrance_detected
                 and not self._auto_off_by_user
                 and not self._bang_bang_suspended
@@ -813,8 +871,7 @@ class BufferFeeder:
             self._respond("Entrance runout outside print — stepper off")
             self._continuous_feed = False
             self._halt_motion()
-            self._disable_stepper()
-            self._set_state(STATE_IDLE)
+            self._set_state(STATE_IDLE)     # calls _schedule_stepper_disable
             return
 
         # Printing: branch on runout_pause policy.
@@ -823,7 +880,7 @@ class BufferFeeder:
                           force_display=True)
             self._continuous_feed = False
             self._halt_motion()
-            self._disable_stepper()
+            self._schedule_stepper_disable()
             self._set_state(STATE_RUNOUT)
             self._gcode_run_script("PAUSE")
         else:
@@ -884,9 +941,14 @@ class BufferFeeder:
                 self._set_state(STATE_IDLE)
             else:
                 # 1st click — start.
+                # Use _submit_move (pending-streaming) instead of
+                # _start_continuous_motion so chunks are queued back-to-back
+                # without the lead_time gap that continuous chunking introduces.
+                # The gap (0.3 s per 10 mm chunk) made the feeder appear to
+                # stop between chunks, causing operators to press stop early.
                 self._measure_feeding = True
                 self._measure_load_distance = 0.0
-                self._start_continuous_motion(+1, self.manual_speed, None)
+                self._submit_move(self.max_feed_distance, self.manual_speed)
                 self._set_state(STATE_MANUAL_FEED)
                 self._respond("MEASURE_LOAD: feeder running — click again to stop")
             return
@@ -946,6 +1008,11 @@ class BufferFeeder:
         target_state = STATE_MANUAL_FEED if button_name == BUTTON_FEED else STATE_MANUAL_RETRACT
         self._set_state(target_state)
         self._submit_move(direction * self.burst_distance, self.burst_speed)
+        if direction < 0:
+            # Retract burst: operator is deliberately pulling filament back.
+            # Stay IDLE afterwards — jam timer must not race against an empty
+            # buffer. Operator calls BUFFER_AUTO_ON to re-engage.
+            self._retract_burst_done = True
         self._schedule_return_to_auto_after_move(cooldown=self.reenable_cooldown_fast)
         self._respond("%s: Triple-Burst %d mm @ %d mm/s"
                       % (button_name, self.burst_distance, self.burst_speed))
@@ -1030,46 +1097,83 @@ class BufferFeeder:
                     "SAFETY_DISTANCE",
                     "max_feed_distance %dmm reached in one continuous feed" % int(self.max_feed_distance))
 
+            # Deferred disable: motor_disable must not be called while steps
+            # are unprocessed in the trapq (step-gen fires motor_enable with
+            # a past time via add_active_callback → Timer too close).
+            if self._pending_disable and not self._move_in_flight():
+                self._pending_disable = False
+                self._disable_stepper()
+
             # Cooldown end: back to AUTO if entrance present AND the
             # operator hasn't explicitly disabled AUTO.
             if self._cooldown_deadline is not None and eventtime >= self._cooldown_deadline:
-                self._cooldown_deadline = None
                 if self._state in (STATE_MANUAL_FEED, STATE_MANUAL_RETRACT, STATE_INITIAL_GRIP):
-                    if (self.entrance_detected
-                            and not self.hall_overflow
-                            and not self._auto_off_by_user
-                            and not self._bang_bang_suspended):
-                        self._set_state(STATE_AUTO)
+                    # Guard: estimate may fire early (per-chunk gap not accounted
+                    # for). Only transition once the move is truly done.
+                    if self._move_in_flight() or self._pending_remaining_mm > 0:
+                        self._cooldown_deadline = eventtime + 0.05
                     else:
-                        self._set_state(STATE_IDLE)
+                        self._cooldown_deadline = None
+                        if (self.entrance_detected
+                                and not self.hall_overflow
+                                and not self._auto_off_by_user
+                                and not self._bang_bang_suspended
+                                and not self._retract_burst_done):
+                            self._set_state(STATE_AUTO)
+                        else:
+                            self._retract_burst_done = False
+                            self._set_state(STATE_IDLE)
+                else:
+                    self._cooldown_deadline = None
 
-            # Initial grip done -> AUTO (or IDLE if operator-off).
+            # Initial grip done: start follow-feed (if configured) or go IDLE.
             if self._state == STATE_INITIAL_GRIP and self._initial_grip_end_time is not None:
                 mcu = self.stepper.get_mcu()
                 now_pt = mcu.estimated_print_time(eventtime)
                 if now_pt >= self._initial_grip_end_time:
                     self._initial_grip_end_time = None
-                    # Respect explicit AUTO_OFF / print-pause — do not
-                    # silently re-engage bang-bang.
                     if self._auto_off_by_user or self._bang_bang_suspended:
                         self._set_state(STATE_IDLE)
                         self._respond("Initial grip done — staying IDLE "
                                       "(AUTO off by operator or print paused)")
+                    elif self.grip_follow_distance > 0:
+                        self._grip_follow_active = True
+                        self._respond(
+                            "Initial grip done — follow feed: %.0f mm @ %.0f mm/s"
+                            % (self.grip_follow_distance, self.grip_follow_speed))
+                        self._submit_move(self.grip_follow_distance,
+                                          self.grip_follow_speed)
+                        # State stays STATE_INITIAL_GRIP; pending streaming
+                        # handles chunk queuing. Completion detected below.
                     else:
-                        self._set_state(STATE_AUTO)
-                        self._respond("Initial grip done — AUTO engaged")
-                        # Guarantee the spec's "initial fill sequence":
-                        # bang-bang's deadband hysteresis would stop
-                        # immediately if the arm landed between HALL3
-                        # and HALL2 after the grip. Explicitly kick
-                        # continuous feed so the buffer fills to HALL2
-                        # before bang-bang's stop-on-full triggers.
-                        if not self.hall_full:
-                            self._start_continuous_motion(
-                                +1, self.feed_speed, self.max_feed_time)
-                        # Optional auto-LOAD if hotend warm.
-                        if self.auto_load_after_follow and self._hotend_warm():
-                            self._gcode_run_script("LOAD_FILAMENT")
+                        self._set_state(STATE_IDLE)
+                        self._respond("Initial grip done — IDLE")
+                        if self.auto_load_after_follow:
+                            if self._hotend_warm():
+                                self._schedule_gcode_script("LOAD_FILAMENT")
+                            else:
+                                self._respond(
+                                    "Auto-Load übersprungen: Hotend zu kalt"
+                                    " (%.0f/%.0f °C)" % (
+                                        self._hotend_temp(), self.min_temp))
+
+            # Follow-feed completion: grip + follow done, drop to IDLE.
+            if (self._state == STATE_INITIAL_GRIP
+                    and self._grip_follow_active
+                    and self._initial_grip_end_time is None
+                    and not self._move_in_flight()
+                    and self._pending_remaining_mm <= 0):
+                self._grip_follow_active = False
+                self._set_state(STATE_IDLE)
+                self._respond("Grip follow done — IDLE")
+                if self.auto_load_after_follow:
+                    if self._hotend_warm():
+                        self._schedule_gcode_script("LOAD_FILAMENT")
+                    else:
+                        self._respond(
+                            "Auto-Load übersprungen: Hotend zu kalt"
+                            " (%.0f/%.0f °C)" % (
+                                self._hotend_temp(), self.min_temp))
 
             # Bang-bang in AUTO.
             if self._state == STATE_AUTO:
@@ -1086,10 +1190,9 @@ class BufferFeeder:
                                       % int(self.runout_follow_mm))
                         self._continuous_feed = False
                         self._halt_motion()
-                        self._disable_stepper()
                         self._runout_filament_ref = None
                         self._runout_follow_active = False
-                        self._set_state(STATE_IDLE)
+                        self._set_state(STATE_IDLE)  # calls _schedule_stepper_disable
                 except Exception:
                     pass
 
@@ -1132,15 +1235,21 @@ class BufferFeeder:
             if self._pending_remaining_mm > 0:
                 if self._abort_signalled():
                     self._pending_remaining_mm = 0.0
+                elif (self._pending_direction < 0
+                        and self._state == STATE_MANUAL_RETRACT
+                        and not self.entrance_detected):
+                    self._halt_motion()
+                    self._respond("Retract-Burst gestoppt — Filament am Eingang weg")
                 elif self._pending_speed > 0:
                     chunk_duration = (self.max_move_chunk_mm
                                       / self._pending_speed)
                     mcu = self.stepper.get_mcu()
                     now_pt = mcu.estimated_print_time(eventtime)
+                    gap = self._last_move_end_time - now_pt
                     # Submit next chunk when <= half-a-chunk remains
                     # in the currently-queued move, so next trapezoid
                     # starts right at the prior one's end_time.
-                    if (self._last_move_end_time - now_pt) <= chunk_duration * 0.5:
+                    if gap <= chunk_duration * 0.5:
                         chunk = min(self._pending_remaining_mm,
                                     self.max_move_chunk_mm)
                         self._submit_single_trapezoid(
@@ -1270,28 +1379,37 @@ class BufferFeeder:
     # -----------------------------------------------------------------------
 
     def _schedule_time_for_enable_toggle(self):
-        """Pick a safe print_time for the next motor_enable/disable.
-
-        Must satisfy ALL of:
-          - ≥ toolhead print_time + lead_time (avoids "in the past"
-            relative to the MCU's step-gen cursor)
-          - ≥ _last_move_end_time (so a disable never lands before a
-            queued step, which would force the MCU to reorder)
-          - ≥ previous enable/disable schedule time + ε (strictly
-            monotonic — else the MCU sees an out-of-order toggle and
-            crashes with "Timer too close").
-        """
+        """Pick a safe print_time for the next motor_enable/disable."""
+        mcu = self.stepper.get_mcu()
+        mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
         toolhead = self.printer.lookup_object('toolhead')
-        th_time = toolhead.get_last_move_time()
-        pt = max(th_time + self.lead_time,
-                 self._last_move_end_time,
-                 self._last_enable_schedule_time + 1e-6)
+        th_now = toolhead.get_last_move_time()
+        pt = max(mcu_now + self.lead_time,
+                 th_now + self.lead_time,
+                 self._last_move_end_time + self.lead_time,
+                 self._last_enable_schedule_time + self.lead_time)
         self._last_enable_schedule_time = pt
         return pt
+
+    def _schedule_stepper_disable(self):
+        """Disable stepper, deferring to tick if a move is in flight.
+
+        Calling motor_disable while steps are still unprocessed in the
+        trapq causes Klipper to register an add_active_callback that
+        fires motor_enable(past_time) when the step-generator processes
+        those steps.  set_digital(past_time, 1) then causes the MCU to
+        raise 'Timer too close'.  Deferring until flight=False lets the
+        step-generator finish before motor_disable touches the callbacks.
+        """
+        if self._move_in_flight():
+            self._pending_disable = True
+        else:
+            self._disable_stepper()
 
     def _enable_stepper(self):
         if self._stepper_enable is None:
             return
+        self._pending_disable = False   # cancel any deferred disable
         try:
             pt = self._schedule_time_for_enable_toggle()
             self._stepper_enable.motor_enable(pt)
@@ -1337,6 +1455,13 @@ class BufferFeeder:
         # Cancel any previously-streaming sequence before starting new.
         self._pending_remaining_mm = 0.0
 
+        # Ensure the first chunk starts no earlier than the last enable/disable
+        # toggle scheduled on the MCU. Without this guard, a move submitted
+        # right after an enable (e.g. LOAD_PHASE1 after IDLE→disable) would
+        # send a trapezoid with t0 < enable_time → MCU "Timer too close".
+        self._last_move_end_time = max(self._last_move_end_time,
+                                       self._last_enable_schedule_time)
+
         distance_abs = abs(signed_distance)
         direction = 1.0 if signed_distance > 0 else -1.0
 
@@ -1365,19 +1490,28 @@ class BufferFeeder:
 
         self._enable_stepper()
 
-        # Time base = toolhead.get_last_move_time(), NOT
-        # mcu.estimated_print_time(reactor.monotonic()). The latter
-        # drifts away from toolhead print_time during long idle
-        # periods; submitting at t0 = est_print_time + lead would
-        # land at a clock the MCU's step-gen cursor has no baseline
-        # for, producing an "Invalid sequence" (see 2026-04-24 log).
-        # get_last_move_time flushes only the lookahead planner —
-        # it does NOT drain the MCU step queue, so it is cheap
-        # enough to call from bang-bang/streaming paths during an
-        # active print. This mirrors manual_stepper/force_move.
-        toolhead = self.printer.lookup_object('toolhead')
-        th_time = toolhead.get_last_move_time()
-        t0 = max(th_time + self.lead_time, self._last_move_end_time)
+        # Time base selection:
+        # For streaming chunks (previous chunk still in the future):
+        #   use _last_move_end_time directly so chunks abut without
+        #   gap. Calling get_last_move_time() here would include queued
+        #   toolhead/extruder moves (e.g. LOAD Phase 2 G1 E180) which
+        #   push t0 tens of seconds into the future — feeder stops mid-
+        #   phase while the extruder runs alone.
+        # For the first chunk after idle (or gap recovery):
+        #   use toolhead.get_last_move_time() to anchor to the MCU's
+        #   step-gen cursor. Without this, estimated_print_time drifts
+        #   during long idle and the first step lands at a clock the MCU
+        #   has no baseline for → "Invalid sequence" shutdown.
+        mcu = self.stepper.get_mcu()
+        mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
+        if self._last_move_end_time > mcu_now + self.lead_time:
+            # Streaming: previous chunk is still in the future — abut.
+            t0 = self._last_move_end_time
+        else:
+            # First chunk / gap: anchor to toolhead print_time.
+            toolhead = self.printer.lookup_object('toolhead')
+            th_time = toolhead.get_last_move_time()
+            t0 = max(th_time + self.lead_time, self._last_move_end_time)
 
         distance = abs(signed_distance)
         direction = 1.0 if signed_distance > 0 else -1.0
@@ -1515,11 +1649,27 @@ class BufferFeeder:
             self._hall3_start_time = None
         # IDLE semantic per spec/README: stopped AND disabled. Enforce.
         if new_state == STATE_IDLE:
-            self._disable_stepper()
+            self._halt_motion()
+            self._schedule_stepper_disable()
 
     # -----------------------------------------------------------------------
     # Helper: gcode interactions
     # -----------------------------------------------------------------------
+
+    def _schedule_gcode_script(self, script):
+        """Run a gcode script from a deferred one-shot reactor timer.
+
+        gc.run_script() blocks until the script finishes. Calling it
+        directly from a reactor timer callback (like _main_tick) prevents
+        that timer from returning — so _main_tick never reschedules
+        itself, and the pending-chunk streaming block starves. Deferring
+        by 1ms lets _main_tick return first, so it fires normally on its
+        20ms cadence while the gcode script runs in a separate timer.
+        """
+        def _cb(eventtime):
+            self._gcode_run_script(script)
+            return self.reactor.NEVER
+        self.reactor.register_timer(_cb, self.reactor.monotonic() + 0.001)
 
     def _gcode_run_script(self, script, from_command=False):
         """Run a gcode script, choosing the mutex-safe variant.
@@ -1555,12 +1705,15 @@ class BufferFeeder:
         except Exception:
             pass
 
-    def _hotend_warm(self):
+    def _hotend_temp(self):
         try:
             ex = self.printer.lookup_object('extruder')
-            return ex.get_heater().get_temp(self.reactor.monotonic())[0] >= self.min_temp
+            return ex.get_heater().get_temp(self.reactor.monotonic())[0]
         except Exception:
-            return False
+            return 0.0
+
+    def _hotend_warm(self):
+        return self._hotend_temp() >= self.min_temp
 
     def _measure_report(self):
         self._respond("MEASURE_LOAD result: %.1f mm" % self._measure_load_distance)
@@ -1735,6 +1888,23 @@ class BufferFeeder:
         if gcmd is not None:
             self._raise_if_locked_out(gcmd)
 
+    def _wait_for_move_done_resume_on_overflow(self, gcmd=None):
+        """Like _wait_for_move_done but waits out HALL1 overflow instead of
+        aborting. Used in LOAD_PHASE_1 so a HALL1 event mid-phase pauses the
+        feeder and resumes automatically after HALL1 clears (_exit_overflow
+        restores _pending_remaining_mm so streaming continues).
+        Only hard aborts (HALT, JAM) terminate the wait early.
+        """
+        while (self._move_in_flight()
+               or self._pending_remaining_mm > 0
+               or self.hall_overflow
+               or self._state == STATE_OVERFLOW):
+            if self._halt_requested or self._jam_active or self._state == STATE_JAM:
+                break
+            self.reactor.pause(self.reactor.monotonic() + 0.1)
+        if gcmd is not None:
+            self._raise_if_locked_out(gcmd)
+
     cmd_BUFFER_WAIT_IDLE_help = ("Block until the feeder's current move is complete "
                                  "AND state has exited busy-phase (IDLE / AUTO / RUNOUT / lockout)")
     def cmd_BUFFER_WAIT_IDLE(self, gcmd):
@@ -1767,11 +1937,12 @@ class BufferFeeder:
         self._set_state(STATE_LOAD_PHASE_1)
         self._enable_stepper()
         self._submit_move(+distance, speed)
-        # Blocking: wait for move done (state stays LOAD_PHASE_1 during
-        # the wait, so we need the internal helper — BUFFER_WAIT_IDLE
-        # would deadlock because it also waits for state != busy-phase).
+        # Blocking: wait for move done, but pause-and-resume on HALL1 overflow
+        # instead of aborting — _exit_overflow restores pending state so
+        # streaming continues naturally. BUFFER_WAIT_IDLE would deadlock
+        # because it also waits for state != busy-phase.
         try:
-            self._wait_for_move_done(gcmd)
+            self._wait_for_move_done_resume_on_overflow(gcmd)
         except Exception:
             # Release the phase state on error so it doesn't stay sticky.
             self._set_state(STATE_IDLE)
@@ -1978,6 +2149,7 @@ class BufferFeeder:
         self._halt_motion()
         self._pending_remaining_mm = 0.0
         self._initial_grip_end_time = None
+        self._grip_follow_active = False
         self._load_phase3_distance = 0.0
         self._measure_load_active = False
         self._measure_feeding = False
