@@ -1631,10 +1631,29 @@ class BufferFeeder:
             logging.exception("buffer_feeder: detach failed")
 
     def _reattach_to_motion_queuing(self):
-        """Re-bind feeder stepper to its trapq before next move."""
+        """Re-bind feeder stepper to its trapq before next move.
+
+        Ruft toolhead.flush_step_generation() VOR set_trapq — mainline-
+        parity mit klippy/kinematics/extruder.py:ExtruderStepper
+        .sync_to_extruder. Ohne diesen Flush bleibt stepcompress
+        sc->last_step_clock seit Boot oder letztem Detach veraltet,
+        und der naechste _advance_flush_time emittiert eine degenerate
+        queue_step (interval=0 count=N add=0) → MCU shutdown via
+        stepcompress.c:check_line "Invalid sequence".
+
+        KEIN _safe_to_flush()-Guard hier — wenn detach in safer Phase
+        passierte und Reattach jetzt mid-print noetig ist (z.B. RESUME
+        nach M600), waere der einzige Alternative der Stepper auf
+        trapq=None zu lassen, was Submits nicht mehr konsumiert →
+        Feeder-Logik driftet. Kurzer Stall ist die akzeptable Wahl
+        gegen Crash-Risiko, mainline akzeptiert ihn bei Trapq-
+        Topologie-Wechseln genauso.
+        """
         if self._stepper_attached:
             return
         try:
+            toolhead = self.printer.lookup_object('toolhead')
+            toolhead.flush_step_generation()
             self.stepper.set_trapq(self.trapq)
             self.motion_queuing.check_step_generation_scan_windows()
             self._stepper_attached = True
