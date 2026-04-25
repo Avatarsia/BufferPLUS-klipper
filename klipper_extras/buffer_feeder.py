@@ -1410,7 +1410,20 @@ class BufferFeeder:
             self._continuous_feed = False
             self._halt_motion()
             self._respond("LOAD Phase 3: HALL2 reached, buffer full")
-            self._set_state(STATE_AUTO)
+            # Bang-bang nur weiterlaufen lassen, wenn aktuell tatsaechlich
+            # ein Druck laeuft (z.B. MMU-Filament-Wechsel mitten im Print).
+            # Beim manuellen LOAD ausserhalb eines Drucks geht der Buffer
+            # in IDLE — sonst wuerde Herausziehen am Toolhead spontan
+            # bang-bang triggern und der Buffer pumpt ohne erkennbaren
+            # Grund nach. AUTO wird beim naechsten Print-Start ohnehin
+            # automatisch engaged (auto_engage_on_print_start).
+            if (self._print_running
+                    and self.entrance_detected
+                    and not self._auto_off_by_user
+                    and not self._halt_requested):
+                self._set_state(STATE_AUTO)
+            else:
+                self._set_state(STATE_IDLE)
             return
         if self._load_phase3_distance >= self._load_phase3_max_distance:
             self._continuous_feed = False
