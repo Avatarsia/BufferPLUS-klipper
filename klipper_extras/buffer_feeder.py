@@ -66,6 +66,12 @@ JAM_WATCH_STATES = {STATE_AUTO, STATE_LOAD_PHASE_3}
 # Main reactor tick interval (sensor polling, bang-bang decisions).
 MAIN_TICK_INTERVAL = 0.02            # 50 Hz
 JAM_TICK_INTERVAL  = 1.0             # 1 Hz
+# Stable-Tracking Drop-Toleranz (P7-11): kurze Sensor-Flicker waehrend
+# LOAD_PHASE_3 stable-exit tracking werden bis zu dieser Dauer
+# toleriert. Sobald der Sensor innerhalb der Toleranz wieder aktiv ist,
+# laeuft die Stable-Uhr weiter. Erst nach N Sekunden komplett-aus
+# zaehlt das als echter Reset.
+STABLE_DROP_GRACE  = 0.5             # s
 
 # Triple-click action kinds.
 CLICK_SINGLE = 1
@@ -319,6 +325,14 @@ class BufferFeeder:
         self._load_phase3_chunk_distance = 10.0
         self._load_phase3_hall_full_since = None
         self._load_phase3_hall_overflow_since = None
+        # Drop-Toleranz (P7-11): kurze Sensor-Flicker (Bowden-Spring zieht
+        # den Arm fuer wenige ms zurueck) sollen die Stable-Stoppuhr
+        # nicht hart resetten. Stattdessen Grace-Period — wenn der Sensor
+        # innerhalb der Toleranz wieder triggered, faengt die alte Uhr an
+        # weiterzulaufen. Erst wenn er N Sekunden komplett aus bleibt,
+        # zaehlt das als echter Reset.
+        self._load_phase3_hall_full_drop_since = None
+        self._load_phase3_hall_overflow_drop_since = None
 
         # Pending-chunk streaming for single-shot moves larger than
         # max_move_chunk_mm. _submit_move submits the first chunk
@@ -760,7 +774,16 @@ class BufferFeeder:
             return
         if name == 'hall_overflow':
             if self.hall_overflow:
-                self._enter_overflow()
+                # P7-11: in LOAD_PHASE_3 mit OVERFLOW_OK macht
+                # _load_phase3_tick das HALL1-Stable-Tracking selbst.
+                # Ohne diesen Bypass wuerde der direkte Sensor-Callback-
+                # Pfad _enter_overflow rufen und damit die Stable-Logik
+                # umgehen (state wechselt zu OVERFLOW, Phase 3 bricht ab).
+                if (self._state == STATE_LOAD_PHASE_3
+                        and self._load_phase3_overflow_ok):
+                    pass
+                else:
+                    self._enter_overflow()
             else:
                 self._exit_overflow()
         elif name == 'hall_full':
@@ -1433,9 +1456,13 @@ class BufferFeeder:
 
     def _load_phase3_tick(self, eventtime):
         threshold = self._load_phase3_stable_timeout
-        # HALL2 (full) Stabilitaets-Tracking. Stamp beim ersten Trigger,
-        # Reset bei Loss — kurzes Zucken setzt also die Uhr zurueck.
+        # HALL2 (full) Stabilitaets-Tracking mit Drop-Toleranz (P7-11):
+        # kurze False-Edges (<STABLE_DROP_GRACE) lassen die Stable-Uhr
+        # weiterlaufen — der Bowden-Spring drueckt den Arm zurueck, der
+        # Stepper foerdert weiter, der Arm geht wieder hoch. Hard-Reset
+        # nur wenn der Sensor laenger als die Grace komplett aus bleibt.
         if self.hall_full:
+            self._load_phase3_hall_full_drop_since = None
             if self._load_phase3_hall_full_since is None:
                 self._load_phase3_hall_full_since = eventtime
             full_dwell = eventtime - self._load_phase3_hall_full_since
@@ -1444,6 +1471,8 @@ class BufferFeeder:
                 self._halt_motion()
                 self._load_phase3_hall_full_since = None
                 self._load_phase3_hall_overflow_since = None
+                self._load_phase3_hall_full_drop_since = None
+                self._load_phase3_hall_overflow_drop_since = None
                 if threshold > 0:
                     self._respond("LOAD Phase 3: HALL2 stable %.1fs, "
                                   "buffer full" % full_dwell)
@@ -1465,14 +1494,21 @@ class BufferFeeder:
                 else:
                     self._set_state(STATE_IDLE)
                 return
-        else:
-            self._load_phase3_hall_full_since = None
+        elif self._load_phase3_hall_full_since is not None:
+            # Sensor gerade abgefallen — Grace-Window starten/checken.
+            if self._load_phase3_hall_full_drop_since is None:
+                self._load_phase3_hall_full_drop_since = eventtime
+            elif (eventtime - self._load_phase3_hall_full_drop_since
+                  >= STABLE_DROP_GRACE):
+                self._load_phase3_hall_full_since = None
+                self._load_phase3_hall_full_drop_since = None
         # HALL1 (overflow) Stabilitaets-Tracking — nur wenn OVERFLOW_OK=1
         # gesetzt wurde. Sonst ist der HALL1-Pfad weiterhin via
         # _main_tick → _enter_overflow → state=OVERFLOW abgewickelt
         # (alter Pfad, raised im cmd_BUFFER_LOAD_PHASE3-Postcheck).
         if self._load_phase3_overflow_ok:
             if self.hall_overflow:
+                self._load_phase3_hall_overflow_drop_since = None
                 if self._load_phase3_hall_overflow_since is None:
                     self._load_phase3_hall_overflow_since = eventtime
                 overflow_dwell = eventtime - self._load_phase3_hall_overflow_since
@@ -1481,6 +1517,8 @@ class BufferFeeder:
                     self._halt_motion()
                     self._load_phase3_hall_full_since = None
                     self._load_phase3_hall_overflow_since = None
+                    self._load_phase3_hall_full_drop_since = None
+                    self._load_phase3_hall_overflow_drop_since = None
                     self._respond("LOAD Phase 3: HALL1 stable %.1fs, "
                                   "buffer overfilled (treating as full)"
                                   % overflow_dwell)
@@ -1492,8 +1530,14 @@ class BufferFeeder:
                     else:
                         self._set_state(STATE_IDLE)
                     return
-            else:
-                self._load_phase3_hall_overflow_since = None
+            elif self._load_phase3_hall_overflow_since is not None:
+                # Same drop-tolerance pattern wie bei HALL2.
+                if self._load_phase3_hall_overflow_drop_since is None:
+                    self._load_phase3_hall_overflow_drop_since = eventtime
+                elif (eventtime - self._load_phase3_hall_overflow_drop_since
+                      >= STABLE_DROP_GRACE):
+                    self._load_phase3_hall_overflow_since = None
+                    self._load_phase3_hall_overflow_drop_since = None
         if self._load_phase3_distance >= self._load_phase3_max_distance:
             self._continuous_feed = False
             self._halt_motion()
@@ -2278,6 +2322,8 @@ class BufferFeeder:
         self._load_phase3_chunk_distance = chunk_distance
         self._load_phase3_hall_full_since = None
         self._load_phase3_hall_overflow_since = None
+        self._load_phase3_hall_full_drop_since = None
+        self._load_phase3_hall_overflow_drop_since = None
         # Wenn wir aus STATE_OVERFLOW heraus eintreten (overflow_ok=1),
         # die _overflow_interrupted_*-Felder clearen — sonst wuerde ein
         # spaeteres _exit_overflow versuchen, einen "interrupted" Move
@@ -2288,6 +2334,10 @@ class BufferFeeder:
             self._overflow_resume_dir = 0
             self._overflow_resume_spd = 0.0
             self._overflow_interrupted_follow = False
+        logging.info("buffer_feeder: P3 start threshold=%.1fs overflow_ok=%s "
+                     "chunk=%.1f hall1=%s hall2=%s state=%s",
+                     stable_timeout, overflow_ok, chunk_distance,
+                     self.hall_overflow, self.hall_full, self._state)
         self._enable_stepper()
         self._set_state(STATE_LOAD_PHASE_3)
         self._start_continuous_motion(+1, speed, self.max_feed_time)
