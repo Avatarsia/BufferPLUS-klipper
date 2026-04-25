@@ -1654,6 +1654,17 @@ class BufferFeeder:
         try:
             toolhead = self.printer.lookup_object('toolhead')
             toolhead.flush_step_generation()
+            # set_position vor set_trapq — kompletter sync_to_extruder
+            # Pattern (extruder.py:968-991). flush_step_generation allein
+            # advance den last_step_clock NICHT fuer den detachten Stepper,
+            # weil set_trapq=None heisst er ist nicht im Step-Gen-Pfad.
+            # set_position triggert intern stepcompress_set_last_position
+            # (stepper.py:1563-1600), das den Stepcompress-Cursor auf einen
+            # gueltigen Wert rebased. Ohne diesen Schritt waere der naechste
+            # trapq_append eine degenerate queue_step (i=0 a=0 c>1) →
+            # stepcompress.c:1880-1884 "Invalid sequence" Crash.
+            self.stepper.set_position((0., 0., 0.))
+            self._commanded_pos = 0.0
             self.stepper.set_trapq(self.trapq)
             self.motion_queuing.check_step_generation_scan_windows()
             self._stepper_attached = True
