@@ -946,6 +946,11 @@ class BufferFeeder:
         target_state = STATE_MANUAL_FEED if button_name == BUTTON_FEED else STATE_MANUAL_RETRACT
         self._set_state(target_state)
         self._submit_move(direction * self.burst_distance, self.burst_speed)
+        if direction < 0:
+            # Retract burst: operator is deliberately pulling filament back.
+            # Stay IDLE afterwards — jam timer must not race against an empty
+            # buffer. Operator calls BUFFER_AUTO_ON to re-engage.
+            self._auto_off_by_user = True
         self._schedule_return_to_auto_after_move(cooldown=self.reenable_cooldown_fast)
         self._respond("%s: Triple-Burst %d mm @ %d mm/s"
                       % (button_name, self.burst_distance, self.burst_speed))
