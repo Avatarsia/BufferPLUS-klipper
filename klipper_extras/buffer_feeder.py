@@ -140,6 +140,10 @@ class BufferFeeder:
         # ----- Config: display / behaviour -----
         self.display_status_enabled = config.getboolean('display_status_enabled', True)
         self.auto_load_after_follow = config.getboolean('auto_load_after_follow', False)
+        # Bang-bang kommt mit Print-Start automatisch hoch, wenn Filament
+        # am Eingang ist und kein Operator-Lockout aktiv. Auf False setzen,
+        # um Bang-bang nur ueber explizites BUFFER_AUTO_ON zu starten.
+        self.auto_engage_on_print_start = config.getboolean('auto_engage_on_print_start', True)
         self.min_temp               = config.getfloat('min_temp', 180., minval=0.)
 
         # ----- Stepper + trapq -----
@@ -273,6 +277,13 @@ class BufferFeeder:
         self._click_count = {BUTTON_FEED: 0, BUTTON_RETRACT: 0}
         self._last_click_time = {BUTTON_FEED: 0.0, BUTTON_RETRACT: 0.0}
         self._button_held = {BUTTON_FEED: False, BUTTON_RETRACT: False}
+        # Deferred click summary: ein einziger _respond pro Click-Window,
+        # statt einer Meldung pro Tastendruck. Aktionen feuern weiterhin
+        # sofort (responsives UX), aber die Summary kommt erst nach dem
+        # triple_click_window-Settling — so sieht der User bei einem
+        # Triple-Klick "Triple-Burst" statt "Dauerlauf / Puls / Burst".
+        self._pending_click_msg = {BUTTON_FEED: None, BUTTON_RETRACT: None}
+        self._click_settle_timer = {BUTTON_FEED: None, BUTTON_RETRACT: None}
 
         # ----- Operation flags -----
         self._state = STATE_INIT
@@ -634,6 +645,24 @@ class BufferFeeder:
             self._runout_recovery_pending = False
             self._respond("RESUME after runout-reinsert — starting grip + fill")
             self._start_initial_grip(self.reactor.monotonic())
+            return
+
+        # Auto-engage Bang-bang beim Print-Start.
+        #
+        # Wir wollen, dass der Buffer im Druck mitlaeuft, ohne dass der
+        # User das Boot-autostart-Feature pflegen oder BUFFER_AUTO_ON in
+        # PRINT_START selbst eintragen muss. Bedingung: Filament am
+        # Eingang, State ist IDLE, kein Operator-Lockout aktiv.
+        # Konfigurierbar via auto_engage_on_print_start (default True).
+        if (self.auto_engage_on_print_start
+                and self._state == STATE_IDLE
+                and self.entrance_detected
+                and not self._auto_off_by_user
+                and not self._halt_requested
+                and not self.hall_overflow):
+            self._respond("Print start — engaging AUTO")
+            self._enable_stepper()
+            self._set_state(STATE_AUTO)
 
     def _on_idle_ready(self, *args):
         # Treat any transition out of an active print (PAUSE, jam-PAUSE,
@@ -942,20 +971,54 @@ class BufferFeeder:
             if was_held:
                 self._on_button_release(button_name, eventtime)
 
+    def _ensure_click_settle_timer(self, button_name):
+        if self._click_settle_timer[button_name] is None:
+            cb = lambda et, b=button_name: self._click_settle_fire(b, et)
+            self._click_settle_timer[button_name] = self.reactor.register_timer(cb)
+
+    def _set_pending_click_msg(self, button_name, msg):
+        """Speichert die Click-Summary-Meldung; wird nach
+        triple_click_window via Reactor-Timer ausgegeben. Spätere Aufrufe
+        im selben Fenster überschreiben die frühere Meldung — bei Triple-
+        Klick erscheint also nur "Triple-Burst" und nicht zusätzlich die
+        Single-/Double-Zwischenstufen."""
+        self._pending_click_msg[button_name] = msg
+        self._ensure_click_settle_timer(button_name)
+        fire_time = self.reactor.monotonic() + self.triple_click_window
+        self.reactor.update_timer(self._click_settle_timer[button_name], fire_time)
+
+    def _click_settle_fire(self, button_name, eventtime):
+        msg = self._pending_click_msg[button_name]
+        self._pending_click_msg[button_name] = None
+        if msg is not None:
+            self._respond(msg)
+        return self.reactor.NEVER
+
     def _on_button_press(self, button_name, eventtime):
+        # Retract während OVERFLOW darf durch — entladen ist die einzige
+        # sinnvolle Recovery, wenn der Buffer überfüllt ist. Feed bleibt
+        # blockiert (würde Overflow nur verschlimmern). Forward-Submits
+        # werden zusätzlich in _submit_move per Direction-Check rejected.
+        retract_overflow_override = (
+            button_name == BUTTON_RETRACT
+            and (self._state == STATE_OVERFLOW or self.hall_overflow)
+            and self._state != STATE_JAM
+        )
+
         # Block manual buttons during LOAD/UNLOAD/OVERFLOW/JAM.
         # Also block if HALL1 is physically active — covers the race
         # where AUTO_OFF/STOP_BUFFER_FILL reset state to IDLE before
         # the next main_tick re-asserts OVERFLOW.
-        if self._state in (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2, STATE_LOAD_PHASE_3,
-                           STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2,
-                           STATE_UNLOAD_PHASE_3, STATE_OVERFLOW, STATE_JAM,
-                           STATE_INITIAL_GRIP):
+        block_states = (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2, STATE_LOAD_PHASE_3,
+                        STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2,
+                        STATE_UNLOAD_PHASE_3, STATE_OVERFLOW, STATE_JAM,
+                        STATE_INITIAL_GRIP)
+        if self._state in block_states and not retract_overflow_override:
             hint = ""
             if self._state == STATE_JAM:
                 hint = " — fix the cause, then BUFFER_CLEAR_JAM"
             elif self._state == STATE_OVERFLOW:
-                hint = " — clear HALL1 (lockout releases automatically)"
+                hint = " — clear HALL1 (lockout releases automatically); retract button is allowed"
             elif self._state in (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2,
                                  STATE_LOAD_PHASE_3,
                                  STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2,
@@ -963,11 +1026,14 @@ class BufferFeeder:
                 hint = " — wait for LOAD/UNLOAD to finish, or BUFFER_HALT"
             elif self._state == STATE_INITIAL_GRIP:
                 hint = " — wait for grip to finish, or STOP_BUFFER_FILL"
-            self._respond("Button ignored — state=%s%s" % (self._state, hint))
+            # Deferred: nur EINE "Button ignored"-Meldung pro Click-Window.
+            self._set_pending_click_msg(button_name,
+                "Button ignored — state=%s%s" % (self._state, hint))
             return
-        if self.hall_overflow:
-            self._respond("Button ignored — HALL1 overflow physically active "
-                          "(remove filament from buffer until HALL1 clears)")
+        if self.hall_overflow and not retract_overflow_override:
+            self._set_pending_click_msg(button_name,
+                "Button ignored — HALL1 overflow physically active "
+                "(retract button still works to recover)")
             return
 
         # MEASURE_LOAD toggle-mode overrides normal click logic on feed button.
@@ -1036,7 +1102,7 @@ class BufferFeeder:
         target_state = STATE_MANUAL_FEED if button_name == BUTTON_FEED else STATE_MANUAL_RETRACT
         self._start_continuous_motion(direction, self.manual_speed, None)
         self._set_state(target_state)
-        self._respond("%s: Dauerlauf" % button_name)
+        self._set_pending_click_msg(button_name, "%s: Dauerlauf" % button_name)
 
     def _action_manual_pulse(self, button_name):
         direction = +1 if button_name == BUTTON_FEED else -1
@@ -1044,7 +1110,8 @@ class BufferFeeder:
         self._set_state(target_state)
         self._submit_move(direction * self.manual_chunk_distance, self.manual_speed)
         self._schedule_return_to_auto_after_move()
-        self._respond("%s: %d mm Puls" % (button_name, self.manual_chunk_distance))
+        self._set_pending_click_msg(button_name,
+            "%s: %d mm Puls" % (button_name, self.manual_chunk_distance))
 
     def _action_burst(self, button_name):
         direction = +1 if button_name == BUTTON_FEED else -1
@@ -1057,8 +1124,9 @@ class BufferFeeder:
             # buffer. Operator calls BUFFER_AUTO_ON to re-engage.
             self._retract_burst_done = True
         self._schedule_return_to_auto_after_move(cooldown=self.reenable_cooldown_fast)
-        self._respond("%s: Triple-Burst %d mm @ %d mm/s"
-                      % (button_name, self.burst_distance, self.burst_speed))
+        self._set_pending_click_msg(button_name,
+            "%s: Triple-Burst %d mm @ %d mm/s"
+            % (button_name, self.burst_distance, self.burst_speed))
 
     # -----------------------------------------------------------------------
     # Initial grip phase
@@ -1114,8 +1182,13 @@ class BufferFeeder:
             if not self._startup_grace_done:
                 return eventtime + MAIN_TICK_INTERVAL
 
-            # HALL1 has absolute priority.
-            if self.hall_overflow and self._state != STATE_OVERFLOW:
+            # HALL1 has absolute priority — AUSSER bei aktivem Manual-
+            # Retract: dann lassen wir den Operator den Buffer entlasten.
+            # Sobald der Retract beendet ist (state geht via Cooldown
+            # zurueck nach IDLE/AUTO), greift der OVERFLOW-Reassert wieder.
+            if (self.hall_overflow
+                    and self._state != STATE_OVERFLOW
+                    and self._state != STATE_MANUAL_RETRACT):
                 self._enter_overflow()
                 return eventtime + MAIN_TICK_INTERVAL
 
@@ -1496,8 +1569,11 @@ class BufferFeeder:
         """
         if signed_distance == 0 or speed <= 0:
             return
-        if self.hall_overflow:
-            logging.warning("buffer_feeder: move rejected — HALL1 active "
+        # OVERFLOW: nur Forward-Submits ablehnen. Retract (signed_distance < 0)
+        # ist die einzige Recovery-Bewegung, die einen überfüllten Buffer
+        # entlasten kann — sonst sitzt der User in der Sackgasse.
+        if self.hall_overflow and signed_distance > 0:
+            logging.warning("buffer_feeder: forward move rejected — HALL1 active "
                             "(distance=%.1f speed=%.1f)", signed_distance, speed)
             self._continuous_feed = False
             self._pending_remaining_mm = 0.0
