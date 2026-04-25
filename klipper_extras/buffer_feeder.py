@@ -2151,7 +2151,8 @@ class BufferFeeder:
                 or self._jam_active
                 or self.hall_overflow)
 
-    def _wait_for_move_done(self, gcmd=None, direction=+1):
+    def _wait_for_move_done(self, gcmd=None, direction=+1,
+                            allow_overflow=False):
         """Internal: block until both in-flight and pending-stream
         moves are done, OR an emergency condition trips.
 
@@ -2166,13 +2167,27 @@ class BufferFeeder:
 
         direction=-1 (UNLOAD/Retract): OVERFLOW/JAM blockieren nicht
         — Retract ist Recovery. Nur HALT bricht ab.
+
+        allow_overflow=True (P7-12): forward-direction wait der den
+        HALL1-Overflow-Check skipt. Genutzt von LOAD_PHASE_3 mit
+        OVERFLOW_OK=1 — die Stable-Exit-Logik haendelt HALL1 selbst,
+        und der Standard _raise_if_locked_out wuerde den Wait am
+        Ende mit "HALL1 OVERFLOW active — aborting" raisen, bevor
+        die Stable-Logik je laufen kann. JAM bleibt absolut.
         """
         while self._move_in_flight() or self._pending_remaining_mm > 0:
             if self._abort_signalled():
                 break
             self.reactor.pause(self.reactor.monotonic() + 0.05)
         if gcmd is not None:
-            self._raise_if_locked_out(gcmd, direction=direction)
+            if allow_overflow:
+                if self._state == STATE_JAM or self._jam_active:
+                    raise self._cmd_error(
+                        "BufferFeeder: JAM active — aborting. "
+                        "Use BUFFER_CLEAR_JAM after inspection. "
+                        "(UNLOAD is allowed.)")
+            else:
+                self._raise_if_locked_out(gcmd, direction=direction)
 
     def _wait_for_move_done_resume_on_overflow(self, gcmd=None):
         """Like _wait_for_move_done but waits out HALL1 overflow instead of
@@ -2312,8 +2327,11 @@ class BufferFeeder:
         # Clean start: stop any inherited continuous feed and wait for
         # any in-flight manual move to finish before we begin chunk
         # streaming. Prevents residual motion from tacking onto Phase 3.
+        # allow_overflow=overflow_ok: bei OVERFLOW_OK=1 darf der Wait
+        # nicht am internen _raise_if_locked_out kippen — sonst rueckt
+        # die Stable-Logic nie zur Geltung. JAM raised weiterhin (P7-12).
         self._continuous_feed = False
-        self._wait_for_move_done(gcmd)
+        self._wait_for_move_done(gcmd, allow_overflow=overflow_ok)
         self._load_phase3_distance = 0.0
         self._load_phase3_max_distance = max_distance
         self._load_phase3_speed = speed
