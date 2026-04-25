@@ -330,6 +330,7 @@ class BufferFeeder:
         # cleared by BUFFER_AUTO_ON. Respects the user's explicit
         # "bang-bang off" choice even after manual calibration moves.
         self._auto_off_by_user = False
+        self._retract_burst_done = False  # go IDLE after retract burst, not AUTO
 
         # ----- Startup grace period -----
         # During the first _startup_grace_seconds after klippy:ready,
@@ -946,6 +947,11 @@ class BufferFeeder:
         target_state = STATE_MANUAL_FEED if button_name == BUTTON_FEED else STATE_MANUAL_RETRACT
         self._set_state(target_state)
         self._submit_move(direction * self.burst_distance, self.burst_speed)
+        if direction < 0:
+            # Retract burst: operator is deliberately pulling filament back.
+            # Stay IDLE afterwards — jam timer must not race against an empty
+            # buffer. Operator calls BUFFER_AUTO_ON to re-engage.
+            self._retract_burst_done = True
         self._schedule_return_to_auto_after_move(cooldown=self.reenable_cooldown_fast)
         self._respond("%s: Triple-Burst %d mm @ %d mm/s"
                       % (button_name, self.burst_distance, self.burst_speed))
@@ -1038,9 +1044,11 @@ class BufferFeeder:
                     if (self.entrance_detected
                             and not self.hall_overflow
                             and not self._auto_off_by_user
-                            and not self._bang_bang_suspended):
+                            and not self._bang_bang_suspended
+                            and not self._retract_burst_done):
                         self._set_state(STATE_AUTO)
                     else:
+                        self._retract_burst_done = False
                         self._set_state(STATE_IDLE)
 
             # Initial grip done -> AUTO (or IDLE if operator-off).
