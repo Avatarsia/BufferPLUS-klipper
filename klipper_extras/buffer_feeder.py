@@ -527,6 +527,10 @@ class BufferFeeder:
             % (self.hall_empty, self.hall_full,
                self.hall_overflow, self.entrance_detected),
             force_display=True)
+        # If no filament is present at boot, mark the entrance as having
+        # been empty so the first real insert triggers auto-grip immediately.
+        if not self.entrance_detected:
+            self._entrance_was_empty = True
         # Drop into normal operation. If HALL1 is currently active,
         # main_tick will immediately transition to OVERFLOW.
         self._set_state(STATE_IDLE)
