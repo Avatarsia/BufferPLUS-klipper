@@ -552,6 +552,16 @@ class BufferFeeder:
             logging.exception("buffer_feeder: shutdown stepper disable failed")
 
     def _on_idle_printing(self, *args):
+        # Klipper fires idle_timeout:printing during MCU init even without
+        # an active print (print_stats state = 'standby'). Guard against
+        # this boot artifact so _print_running is only armed for real prints.
+        try:
+            ps = self.printer.lookup_object('print_stats', None)
+            if ps is not None:
+                if ps.get_status(self.reactor.monotonic()).get('state', '') == 'standby':
+                    return
+        except Exception:
+            pass
         self._print_running = True
         # RESUME / print-start: bang-bang resumes.
         self._bang_bang_suspended = False
