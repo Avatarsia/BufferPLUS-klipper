@@ -1620,19 +1620,30 @@ class BufferFeeder:
         # Prime/re-prime stepcompress, sowohl beim allerersten Submit
         # als auch nach einer Idle-Pause die laenger ist als
         # CLOCK_DIFF_MAX (Klipper: 3<<28 ticks = ~16.7s @ 48MHz).
-        # Dahinter liegen die Step-Clock-Deltas in einem Bereich, in
-        # dem stepcompress's compress_bisect_add degenerierte Sequenzen
-        # ("stepcompress o=X i=0 c=N a=0: Invalid sequence") produziert.
-        # Sehen wir nach einer langen Idle-Phase (z.B. LOAD vor Stunden,
-        # jetzt UNLOAD): set_position resettet die itersolve-Position
-        # und damit indirekt den stepcompress-Anker auf den aktuellen
-        # MCU-Clock. Schwelle 5s gibt grosszuegigen Sicherheitspuffer
-        # gegen die 16.7s-Grenze.
+        # Dahinter laeuft compress_bisect_add in degenerierte Sequenzen
+        # ("stepcompress o=X i=0 c=N a=0: Invalid sequence") rein.
+        #
+        # Loesung: stepper.note_homing_end() ruft intern
+        # stepcompress_reset(stepqueue, 0) auf — der einzige saubere
+        # Weg, den last_step_clock-Anker zu resetten. Sendet zusaetzlich
+        # eine reset-Msg an den MCU und syncted die Position neu. Set
+        # position auf 0 stellt sicher dass _commanded_pos und itersolve
+        # uebereinstimmen, sonst kommt der naechste trapq_append mit
+        # falschem start_pos_x.
         REPRIME_GAP = 5.0
         mcu = self.stepper.get_mcu()
         mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
         if (not self._stepcompress_primed
                 or (mcu_now - self._last_move_end_time) > REPRIME_GAP):
+            try:
+                self.stepper.note_homing_end()
+            except Exception:
+                # Aeltere Klipper-Versionen exposen den Helper evtl. nicht.
+                # Fallback: nur set_position (deckt zumindest den Boot-Fall
+                # ab, in dem die Clock-Differenz noch unter CLOCK_DIFF_MAX
+                # liegt — fuer mehrstuendige Idle-Phasen reicht das nicht).
+                logging.exception("buffer_feeder: note_homing_end nicht "
+                                  "verfuegbar — fallback auf set_position")
             self.stepper.set_position((0., 0., 0.))
             self._commanded_pos = 0.0
             self._stepcompress_primed = True
