@@ -183,6 +183,7 @@ class BufferFeeder:
         # different time bases (est_print_time vs. toolhead print_time)
         # and clock-sync jitter during the stall caused a regression.
         self._last_enable_schedule_time = 0.0
+        self._pending_disable = False       # deferred stepper disable (while move in flight)
 
         # Stepper enable handle (resolved at connect)
         self._stepper_enable = None
@@ -813,8 +814,7 @@ class BufferFeeder:
             self._respond("Entrance runout outside print — stepper off")
             self._continuous_feed = False
             self._halt_motion()
-            self._disable_stepper()
-            self._set_state(STATE_IDLE)
+            self._set_state(STATE_IDLE)     # calls _schedule_stepper_disable
             return
 
         # Printing: branch on runout_pause policy.
@@ -823,7 +823,7 @@ class BufferFeeder:
                           force_display=True)
             self._continuous_feed = False
             self._halt_motion()
-            self._disable_stepper()
+            self._schedule_stepper_disable()
             self._set_state(STATE_RUNOUT)
             self._gcode_run_script("PAUSE")
         else:
@@ -1032,16 +1032,28 @@ class BufferFeeder:
 
             # Cooldown end: back to AUTO if entrance present AND the
             # operator hasn't explicitly disabled AUTO.
+            # Deferred disable: motor_disable must not be called while steps
+            # are unprocessed in the trapq (step-gen fires motor_enable with
+            # a past time via add_active_callback → Timer too close).
+            if self._pending_disable and not self._move_in_flight():
+                self._pending_disable = False
+                self._disable_stepper()
+
             if self._cooldown_deadline is not None and eventtime >= self._cooldown_deadline:
-                self._cooldown_deadline = None
                 if self._state in (STATE_MANUAL_FEED, STATE_MANUAL_RETRACT, STATE_INITIAL_GRIP):
-                    if (self.entrance_detected
-                            and not self.hall_overflow
-                            and not self._auto_off_by_user
-                            and not self._bang_bang_suspended):
-                        self._set_state(STATE_AUTO)
+                    if self._move_in_flight() or self._pending_remaining_mm > 0:
+                        self._cooldown_deadline = eventtime + 0.05   # re-arm
                     else:
-                        self._set_state(STATE_IDLE)
+                        self._cooldown_deadline = None
+                        if (self.entrance_detected
+                                and not self.hall_overflow
+                                and not self._auto_off_by_user
+                                and not self._bang_bang_suspended):
+                            self._set_state(STATE_AUTO)
+                        else:
+                            self._set_state(STATE_IDLE)
+                else:
+                    self._cooldown_deadline = None
 
             # Initial grip done -> AUTO (or IDLE if operator-off).
             if self._state == STATE_INITIAL_GRIP and self._initial_grip_end_time is not None:
@@ -1086,10 +1098,9 @@ class BufferFeeder:
                                       % int(self.runout_follow_mm))
                         self._continuous_feed = False
                         self._halt_motion()
-                        self._disable_stepper()
                         self._runout_filament_ref = None
                         self._runout_follow_active = False
-                        self._set_state(STATE_IDLE)
+                        self._set_state(STATE_IDLE)  # calls _schedule_stepper_disable
                 except Exception:
                     pass
 
@@ -1273,25 +1284,40 @@ class BufferFeeder:
         """Pick a safe print_time for the next motor_enable/disable.
 
         Must satisfy ALL of:
-          - ≥ toolhead print_time + lead_time (avoids "in the past"
-            relative to the MCU's step-gen cursor)
-          - ≥ _last_move_end_time (so a disable never lands before a
-            queued step, which would force the MCU to reorder)
-          - ≥ previous enable/disable schedule time + ε (strictly
-            monotonic — else the MCU sees an out-of-order toggle and
-            crashes with "Timer too close").
+          - ≥ mcu estimated_print_time + lead_time
+          - ≥ toolhead last_move_time + lead_time
+          - ≥ _last_move_end_time + lead_time (disable never lands before
+            queued steps)
+          - ≥ previous schedule time + lead_time (strictly monotonic)
         """
+        mcu = self.stepper.get_mcu()
+        mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
         toolhead = self.printer.lookup_object('toolhead')
-        th_time = toolhead.get_last_move_time()
-        pt = max(th_time + self.lead_time,
-                 self._last_move_end_time,
-                 self._last_enable_schedule_time + 1e-6)
+        th_now = toolhead.get_last_move_time()
+        pt = max(mcu_now + self.lead_time,
+                 th_now + self.lead_time,
+                 self._last_move_end_time + self.lead_time,
+                 self._last_enable_schedule_time + self.lead_time)
         self._last_enable_schedule_time = pt
         return pt
+
+    def _schedule_stepper_disable(self):
+        """Disable stepper, deferring to tick if a move is in flight.
+        Calling motor_disable while steps are still unprocessed in the
+        trapq causes Klipper to register an add_active_callback that
+        fires motor_enable(past_time) when the step-generator processes
+        those steps — resulting in 'Timer too close'. Deferring until
+        flight=False lets the step-generator finish first.
+        """
+        if self._move_in_flight():
+            self._pending_disable = True
+        else:
+            self._disable_stepper()
 
     def _enable_stepper(self):
         if self._stepper_enable is None:
             return
+        self._pending_disable = False   # cancel any deferred disable
         try:
             pt = self._schedule_time_for_enable_toggle()
             self._stepper_enable.motor_enable(pt)
@@ -1515,7 +1541,8 @@ class BufferFeeder:
             self._hall3_start_time = None
         # IDLE semantic per spec/README: stopped AND disabled. Enforce.
         if new_state == STATE_IDLE:
-            self._disable_stepper()
+            self._halt_motion()
+            self._schedule_stepper_disable()
 
     # -----------------------------------------------------------------------
     # Helper: gcode interactions
