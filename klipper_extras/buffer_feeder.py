@@ -34,17 +34,13 @@ STATE_MANUAL_RETRACT = "MANUAL_RETRACT"
 STATE_LOAD_PHASE_1   = "LOAD_PHASE_1"
 STATE_LOAD_PHASE_2   = "LOAD_PHASE_2"
 STATE_LOAD_PHASE_3   = "LOAD_PHASE_3"
-STATE_UNLOAD_PHASE_1 = "UNLOAD_PHASE_1"
-STATE_UNLOAD_PHASE_2 = "UNLOAD_PHASE_2"
 STATE_UNLOAD_PHASE_3 = "UNLOAD_PHASE_3"
 STATE_OVERFLOW       = "OVERFLOW"
 STATE_RUNOUT         = "RUNOUT"
 STATE_JAM            = "JAM"
 
-# States where the feeder is allowed to carry on manual/auto motion
-# (manual buttons are blocked during LOAD/UNLOAD/OVERFLOW/JAM).
-USER_STATES = {STATE_IDLE, STATE_AUTO, STATE_MANUAL_FEED,
-               STATE_MANUAL_RETRACT, STATE_RUNOUT}
+# (UNLOAD_PHASE_1 und UNLOAD_PHASE_2 wurden in P7-20 durch SYNC_TO_EXTRUDER
+# ersetzt und mit P7-23/P7-27 vollstaendig entfernt.)
 
 # States where LOAD/UNLOAD is active — override commands
 # (BUFFER_FEED/RETRACT/AUTO_ON/FORCE_BUFFER_FILL) must refuse.
@@ -145,8 +141,7 @@ class BufferFeeder:
         self.reenable_cooldown      = config.getfloat('reenable_cooldown',      1.0, minval=0.)
         self.reenable_cooldown_fast = config.getfloat('reenable_cooldown_fast', 0.5, minval=0.)
 
-        # ----- Config: display / behaviour -----
-        self.display_status_enabled = config.getboolean('display_status_enabled', True)
+        # ----- Config: behaviour -----
         self.auto_load_after_follow = config.getboolean('auto_load_after_follow', False)
         # Bang-bang kommt mit Print-Start automatisch hoch, wenn Filament
         # am Eingang ist und kein Operator-Lockout aktiv. Auf False setzen,
@@ -183,7 +178,6 @@ class BufferFeeder:
         self._last_move_end_time = 0.0     # print_time at which current/last move ends
         self._current_move = None          # dict with end_time, direction, distance_left
         self._feed_distance_accumulator = 0.0  # for safety max_feed_distance
-        self._feed_start_time = None       # reactor time when continuous feed started
         self._accumulated_feed_distance = 0.0  # lifetime counter
         # stepcompress for a stepper starts with last_step_clock=0 and stays
         # there until the first step. On a printer that idles for long
@@ -322,7 +316,6 @@ class BufferFeeder:
         self._overflow_resume_dir = 0
         self._overflow_resume_spd = 0.0
         self._overflow_interrupted_state = None
-        self._load_phase3_target = None     # eventtime deadline for phase 3
         self._load_phase3_distance = 0.0
         self._load_phase3_max_distance = 0.0
         self._load_phase3_speed = 0.0       # per-call feed speed in phase 3
@@ -597,8 +590,7 @@ class BufferFeeder:
             "Startup grace done — hall_empty=%s hall_full=%s "
             "hall_overflow=%s entrance=%s"
             % (self.hall_empty, self.hall_full,
-               self.hall_overflow, self.entrance_detected),
-            force_display=True)
+               self.hall_overflow, self.entrance_detected))
         # P7-18/19: Anchor-Step beim Boot — etabliert stepcompress
         # last_step_clock auf einen echten Wert. Hintergrund: ohne
         # ersten Step seit Klipper-Boot bleibt last_step_clock=0
@@ -873,8 +865,7 @@ class BufferFeeder:
     # -----------------------------------------------------------------------
 
     def _enter_overflow(self):
-        self._respond("*** HALL1 OVERFLOW — Feeder disabled, lockout engaged ***",
-                      force_display=True)
+        self._respond("*** HALL1 OVERFLOW — Feeder disabled, lockout engaged ***")
         self._continuous_feed = False
         # Save the interrupted state and pending distance BEFORE
         # _halt_motion() zeroes _pending_remaining_mm, so _exit_overflow
@@ -1038,8 +1029,7 @@ class BufferFeeder:
 
         # Printing: branch on runout_pause policy.
         if self.runout_pause:
-            self._respond("Runout during print — PAUSE (runout_pause=1)",
-                          force_display=True)
+            self._respond("Runout during print — PAUSE (runout_pause=1)")
             self._continuous_feed = False
             self._halt_motion()
             self._schedule_stepper_disable()
@@ -1681,7 +1671,7 @@ class BufferFeeder:
         if self._jam_active:
             return
         self._jam_active = True
-        self._respond("*** JAM %s: %s ***" % (kind, message), force_display=True)
+        self._respond("*** JAM %s: %s ***" % (kind, message))
         self._continuous_feed = False
         self._halt_motion()
         self._set_state(STATE_JAM)
@@ -1956,7 +1946,6 @@ class BufferFeeder:
         self._continuous_feed = True
         self._continuous_feed_direction = direction
         self._continuous_feed_speed = speed
-        self._feed_start_time = self.reactor.monotonic()
         self._feed_distance_accumulator = 0.0
         if max_duration_s is not None:
             self._feed_deadline_time = self.reactor.monotonic() + max_duration_s
@@ -2042,16 +2031,13 @@ class BufferFeeder:
         except Exception:
             logging.exception("buffer_feeder: gcode run_script failed (%s)", script)
 
-    def _respond(self, message, force_display=False):
-        # Log + console echo only. We deliberately do NOT emit M117
-        # from here any more: _respond is called from both reactor-
-        # event handlers AND gcode command handlers, and gc.run_script
-        # re-acquires the gcode mutex. From a command handler (where
-        # the mutex is already held), that call deadlocks Klipper's
-        # entire gcode pipeline — all subsequent commands (including
-        # print-start from Mainsail) queue up but never execute.
-        # The `force_display` parameter is kept for call-site
-        # backwards compatibility but is now a no-op.
+    def _respond(self, message):
+        # Log + console echo. M117 wird hier bewusst NICHT emittiert:
+        # _respond wird sowohl aus reactor-event handlers als auch
+        # aus gcode command handlers gerufen, und gc.run_script
+        # re-acquired die gcode mutex. Aus einem command handler
+        # (wo die Mutex bereits gehalten wird) wuerde der Aufruf
+        # Klippers ganze gcode pipeline deadlocken.
         logging.info("buffer_feeder: %s", message)
         try:
             gc = self.printer.lookup_object('gcode')
@@ -2672,6 +2658,7 @@ class BufferFeeder:
                                                 self._runout_filament_ref),
             "runout_recov_pending= %s (RESUME will grip+fill if armed)" % self._runout_recovery_pending,
             "macro_state_saved  = %s (buffer_feeder_op slot consumable)" % self._macro_state_saved,
+            "synced_to_extruder = %s" % self._stepper_synced_to,
             "measure_load       = active=%s feeding=%s dist=%.1f mm" % (
                 self._measure_load_active, self._measure_feeding,
                 self._measure_load_distance),
@@ -2862,6 +2849,7 @@ class BufferFeeder:
             'measure_load_active':      self._measure_load_active,
             'measure_load_distance_mm': self._measure_load_distance,
             'macro_state_saved':        self._macro_state_saved,
+            'synced_to_extruder':       self._stepper_synced_to,
             # Config values (exposed so LOAD/UNLOAD macros don't hardcode)
             'feed_speed':               self.feed_speed,
             'manual_speed':             self.manual_speed,
