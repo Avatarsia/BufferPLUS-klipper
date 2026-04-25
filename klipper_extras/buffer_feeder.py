@@ -850,6 +850,16 @@ class BufferFeeder:
                                      STATE_UNLOAD_PHASE_3,
                                      STATE_MANUAL_RETRACT):
                     pass
+                elif self._stepper_synced_to is not None:
+                    # P7-22: waehrend SYNC-Tip-Forming (UNLOAD_FILAMENT)
+                    # bewegt der Hauptextruder das Filament durchs
+                    # Hotend, der Buffer-Stepper folgt synchron. HALL1-
+                    # Spikes durch Pull-Cycles sind erwartet — kein
+                    # OVERFLOW-Lockout, sonst bricht das Macro mid-
+                    # tip-forming ab. Wenn nach dem Tip-Forming HALL1
+                    # noch aktiv waere, regelt das BUFFER_UNSYNC + die
+                    # naechste UNLOAD-Phase die Recovery.
+                    pass
                 else:
                     self._enter_overflow()
             else:
@@ -1300,12 +1310,18 @@ class BufferFeeder:
             # unterscheiden.
             phase3_overflow_ok = (self._state == STATE_LOAD_PHASE_3
                                   and self._load_phase3_overflow_ok)
+            # P7-22: waehrend SYNC-Tip-Forming bewegt der Hauptextruder
+            # das Filament, der Buffer-Stepper folgt via gemeinsamer
+            # Trapq. HALL1-Spikes durch Pull-Cycles sind erwartet — kein
+            # Auto-OVERFLOW. _stepper_synced_to != None ist der Marker.
+            sync_active = self._stepper_synced_to is not None
             if (self.hall_overflow
                     and self._state not in (
                         STATE_OVERFLOW, STATE_MANUAL_RETRACT,
                         STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2,
                         STATE_UNLOAD_PHASE_3)
-                    and not phase3_overflow_ok):
+                    and not phase3_overflow_ok
+                    and not sync_active):
                 self._enter_overflow()
                 return eventtime + MAIN_TICK_INTERVAL
 
@@ -2550,6 +2566,15 @@ class BufferFeeder:
                 "UNLOAD Phase 3: MAX_DISTANCE %dmm reached without "
                 "entrance clear — check buffer / filament path"
                 % int(max_distance))
+        # P7-22: UNLOAD ist semantisch der JAM-/OVERFLOW-Recovery-Pfad —
+        # bei erfolgreichem Exit auch sticky Lockout-Flags clearen.
+        # Sonst raised der naechste LOAD_FILAMENT mit "JAM active" weil
+        # _jam_active=True von einem frueheren LOAD_TIMEOUT haengt.
+        # _set_state(STATE_IDLE) oben cleart nur _state, nicht die
+        # Begleit-Flags.
+        self._jam_active = False
+        self._hall2_start_time = None
+        self._hall3_start_time = None
 
     cmd_BUFFER_SYNC_TO_EXTRUDER_help = ("Sync buffer-feeder stepper to the named "
                                          "extruder's trapq for parallel motion. "
