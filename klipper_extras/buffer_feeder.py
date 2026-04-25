@@ -197,6 +197,12 @@ class BufferFeeder:
         # calling stepper.set_position — same pattern force_move.manual_move
         # uses. Flag gates it so we do it exactly once.
         self._stepcompress_primed = False
+        # P7-20: sync-to-extruder state. Wenn != None ist der Buffer-
+        # Stepper an einen externen Extruder-Trapq gebunden (folgt
+        # G1 E Moves 1:1). BUFFER_SYNC_TO_EXTRUDER setzt, BUFFER_UNSYNC
+        # cleart. Anwendungsfall: UNLOAD-Tip-Forming, Filament-Fluss
+        # durch den Buffer ohne Sensor-Trigger.
+        self._stepper_synced_to = None
         # Monotonic clock tracker for motor_enable/disable scheduling.
         # queue_digital_out commands on the same pin MUST be scheduled
         # with strictly non-decreasing MCU clocks: a disable at clock A
@@ -475,6 +481,12 @@ class BufferFeeder:
         gcode.register_command('BUFFER_UNLOAD_PHASE3',
                                self.cmd_BUFFER_UNLOAD_PHASE3,
                                desc=self.cmd_BUFFER_UNLOAD_PHASE3_help)
+        gcode.register_command('BUFFER_SYNC_TO_EXTRUDER',
+                               self.cmd_BUFFER_SYNC_TO_EXTRUDER,
+                               desc=self.cmd_BUFFER_SYNC_TO_EXTRUDER_help)
+        gcode.register_command('BUFFER_UNSYNC',
+                               self.cmd_BUFFER_UNSYNC,
+                               desc=self.cmd_BUFFER_UNSYNC_help)
         gcode.register_command('FORCE_BUFFER_FILL',
                                self.cmd_FORCE_BUFFER_FILL,
                                desc=self.cmd_FORCE_BUFFER_FILL_help)
@@ -2538,6 +2550,63 @@ class BufferFeeder:
                 "UNLOAD Phase 3: MAX_DISTANCE %dmm reached without "
                 "entrance clear — check buffer / filament path"
                 % int(max_distance))
+
+    cmd_BUFFER_SYNC_TO_EXTRUDER_help = ("Sync buffer-feeder stepper to the named "
+                                         "extruder's trapq for parallel motion. "
+                                         "Optional: EXTRUDER=<name> (default: extruder)")
+    def cmd_BUFFER_SYNC_TO_EXTRUDER(self, gcmd):
+        # P7-20: bindet den Buffer-Feeder-Stepper an den Trapq eines
+        # anderen Extruder-Steppers, sodass jeder G1 E Move den Buffer-
+        # Stepper synchron mitzieht. Pattern aus
+        # klippy/kinematics/extruder.py:ExtruderStepper.sync_to_extruder
+        # (extruder.py:968-995).
+        # Anwendungsfall: UNLOAD-Tip-Forming. Der Hauptextruder pusht/pullt
+        # Filament durchs Hotend, der Buffer-Stepper folgt mit derselben
+        # Geschwindigkeit — Filament-Strang fliesst durch den Buffer ohne
+        # Stau (HALL2/HALL1) oder Leerlauf (HALL3). Auch loest die
+        # Stepcompress-Cursor-Etablierung: solange der gemeinsame Trapq
+        # aktiv ist, ist der Buffer-Stepper-last_step_clock immer frisch.
+        extruder_name = gcmd.get('EXTRUDER', 'extruder')
+        extruder = self.printer.lookup_object(extruder_name)
+        if not hasattr(extruder, 'get_trapq'):
+            raise self._cmd_error(
+                "Object '%s' is not an extruder (no get_trapq method)"
+                % extruder_name)
+        toolhead = self.printer.lookup_object('toolhead')
+        toolhead.flush_step_generation()
+        # set_position vor set_trapq, mainline-parity (extruder.py:989-991).
+        self.stepper.set_position((0., 0., 0.))
+        self.stepper.set_trapq(extruder.get_trapq())
+        self.motion_queuing.check_step_generation_scan_windows()
+        self._stepper_synced_to = extruder_name
+        # Stepcompress ist jetzt durch echte Extruder-Aktivitaet primed.
+        self._stepcompress_primed = True
+        self._enable_stepper()
+        self._respond("Buffer-Feeder synced to '%s' — follows extruder moves"
+                      % extruder_name)
+
+    cmd_BUFFER_UNSYNC_help = "Unsync buffer-feeder stepper back to its own trapq"
+    def cmd_BUFFER_UNSYNC(self, gcmd):
+        # P7-20: kehrt SYNC_TO_EXTRUDER um — Stepper bekommt seinen
+        # eigenen Trapq zurueck. Hauptextruder-Moves bewegen den
+        # Buffer-Stepper jetzt nicht mehr mit. Setzt _commanded_pos
+        # und _last_move_end_time zurueck damit die Buffer-eigene
+        # Move-Logik (cmd_BUFFER_FEED, BUFFER_UNLOAD_PHASE3 etc.) sauber
+        # weiterlaufen kann.
+        toolhead = self.printer.lookup_object('toolhead')
+        toolhead.flush_step_generation()
+        self.stepper.set_position((0., 0., 0.))
+        self.stepper.set_trapq(self.trapq)
+        self.motion_queuing.check_step_generation_scan_windows()
+        self._stepper_synced_to = None
+        self._commanded_pos = 0.0
+        # _last_move_end_time auf jetzt+lead_time clampen, damit naechster
+        # eigener Submit nicht in der Vergangenheit landet (boot-fix-style).
+        mcu = self.stepper.get_mcu()
+        now_pt = mcu.estimated_print_time(self.reactor.monotonic())
+        self._last_move_end_time = max(self._last_move_end_time,
+                                       now_pt + self.lead_time)
+        self._respond("Buffer-Feeder unsynced — own trapq active")
 
     cmd_FORCE_BUFFER_FILL_help = "Manually trigger initial grip + fill cycle"
     def cmd_FORCE_BUFFER_FILL(self, gcmd):
