@@ -148,7 +148,7 @@ markiert.
 | | `load_fast_distance` **!!** | 1000 mm | Kalibriert via MEASURE_LOAD_START |
 | | `load_slow_distance` **!!** | 100 mm | Heatbreak-Push + Nozzle-Purge |
 | | `load_buffer_max` | 2000 mm | LOAD Phase 3 Timeout |
-| | `unload_sync_distance` **!!** | 180 mm | Muss ≥ load_slow_distance |
+| | `unload_sync_distance` **!!** | 250 mm | Muss ≥ load_slow_distance; Extruder-Anlauf zum sicheren Heatbreak-Austritt |
 | | `unload_fast_max` | 2510 mm | UNLOAD Phase 3 Polling-Timeout |
 | **Safety** | `max_feed_time` | 60 s | Max Dauerfeed ohne HALL2 |
 | | `max_feed_distance` | 3000 mm | Alternative Grenze |
