@@ -1617,35 +1617,48 @@ class BufferFeeder:
 
     def _submit_single_trapezoid(self, signed_distance, speed):
         """Append one trapezoid to our trapq. Low-level primitive."""
-        # Prime/re-prime stepcompress, sowohl beim allerersten Submit
-        # als auch nach einer Idle-Pause die laenger ist als
-        # CLOCK_DIFF_MAX (Klipper: 3<<28 ticks = ~16.7s @ 48MHz).
-        # Dahinter laeuft compress_bisect_add in degenerierte Sequenzen
-        # ("stepcompress o=X i=0 c=N a=0: Invalid sequence") rein.
+        # Prime/re-prime stepcompress nach Idle-Pause die laenger ist als
+        # CLOCK_DIFF_MAX (Klipper: 3<<28 ticks = ~16.7s @ 48MHz). Dahinter
+        # laeuft compress_bisect_add in degenerierte Sequenzen ein
+        # ("stepcompress o=X i=0 c=N a=0: Invalid sequence" → MCU shutdown).
         #
-        # Loesung: stepper.note_homing_end() ruft intern
-        # stepcompress_reset(stepqueue, 0) auf — der einzige saubere
-        # Weg, den last_step_clock-Anker zu resetten. Sendet zusaetzlich
-        # eine reset-Msg an den MCU und syncted die Position neu. Set
-        # position auf 0 stellt sicher dass _commanded_pos und itersolve
-        # uebereinstimmen, sonst kommt der naechste trapq_append mit
-        # falschem start_pos_x.
+        # Loesung: toolhead.flush_step_generation() — das ist der kanonische
+        # Klipper-Weg den manual_stepper und force_move auch nutzen. Drainiert
+        # alle pending Toolhead-Bewegungen und syncted last_step_gen_time fuer
+        # ALLE Syncemitter (inkl. unserem Buffer-Feeder-Stepper). set_position
+        # danach setzt _commanded_pos und itersolve's commanded_pos auf 0,
+        # damit der naechste trapq_append einen sauberen start_pos_x hat.
+        #
+        # WICHTIG: flush_step_generation drainiert auch die Toolhead-Lookahead-
+        # Queue → kann mid-print einen kurzen Stall ausloesen. Daher nur
+        # ausserhalb eines aktiven Drucks aufrufen. Waehrend einem Druck
+        # haelt die regelmaessige bang-bang-Aktivitaet stepcompress.last_step_clock
+        # ohnehin aktuell (alle paar Sekunden ein Feed-Chunk).
         REPRIME_GAP = 5.0
         mcu = self.stepper.get_mcu()
         mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
-        if (not self._stepcompress_primed
-                or (mcu_now - self._last_move_end_time) > REPRIME_GAP):
+        gap = mcu_now - self._last_move_end_time
+        need_reprime = (not self._stepcompress_primed) or (gap > REPRIME_GAP)
+        if need_reprime and not self._print_running:
             try:
-                self.stepper.note_homing_end()
+                toolhead = self.printer.lookup_object('toolhead')
+                toolhead.flush_step_generation()
+                logging.info("buffer_feeder: stepcompress re-primed via "
+                             "flush_step_generation (gap=%.1fs)", gap)
             except Exception:
-                # Aeltere Klipper-Versionen exposen den Helper evtl. nicht.
-                # Fallback: nur set_position (deckt zumindest den Boot-Fall
-                # ab, in dem die Clock-Differenz noch unter CLOCK_DIFF_MAX
-                # liegt — fuer mehrstuendige Idle-Phasen reicht das nicht).
-                logging.exception("buffer_feeder: note_homing_end nicht "
-                                  "verfuegbar — fallback auf set_position")
+                logging.exception("buffer_feeder: flush_step_generation failed")
             self.stepper.set_position((0., 0., 0.))
             self._commanded_pos = 0.0
+            self._stepcompress_primed = True
+        elif need_reprime:
+            # Mid-print: skippen wir den heavy flush, weil das einen Print-
+            # Stall ausloesen wuerde. Bang-bang-Aktivitaet sollte
+            # last_step_clock ohnehin aktuell halten. Falls nicht — wuerde
+            # hier ein "Invalid sequence"-Crash drohen, aber der Trade-off
+            # ist es wert: Crash ist seltener Edge-Case, Print-Stall waere
+            # bei jedem ersten Buffer-Move nach 5s Idle.
+            logging.info("buffer_feeder: skipping re-prime (mid-print, "
+                         "gap=%.1fs)", gap)
             self._stepcompress_primed = True
 
         self._enable_stepper()
