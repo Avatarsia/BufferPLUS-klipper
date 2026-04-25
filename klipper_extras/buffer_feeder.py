@@ -1617,15 +1617,22 @@ class BufferFeeder:
 
     def _submit_single_trapezoid(self, signed_distance, speed):
         """Append one trapezoid to our trapq. Low-level primitive."""
-        # Prime stepcompress on the very first submission. Without
-        # this, last_step_clock=0 and the first step (after minutes
-        # or hours of idle) sits at clock N×10⁹, which exceeds
-        # CLOCK_DIFF_MAX → stepcompress returns an invalid
-        # queue_step → MCU shutdown. set_position anchors itersolve's
-        # position state to (0,0,0); toolhead.get_last_move_time()
-        # below ties our t0 to print-time that the MCU's step-gen
-        # cursor can actually track.
-        if not self._stepcompress_primed:
+        # Prime/re-prime stepcompress, sowohl beim allerersten Submit
+        # als auch nach einer Idle-Pause die laenger ist als
+        # CLOCK_DIFF_MAX (Klipper: 3<<28 ticks = ~16.7s @ 48MHz).
+        # Dahinter liegen die Step-Clock-Deltas in einem Bereich, in
+        # dem stepcompress's compress_bisect_add degenerierte Sequenzen
+        # ("stepcompress o=X i=0 c=N a=0: Invalid sequence") produziert.
+        # Sehen wir nach einer langen Idle-Phase (z.B. LOAD vor Stunden,
+        # jetzt UNLOAD): set_position resettet die itersolve-Position
+        # und damit indirekt den stepcompress-Anker auf den aktuellen
+        # MCU-Clock. Schwelle 5s gibt grosszuegigen Sicherheitspuffer
+        # gegen die 16.7s-Grenze.
+        REPRIME_GAP = 5.0
+        mcu = self.stepper.get_mcu()
+        mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
+        if (not self._stepcompress_primed
+                or (mcu_now - self._last_move_end_time) > REPRIME_GAP):
             self.stepper.set_position((0., 0., 0.))
             self._commanded_pos = 0.0
             self._stepcompress_primed = True
@@ -1644,8 +1651,8 @@ class BufferFeeder:
         #   step-gen cursor. Without this, estimated_print_time drifts
         #   during long idle and the first step lands at a clock the MCU
         #   has no baseline for → "Invalid sequence" shutdown.
-        mcu = self.stepper.get_mcu()
-        mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
+        # mcu/mcu_now sind oben fuer den Re-Prime-Gap-Check schon
+        # berechnet — wiederverwenden statt neu fetchen.
         if self._last_move_end_time > mcu_now + self.lead_time:
             # Streaming: previous chunk is still in the future — abut.
             t0 = self._last_move_end_time
