@@ -101,6 +101,8 @@ class BufferFeeder:
         self.manual_chunk_distance = config.getfloat('manual_chunk_distance', 10.,  above=0.)
         self.burst_distance        = config.getfloat('burst_distance',       1300., above=0.)
         self.grip_duration         = config.getfloat('grip_duration',          10., above=0.)
+        self.grip_follow_distance  = config.getfloat('grip_follow_distance',   0., minval=0.)
+        self.grip_follow_speed     = config.getfloat('grip_follow_speed',      30., above=0.)
         self.load_fast_distance    = config.getfloat('load_fast_distance',   1000., above=0.)
         self.load_slow_distance    = config.getfloat('load_slow_distance',    180., above=0.)
         self.load_buffer_max       = config.getfloat('load_buffer_max',      2000., above=0.)
@@ -281,6 +283,7 @@ class BufferFeeder:
         # outside a print stays active — the flag never gets armed.
         self._bang_bang_suspended = False
         self._initial_grip_end_time = None
+        self._grip_follow_active = False
         self._load_phase3_target = None     # eventtime deadline for phase 3
         self._load_phase3_distance = 0.0
         self._load_phase3_max_distance = 0.0
@@ -1055,21 +1058,32 @@ class BufferFeeder:
                         self._set_state(STATE_IDLE)
                         self._respond("Initial grip done — staying IDLE "
                                       "(AUTO off by operator or print paused)")
+                    elif self.grip_follow_distance > 0:
+                        self._grip_follow_active = True
+                        self._respond(
+                            "Initial grip done — follow feed: %.0f mm @ %.0f mm/s"
+                            % (self.grip_follow_distance, self.grip_follow_speed))
+                        self._submit_move(self.grip_follow_distance,
+                                          self.grip_follow_speed)
+                        # State stays STATE_INITIAL_GRIP; pending streaming
+                        # handles chunk queuing. Completion detected below.
                     else:
-                        self._set_state(STATE_AUTO)
-                        self._respond("Initial grip done — AUTO engaged")
-                        # Guarantee the spec's "initial fill sequence":
-                        # bang-bang's deadband hysteresis would stop
-                        # immediately if the arm landed between HALL3
-                        # and HALL2 after the grip. Explicitly kick
-                        # continuous feed so the buffer fills to HALL2
-                        # before bang-bang's stop-on-full triggers.
-                        if not self.hall_full:
-                            self._start_continuous_motion(
-                                +1, self.feed_speed, self.max_feed_time)
-                        # Optional auto-LOAD if hotend warm.
+                        self._set_state(STATE_IDLE)
+                        self._respond("Initial grip done — IDLE")
                         if self.auto_load_after_follow and self._hotend_warm():
                             self._gcode_run_script("LOAD_FILAMENT")
+
+            # Follow-feed completion: grip + follow done, drop to IDLE.
+            if (self._state == STATE_INITIAL_GRIP
+                    and self._grip_follow_active
+                    and self._initial_grip_end_time is None
+                    and not self._move_in_flight()
+                    and self._pending_remaining_mm <= 0):
+                self._grip_follow_active = False
+                self._set_state(STATE_IDLE)
+                self._respond("Grip follow done — IDLE")
+                if self.auto_load_after_follow and self._hotend_warm():
+                    self._gcode_run_script("LOAD_FILAMENT")
 
             # Bang-bang in AUTO.
             if self._state == STATE_AUTO:
