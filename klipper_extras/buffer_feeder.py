@@ -2227,10 +2227,10 @@ class BufferFeeder:
                                     "CHUNK_DISTANCE (mm per tick chunk).")
     def cmd_BUFFER_LOAD_PHASE3(self, gcmd):
         self._halt_requested = False
-        self._raise_if_locked_out(gcmd)
-        self._check_phase_entry('LOAD_PHASE3', {
-            STATE_IDLE, STATE_AUTO, STATE_RUNOUT, STATE_LOAD_PHASE_3,
-        })
+        # Parameter ZUERST parsen — overflow_ok beeinflusst den Lockout-
+        # Check (P7-8/9). Wenn der Standard _raise_if_locked_out vorher
+        # liefe, wuerde HALL1-aktiv sofort raisen, bevor wir den
+        # OVERFLOW_OK=1 Modus auswerten koennen.
         max_distance = gcmd.get_float('MAX_DISTANCE', self.load_buffer_max, above=0.)
         speed        = gcmd.get_float('SPEED',        self.feed_speed,      above=0.)
         # Stable-Exit-Optionen (P7-8): Sensoren muessen N Sekunden
@@ -2244,6 +2244,27 @@ class BufferFeeder:
         stable_timeout = gcmd.get_float('STABLE_TIMEOUT', 0.0, minval=0.)
         overflow_ok    = bool(gcmd.get_int('OVERFLOW_OK', 0, minval=0, maxval=1))
         chunk_distance = gcmd.get_float('CHUNK_DISTANCE', 10.0, above=0.)
+        # Lockout-Check: JAM ist immer absolut. OVERFLOW nur wenn nicht
+        # OVERFLOW_OK gesetzt — sonst handhabt _load_phase3_tick den
+        # HALL1-Stable-Exit selbst.
+        if self._state == STATE_JAM or self._jam_active:
+            raise self._cmd_error(
+                "BufferFeeder: JAM active — aborting. "
+                "Use BUFFER_CLEAR_JAM after inspection. (UNLOAD is allowed.)")
+        if not overflow_ok:
+            if self._state == STATE_OVERFLOW or self.hall_overflow:
+                raise self._cmd_error(
+                    "BufferFeeder: HALL1 OVERFLOW active — aborting. "
+                    "Clear overflow, then retry. (UNLOAD is allowed; "
+                    "use OVERFLOW_OK=1 for stable-exit semantics.)")
+        # Phase Entry: bei overflow_ok ist STATE_OVERFLOW ein legitimer
+        # Vorgaenger-State (das aufrufende Macro hat das vorher
+        # abgesichert via Status-Check).
+        allowed_states = {STATE_IDLE, STATE_AUTO, STATE_RUNOUT,
+                          STATE_LOAD_PHASE_3}
+        if overflow_ok:
+            allowed_states.add(STATE_OVERFLOW)
+        self._check_phase_entry('LOAD_PHASE3', allowed_states)
         # Clean start: stop any inherited continuous feed and wait for
         # any in-flight manual move to finish before we begin chunk
         # streaming. Prevents residual motion from tacking onto Phase 3.
@@ -2257,14 +2278,30 @@ class BufferFeeder:
         self._load_phase3_chunk_distance = chunk_distance
         self._load_phase3_hall_full_since = None
         self._load_phase3_hall_overflow_since = None
+        # Wenn wir aus STATE_OVERFLOW heraus eintreten (overflow_ok=1),
+        # die _overflow_interrupted_*-Felder clearen — sonst wuerde ein
+        # spaeteres _exit_overflow versuchen, einen "interrupted" Move
+        # zu resumen, der gar nicht mehr passt.
+        if overflow_ok:
+            self._overflow_interrupted_state = None
+            self._overflow_resume_mm = 0.0
+            self._overflow_resume_dir = 0
+            self._overflow_resume_spd = 0.0
+            self._overflow_interrupted_follow = False
         self._enable_stepper()
         self._set_state(STATE_LOAD_PHASE_3)
         self._start_continuous_motion(+1, speed, self.max_feed_time)
         # Block until the tick-driven state machine exits STATE_LOAD_PHASE_3.
         while self._state == STATE_LOAD_PHASE_3:
             self.reactor.pause(self.reactor.monotonic() + 0.1)
-        # Exit reason might be normal (AUTO) or safety lockout — check.
-        self._raise_if_locked_out(gcmd)
+        # Postcheck: JAM bleibt absolut. Bei overflow_ok haben wir den
+        # HALL1-Stable-Exit selbst gemacht — sonst alte Lockout-Logik.
+        if self._state == STATE_JAM or self._jam_active:
+            raise self._cmd_error(
+                "BufferFeeder: JAM active — aborting. "
+                "Use BUFFER_CLEAR_JAM after inspection. (UNLOAD is allowed.)")
+        if not overflow_ok:
+            self._raise_if_locked_out(gcmd)
 
     cmd_BUFFER_UNLOAD_PHASE1_help = ("UNLOAD Phase 1 — halt feeder and lock state for tip-forming "
                                      "(so buttons / FORCE_BUFFER_FILL don't interfere)")
