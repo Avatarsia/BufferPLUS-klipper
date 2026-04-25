@@ -139,14 +139,14 @@ markiert.
 | | `manual_speed` | 15 mm/s | Taster Dauerlauf |
 | | `burst_speed` | 50 mm/s | Triple-Click Burst |
 | | `load_fast_speed` | 50 mm/s | LOAD Phase 1+3 |
-| | `load_slow_speed` | 5 mm/s | LOAD Phase 2 (Heatbreak-Durchgang) |
+| | `load_slow_speed` | 5 mm/s | LOAD Phase 3 (Extruder-Push ins Hotend) |
 | | `grip_speed` | 55 mm/s | Initial-Grip |
 | | `accel` | 1000 mm/s² | Feeder-Beschleunigung |
 | **Distanzen** | `manual_chunk_distance` | 10 mm | 2-Klick-Puls-Distanz |
 | | `burst_distance` | 1300 mm | Triple-Click Retract-Burst |
 | | `grip_duration` | 10 s | Initial-Grip-Dauer |
 | | `load_fast_distance` **!!** | 1000 mm | Kalibriert via MEASURE_LOAD_START |
-| | `load_slow_distance` **!!** | 180 mm | Heatbreak+Nozzle-Länge |
+| | `load_slow_distance` **!!** | 100 mm | Heatbreak-Push + Nozzle-Purge |
 | | `load_buffer_max` | 2000 mm | LOAD Phase 3 Timeout |
 | | `unload_sync_distance` **!!** | 180 mm | Muss ≥ load_slow_distance |
 | | `unload_fast_max` | 2510 mm | UNLOAD Phase 3 Polling-Timeout |
@@ -299,20 +299,24 @@ Deaktivieren mit `jam_detection_enabled: 0` in der Config.
 
 ## LOAD / UNLOAD-Flow
 
-### LOAD_FILAMENT (ohne Sync)
+### LOAD_FILAMENT (sensor-driven)
 
 ```
 Phase 1: BUFFER_LOAD_PHASE1
          Feeder allein schnell (load_fast_speed) load_fast_distance mm
-         zum Toolhead-Eingang.
-Phase 2: BUFFER_LOAD_PHASE2 DISTANCE=180 SPEED=5
-         + G1 E180 F300 parallel.
-         Beide Motoren laufen zeitlich koordiniert (±0.1s Drift).
-         KEIN SYNC_EXTRUDER_MOTION — Extension queued ihren Move in
-         eigener trapq, G1 E geht in die Toolhead-Queue.
-Phase 3: BUFFER_LOAD_PHASE3
-         Feeder füllt Buffer bis HALL2 aktiv wird (oder load_buffer_max).
+         bis kurz vor den Toolhead.
+Phase 2: BUFFER_LOAD_PHASE3
+         Feeder füllt den Buffer bis HALL2 auslöst (oder load_buffer_max).
+         HALL2 = Sensor-Bestätigung dass das Filament gestaged ist
+         und der Pfad bis zum Toolhead frei.
+Phase 3: G1 E{load_slow_distance} F{load_slow_speed*60}, M400
+         Extruder schiebt das Filament durchs Heatbreak ins Hotend.
+         Der eigentliche Lade-Schritt am Druckkopf — Feeder steht.
 ```
+
+`BUFFER_LOAD_PHASE2` (parallel feeder+extruder) bleibt als G-Code-
+Befehl für andere Macros verfügbar, wird vom neuen `LOAD_FILAMENT`
+aber nicht mehr genutzt.
 
 ### UNLOAD_FILAMENT
 
