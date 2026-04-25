@@ -886,7 +886,7 @@ class BufferFeeder:
                 # 1st click — start.
                 self._measure_feeding = True
                 self._measure_load_distance = 0.0
-                self._start_continuous_motion(+1, self.manual_speed, None)
+                self._submit_move(self.max_feed_distance, self.manual_speed)
                 self._set_state(STATE_MANUAL_FEED)
                 self._respond("MEASURE_LOAD: feeder running — click again to stop")
             return
