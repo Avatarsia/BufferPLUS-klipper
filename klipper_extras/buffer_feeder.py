@@ -2113,6 +2113,12 @@ class BufferFeeder:
         # (which would otherwise re-submit chunks from the tick loop)
         # AND across any non-locked state so an ongoing LOAD_FILAMENT /
         # UNLOAD_FILAMENT macro aborts instead of silently continuing.
+        # P7-24: falls Sync-to-Extruder gerade aktiv ist (HALT mitten
+        # in UNLOAD_FILAMENT zwischen BUFFER_SYNC_TO_EXTRUDER und
+        # BUFFER_UNSYNC), den Stepper sofort vom Extruder-Trapq abkoppeln
+        # bevor wir den lokalen State manipulieren.
+        if self._unsync_if_synced():
+            self._respond("HALT — also unsynced from extruder")
         self._continuous_feed = False
         self._halt_motion()
         # Clear runout-follow so a lingering follow timer doesn't
@@ -2134,28 +2140,35 @@ class BufferFeeder:
         self._halt_requested = True
         self._respond("HALT — workflow will abort at next wait")
 
-    cmd_BUFFER_AUTO_ON_help = "Enable bang-bang auto mode"
-    def cmd_BUFFER_AUTO_ON(self, gcmd):
+    def _check_auto_ready(self, allow_jam=False):
+        """Pruefe Voraussetzungen fuer AUTO-Eintritt. Liefert None wenn OK,
+        sonst eine User-faced Fehlermeldung. allow_jam=True wird von
+        BUFFER_CLEAR_JAM genutzt, das den JAM-Lockout selbst bereits
+        aufloest und nur die anderen Guards weiter abfragen will.
+        """
         if self.hall_overflow or self._state == STATE_OVERFLOW:
-            raise self._cmd_error("Cannot enable AUTO while HALL1 overflow active")
-        if self._state == STATE_JAM or self._jam_active:
-            raise self._cmd_error(
-                "Cannot enable AUTO while JAM active. Inspect and call "
-                "BUFFER_CLEAR_JAM to resume, or BUFFER_AUTO_OFF first.")
+            return "HALL1 overflow active"
+        if not allow_jam and (self._state == STATE_JAM or self._jam_active):
+            return ("JAM active — inspect and call BUFFER_CLEAR_JAM, "
+                    "or BUFFER_AUTO_OFF first.")
         if self._state in BUSY_PHASE_STATES:
-            raise self._cmd_error(
-                "Cannot enable AUTO while LOAD/UNLOAD in progress (state=%s). "
-                "Call STOP_BUFFER_FILL to abort first." % self._state)
+            return ("LOAD/UNLOAD in progress (state=%s) — call "
+                    "STOP_BUFFER_FILL to abort first." % self._state)
         # Print-PAUSE suspension is owned by idle_timeout; user must
         # RESUME the print before bang-bang can re-engage. Allowing
-        # AUTO_ON to clear this flag would defeat the documented
+        # AUTO to clear this flag would defeat the documented
         # pause-until-RESUME semantic (spec §5).
         if self._bang_bang_suspended:
-            raise self._cmd_error(
-                "Cannot enable AUTO while print is paused (bang-bang "
-                "suspended). RESUME the print — bang-bang re-engages "
-                "automatically. If the print is already finished, "
-                "use BUFFER_AUTO_OFF first to clear the suspension.")
+            return ("print is paused (bang-bang suspended). RESUME the "
+                    "print — bang-bang re-engages automatically. If the "
+                    "print is already finished, use BUFFER_AUTO_OFF first.")
+        return None
+
+    cmd_BUFFER_AUTO_ON_help = "Enable bang-bang auto mode"
+    def cmd_BUFFER_AUTO_ON(self, gcmd):
+        reason = self._check_auto_ready()
+        if reason is not None:
+            raise self._cmd_error("Cannot enable AUTO while " + reason)
         # Clear transient flags — user is explicitly starting fresh.
         # Also consume any pending RUNOUT-recovery: operator chose
         # to engage AUTO directly, so RESUME should not later insert
@@ -2178,6 +2191,10 @@ class BufferFeeder:
         # explicit BUFFER_AUTO_ON.
         # Also arms _halt_requested so any in-flight macro aborts
         # at its next wait-point (same contract as BUFFER_HALT).
+        # P7-24: Stepper auch vom Extruder-Trapq abkoppeln falls
+        # ein Macro-Abbruch ihn dort haengen lies.
+        if self._unsync_if_synced():
+            self._respond("AUTO_OFF — also unsynced from extruder")
         self._continuous_feed = False
         self._halt_motion()
         self._pending_remaining_mm = 0.0
@@ -2528,14 +2545,14 @@ class BufferFeeder:
         self._respond("Buffer-Feeder synced to '%s' — follows extruder moves"
                       % extruder_name)
 
-    cmd_BUFFER_UNSYNC_help = "Unsync buffer-feeder stepper back to its own trapq"
-    def cmd_BUFFER_UNSYNC(self, gcmd):
-        # P7-20: kehrt SYNC_TO_EXTRUDER um — Stepper bekommt seinen
-        # eigenen Trapq zurueck. Hauptextruder-Moves bewegen den
-        # Buffer-Stepper jetzt nicht mehr mit. Setzt _commanded_pos
-        # und _last_move_end_time zurueck damit die Buffer-eigene
-        # Move-Logik (cmd_BUFFER_FEED, BUFFER_UNLOAD_PHASE3 etc.) sauber
-        # weiterlaufen kann.
+    def _unsync_if_synced(self):
+        """Idempotent unsync helper. Cleanup-Pfade (BUFFER_HALT,
+        BUFFER_AUTO_OFF, STOP_BUFFER_FILL) rufen das auf damit ein
+        zwischen SYNC_TO_EXTRUDER und UNSYNC abgebrochenes Macro nicht
+        den Stepper am Extruder-Trapq zurueckl??sst (P7-24).
+        """
+        if self._stepper_synced_to is None:
+            return False
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.flush_step_generation()
         self.stepper.set_position((0., 0., 0.))
@@ -2549,7 +2566,17 @@ class BufferFeeder:
         now_pt = mcu.estimated_print_time(self.reactor.monotonic())
         self._last_move_end_time = max(self._last_move_end_time,
                                        now_pt + self.lead_time)
-        self._respond("Buffer-Feeder unsynced — own trapq active")
+        return True
+
+    cmd_BUFFER_UNSYNC_help = "Unsync buffer-feeder stepper back to its own trapq"
+    def cmd_BUFFER_UNSYNC(self, gcmd):
+        # P7-20: kehrt SYNC_TO_EXTRUDER um — Stepper bekommt seinen
+        # eigenen Trapq zurueck. Buffer-eigene Move-Logik (cmd_BUFFER_FEED,
+        # BUFFER_UNLOAD_PHASE3 etc.) laeuft danach sauber weiter.
+        if self._unsync_if_synced():
+            self._respond("Buffer-Feeder unsynced — own trapq active")
+        else:
+            self._respond("Buffer-Feeder is not synced — no-op")
 
     cmd_FORCE_BUFFER_FILL_help = "Manually trigger initial grip + fill cycle"
     def cmd_FORCE_BUFFER_FILL(self, gcmd):
@@ -2608,6 +2635,10 @@ class BufferFeeder:
         # Like BUFFER_HALT, arms _halt_requested so any macro waiting
         # on BUFFER_WAIT_IDLE raises and aborts rather than silently
         # continuing to the next phase.
+        # P7-24: Stepper auch vom Extruder-Trapq abkoppeln falls
+        # ein Macro-Abbruch ihn dort haengen lies.
+        if self._unsync_if_synced():
+            self._respond("STOP_BUFFER_FILL — also unsynced from extruder")
         self._continuous_feed = False
         self._halt_motion()
         self._pending_remaining_mm = 0.0
@@ -2778,7 +2809,20 @@ class BufferFeeder:
         # end up back in AUTO with the E-mode still flipped to M83
         # from the failed macro.
         self._try_restore_gcode_state(from_command=True)
-        self._set_state(STATE_IDLE if not self.entrance_detected else STATE_AUTO)
+        # P7-24: vor dem Auto-Sprung dieselben Guards pruefen, die
+        # BUFFER_AUTO_ON anwendet (HALL1, Pause-Suspend, Busy-Phase).
+        # Ohne diese Angleichung konnte CLEAR_JAM AUTO aktivieren in
+        # Situationen, wo AUTO_ON verweigert (z.B. Print pausiert).
+        # Bei verweigerten Voraussetzungen bleibt der Buffer in IDLE —
+        # der Operator/RESUME engagiert dann selbst AUTO.
+        target = STATE_IDLE
+        if self.entrance_detected:
+            block_reason = self._check_auto_ready(allow_jam=True)
+            if block_reason is None and not self._auto_off_by_user:
+                target = STATE_AUTO
+            elif block_reason is not None:
+                self._respond("JAM cleared — staying IDLE: " + block_reason)
+        self._set_state(target)
         self._respond("JAM cleared — state=%s" % self._state)
 
     # -----------------------------------------------------------------------
