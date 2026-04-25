@@ -58,7 +58,12 @@ BUSY_PHASE_STATES = {STATE_INITIAL_GRIP,
 # bang-bang or manual dauerfeed leaks into subsequent phases.
 CONTINUOUS_FEED_STATES = {STATE_AUTO, STATE_MANUAL_FEED,
                           STATE_MANUAL_RETRACT, STATE_LOAD_PHASE_3,
-                          STATE_INITIAL_GRIP}
+                          STATE_INITIAL_GRIP,
+                          # P7-16: Bang-Bang reagiert waehrend UNLOAD-
+                          # Tip-Forming auf Sensor-Trigger. Tip-Forming
+                          # bewegt typisch >30 mm Filament hin/her, der
+                          # Buffer wuerde sonst leer laufen / overfillen.
+                          STATE_UNLOAD_PHASE_1}
 
 # States where jam-detection watches for HALL dwell anomalies.
 JAM_WATCH_STATES = {STATE_AUTO, STATE_LOAD_PHASE_3}
@@ -798,8 +803,18 @@ class BufferFeeder:
                 # Ohne diesen Bypass wuerde der direkte Sensor-Callback-
                 # Pfad _enter_overflow rufen und damit die Stable-Logik
                 # umgehen (state wechselt zu OVERFLOW, Phase 3 bricht ab).
+                # P7-16: UNLOAD-Phasen sind Recovery-Pfade — _main_tick
+                # behandelt UNLOAD_PHASE_X schon als safe-from-overflow
+                # via not-in-Liste; der direkte Sensor-Callback-Pfad
+                # muss konsistent sein, sonst kollidiert ein HALL1-Spike
+                # waehrend Tip-Forming mit dem laufenden UNLOAD-Macro.
                 if (self._state == STATE_LOAD_PHASE_3
                         and self._load_phase3_overflow_ok):
+                    pass
+                elif self._state in (STATE_UNLOAD_PHASE_1,
+                                     STATE_UNLOAD_PHASE_2,
+                                     STATE_UNLOAD_PHASE_3,
+                                     STATE_MANUAL_RETRACT):
                     pass
                 else:
                     self._enter_overflow()
@@ -1367,8 +1382,11 @@ class BufferFeeder:
                             " (%.0f/%.0f °C)" % (
                                 self._hotend_temp(), self.min_temp))
 
-            # Bang-bang in AUTO.
-            if self._state == STATE_AUTO:
+            # Bang-bang in AUTO und UNLOAD_PHASE_1 (P7-16: waehrend
+            # Tip-Forming muss der Buffer auf HALL3/HALL2-Trigger
+            # reagieren, sonst grindet der Hauptextruder im leeren
+            # Buffer-Eingang nach ~30 mm Filament-Bewegung).
+            if self._state in (STATE_AUTO, STATE_UNLOAD_PHASE_1):
                 self._bang_bang_tick(eventtime)
 
             # RUNOUT follow (runout_pause=0 mode): bang-bang keeps
@@ -2402,26 +2420,30 @@ class BufferFeeder:
             STATE_IDLE, STATE_AUTO, STATE_RUNOUT, STATE_UNLOAD_PHASE_1,
             STATE_OVERFLOW, STATE_JAM,
         })
-        # Tip-Forming runs on the extruder alone. Feeder must stand
-        # still, and the state must NOT be IDLE — otherwise manual
-        # buttons and FORCE_BUFFER_FILL would accept input and stomp
-        # the unload sequence. STATE_UNLOAD_PHASE_1 is one of the
-        # phase states blocked by the button handler.
+        # Tip-Forming runs on the extruder alone. State STATE_UNLOAD_PHASE_1
+        # blocks manual buttons and FORCE_BUFFER_FILL waehrend des
+        # Tip-Formings — aber Bang-Bang darf reagieren (P7-16: state
+        # ist in CONTINUOUS_FEED_STATES und _bang_bang_tick wird in
+        # _main_tick auch fuer UNLOAD_PHASE_1 aufgerufen). Damit der
+        # Buffer auf den Filament-Strom des Hauptextruders reagieren
+        # kann (~30+ mm pro Tip-Forming-Cycle), ohne dass der Buffer
+        # leer laeuft oder overflowed.
         self._continuous_feed = False
         self._halt_motion()
-        self._set_state(STATE_UNLOAD_PHASE_1)
-        # Block until any in-flight chunk has finished (internal
-        # helper — state stays UNLOAD_PHASE_1 during the wait, so
-        # the public BUFFER_WAIT_IDLE would deadlock). UNLOAD ist
-        # Retract → direction=-1 laesst OVERFLOW/JAM passieren.
+        # Pending moves DRAINEN bevor state wechselt — wenn wir VORHER
+        # in AUTO/MANUAL waren, koennten chunks noch in flight sein.
+        # Nach state-change waere das wait_for_move_done von Bang-Bang-
+        # Submits blockiert, daher Drain VOR set_state.
         try:
             self._wait_for_move_done(gcmd, direction=-1)
         except Exception:
-            # Auf HALT release wir die Phase damit's nicht sticky bleibt.
-            self._set_state(STATE_IDLE)
             raise
-        self._disable_stepper()
-        self._respond("UNLOAD Phase 1: feeder halted for tip-forming")
+        self._set_state(STATE_UNLOAD_PHASE_1)
+        # KEIN _disable_stepper hier mehr (P7-16): Bang-Bang waehrend
+        # Tip-Forming braucht den Stepper aktiv. _enable_stepper wird
+        # automatisch in _submit_move (von Bang-Bang) gerufen falls noch
+        # nicht aktiv. Bei Phase 2 wird ohnehin neu enabled.
+        self._respond("UNLOAD Phase 1: state set, bang-bang follows feed")
 
     cmd_BUFFER_UNLOAD_PHASE2_help = "UNLOAD Phase 2 — feeder retract parallel to extruder"
     def cmd_BUFFER_UNLOAD_PHASE2(self, gcmd):
