@@ -305,6 +305,20 @@ class BufferFeeder:
         self._load_phase3_distance = 0.0
         self._load_phase3_max_distance = 0.0
         self._load_phase3_speed = 0.0       # per-call feed speed in phase 3
+        # Stable-exit-Tracking fuer Phase 3 (P7-8). STABLE_TIMEOUT=N
+        # bedeutet: HALL2 (oder HALL1 wenn OVERFLOW_OK=1) muss N Sekunden
+        # KONTINUIERLICH aktiv sein, bevor Phase 3 sauber beendet wird.
+        # Reset bei Trigger-Loss faengt das Bowden-Widerstand-Zucken ab,
+        # wo der Arm kurz gegen HALL1/HALL2 schlaegt aber sofort
+        # zurueckfaellt — solche Spikes setzen die Stoppuhr zurueck.
+        # STABLE_TIMEOUT=0 = altes Verhalten (Instant-Exit beim ersten
+        # Trigger). OVERFLOW_OK=1 = HALL1-Stable als legitimer Exit
+        # (Buffer ist ueberfuellt → Filament ist da → Phase 2 fertig).
+        self._load_phase3_stable_timeout = 0.0
+        self._load_phase3_overflow_ok = False
+        self._load_phase3_chunk_distance = 10.0
+        self._load_phase3_hall_full_since = None
+        self._load_phase3_hall_overflow_since = None
 
         # Pending-chunk streaming for single-shot moves larger than
         # max_move_chunk_mm. _submit_move submits the first chunk
@@ -1186,11 +1200,21 @@ class BufferFeeder:
             # Retract oder einer UNLOAD-Phase: dann lassen wir den
             # Operator/das Macro den Buffer entlasten. Sobald die
             # Retract-Sequenz endet, greift der Reassert wieder normal.
+            # OVERFLOW_OK=1 in Phase 3 (P7-8): unterdrueckt den Auto-
+            # Transition zu STATE_OVERFLOW, damit _load_phase3_tick das
+            # HALL1-Stable-Tracking selbst auswerten kann. Ohne diesen
+            # Skip wuerde die State-Machine den Stepper sofort beim
+            # ersten HALL1-Spike lockouten — aber wir wollen ja gerade
+            # den Spike vom dauerhaften "Buffer wirklich ueberfuellt"
+            # unterscheiden.
+            phase3_overflow_ok = (self._state == STATE_LOAD_PHASE_3
+                                  and self._load_phase3_overflow_ok)
             if (self.hall_overflow
                     and self._state not in (
                         STATE_OVERFLOW, STATE_MANUAL_RETRACT,
                         STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2,
-                        STATE_UNLOAD_PHASE_3)):
+                        STATE_UNLOAD_PHASE_3)
+                    and not phase3_overflow_ok):
                 self._enter_overflow()
                 return eventtime + MAIN_TICK_INTERVAL
 
@@ -1408,25 +1432,68 @@ class BufferFeeder:
             pass
 
     def _load_phase3_tick(self, eventtime):
+        threshold = self._load_phase3_stable_timeout
+        # HALL2 (full) Stabilitaets-Tracking. Stamp beim ersten Trigger,
+        # Reset bei Loss — kurzes Zucken setzt also die Uhr zurueck.
         if self.hall_full:
-            self._continuous_feed = False
-            self._halt_motion()
-            self._respond("LOAD Phase 3: HALL2 reached, buffer full")
-            # Bang-bang nur weiterlaufen lassen, wenn aktuell tatsaechlich
-            # ein Druck laeuft (z.B. MMU-Filament-Wechsel mitten im Print).
-            # Beim manuellen LOAD ausserhalb eines Drucks geht der Buffer
-            # in IDLE — sonst wuerde Herausziehen am Toolhead spontan
-            # bang-bang triggern und der Buffer pumpt ohne erkennbaren
-            # Grund nach. AUTO wird beim naechsten Print-Start ohnehin
-            # automatisch engaged (auto_engage_on_print_start).
-            if (self._print_running
-                    and self.entrance_detected
-                    and not self._auto_off_by_user
-                    and not self._halt_requested):
-                self._set_state(STATE_AUTO)
+            if self._load_phase3_hall_full_since is None:
+                self._load_phase3_hall_full_since = eventtime
+            full_dwell = eventtime - self._load_phase3_hall_full_since
+            if full_dwell >= threshold:
+                self._continuous_feed = False
+                self._halt_motion()
+                self._load_phase3_hall_full_since = None
+                self._load_phase3_hall_overflow_since = None
+                if threshold > 0:
+                    self._respond("LOAD Phase 3: HALL2 stable %.1fs, "
+                                  "buffer full" % full_dwell)
+                else:
+                    self._respond("LOAD Phase 3: HALL2 reached, buffer full")
+                # Bang-bang nur weiterlaufen lassen, wenn aktuell
+                # tatsaechlich ein Druck laeuft (z.B. MMU-Filament-Wechsel
+                # mitten im Print). Beim manuellen LOAD ausserhalb eines
+                # Drucks geht der Buffer in IDLE — sonst wuerde Herausziehen
+                # am Toolhead spontan bang-bang triggern und der Buffer
+                # pumpt ohne erkennbaren Grund nach. AUTO wird beim
+                # naechsten Print-Start ohnehin automatisch engaged
+                # (auto_engage_on_print_start).
+                if (self._print_running
+                        and self.entrance_detected
+                        and not self._auto_off_by_user
+                        and not self._halt_requested):
+                    self._set_state(STATE_AUTO)
+                else:
+                    self._set_state(STATE_IDLE)
+                return
+        else:
+            self._load_phase3_hall_full_since = None
+        # HALL1 (overflow) Stabilitaets-Tracking — nur wenn OVERFLOW_OK=1
+        # gesetzt wurde. Sonst ist der HALL1-Pfad weiterhin via
+        # _main_tick → _enter_overflow → state=OVERFLOW abgewickelt
+        # (alter Pfad, raised im cmd_BUFFER_LOAD_PHASE3-Postcheck).
+        if self._load_phase3_overflow_ok:
+            if self.hall_overflow:
+                if self._load_phase3_hall_overflow_since is None:
+                    self._load_phase3_hall_overflow_since = eventtime
+                overflow_dwell = eventtime - self._load_phase3_hall_overflow_since
+                if overflow_dwell >= threshold:
+                    self._continuous_feed = False
+                    self._halt_motion()
+                    self._load_phase3_hall_full_since = None
+                    self._load_phase3_hall_overflow_since = None
+                    self._respond("LOAD Phase 3: HALL1 stable %.1fs, "
+                                  "buffer overfilled (treating as full)"
+                                  % overflow_dwell)
+                    if (self._print_running
+                            and self.entrance_detected
+                            and not self._auto_off_by_user
+                            and not self._halt_requested):
+                        self._set_state(STATE_AUTO)
+                    else:
+                        self._set_state(STATE_IDLE)
+                    return
             else:
-                self._set_state(STATE_IDLE)
-            return
+                self._load_phase3_hall_overflow_since = None
         if self._load_phase3_distance >= self._load_phase3_max_distance:
             self._continuous_feed = False
             self._halt_motion()
@@ -1442,7 +1509,7 @@ class BufferFeeder:
         if not self._move_in_flight():
             # Clip chunk so the per-call MAX_DISTANCE is a hard cap.
             remaining = self._load_phase3_max_distance - self._load_phase3_distance
-            chunk = min(10.0, remaining)
+            chunk = min(self._load_phase3_chunk_distance, remaining)
             if chunk > 0:
                 self._submit_move(chunk, self._load_phase3_speed)
                 self._load_phase3_distance += chunk
@@ -1587,7 +1654,15 @@ class BufferFeeder:
         # OVERFLOW: nur Forward-Submits ablehnen. Retract (signed_distance < 0)
         # ist die einzige Recovery-Bewegung, die einen überfüllten Buffer
         # entlasten kann — sonst sitzt der User in der Sackgasse.
-        if self.hall_overflow and signed_distance > 0:
+        # Ausnahme (P7-8): LOAD_PHASE_3 mit OVERFLOW_OK=1 darf weiterfeeden
+        # waehrend HALL1 aktiv — sonst koennte das Stable-Tracking nie
+        # die Schwelle erreichen, weil der Arm bei jedem Reject zurueck-
+        # faellt und HALL1 deaktiviert. _load_phase3_tick beendet die
+        # Phase sauber sobald HALL1 stable lange genug ist.
+        phase3_overflow_ok = (self._state == STATE_LOAD_PHASE_3
+                              and self._load_phase3_overflow_ok)
+        if (self.hall_overflow and signed_distance > 0
+                and not phase3_overflow_ok):
             logging.warning("buffer_feeder: forward move rejected — HALL1 active "
                             "(distance=%.1f speed=%.1f)", signed_distance, speed)
             self._continuous_feed = False
@@ -2146,7 +2221,10 @@ class BufferFeeder:
         self._enable_stepper()
         self._submit_move(+distance, speed)
 
-    cmd_BUFFER_LOAD_PHASE3_help = "LOAD Phase 3 — feed until HALL2 or MAX_DISTANCE"
+    cmd_BUFFER_LOAD_PHASE3_help = ("LOAD Phase 3 — feed until HALL2 or MAX_DISTANCE. "
+                                    "Optional: STABLE_TIMEOUT (s, 0=instant), "
+                                    "OVERFLOW_OK (0/1, treat stable HALL1 as success), "
+                                    "CHUNK_DISTANCE (mm per tick chunk).")
     def cmd_BUFFER_LOAD_PHASE3(self, gcmd):
         self._halt_requested = False
         self._raise_if_locked_out(gcmd)
@@ -2155,6 +2233,17 @@ class BufferFeeder:
         })
         max_distance = gcmd.get_float('MAX_DISTANCE', self.load_buffer_max, above=0.)
         speed        = gcmd.get_float('SPEED',        self.feed_speed,      above=0.)
+        # Stable-Exit-Optionen (P7-8): Sensoren muessen N Sekunden
+        # KONTINUIERLICH aktiv sein bevor Phase 3 abbricht. Default 0
+        # = altes Verhalten (Instant-Exit beim ersten HALL2-Trigger).
+        # OVERFLOW_OK=1 → stable HALL1 ist auch ein legitimer Exit
+        # (Buffer ueberfuellt → Filament ist da → Phase 2 fertig).
+        # CHUNK_DISTANCE konfiguriert die Foerder-Chunkgroesse pro Tick
+        # (Default 10mm — fuer LOAD-Wiederholung kann der Macro auf 50+
+        # mm hochsetzen, weniger viele kleine Submits).
+        stable_timeout = gcmd.get_float('STABLE_TIMEOUT', 0.0, minval=0.)
+        overflow_ok    = bool(gcmd.get_int('OVERFLOW_OK', 0, minval=0, maxval=1))
+        chunk_distance = gcmd.get_float('CHUNK_DISTANCE', 10.0, above=0.)
         # Clean start: stop any inherited continuous feed and wait for
         # any in-flight manual move to finish before we begin chunk
         # streaming. Prevents residual motion from tacking onto Phase 3.
@@ -2163,6 +2252,11 @@ class BufferFeeder:
         self._load_phase3_distance = 0.0
         self._load_phase3_max_distance = max_distance
         self._load_phase3_speed = speed
+        self._load_phase3_stable_timeout = stable_timeout
+        self._load_phase3_overflow_ok = overflow_ok
+        self._load_phase3_chunk_distance = chunk_distance
+        self._load_phase3_hall_full_since = None
+        self._load_phase3_hall_overflow_since = None
         self._enable_stepper()
         self._set_state(STATE_LOAD_PHASE_3)
         self._start_continuous_motion(+1, speed, self.max_feed_time)
