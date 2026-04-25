@@ -86,19 +86,22 @@ git clone https://github.com/Avatarsia/BufferPLUS-klipper.git
 cd BufferPLUS-klipper
 git checkout python-ansatz
 
-# 2. Extension installieren (symlinkt in klippy/extras/)
+# 2. Interaktiver Installer
+#    - legt einen Symlink für die Python-Extension nach klippy/extras/ an
+#    - kopiert lll.cfg nach printer_data/config/ (Mainsail-editierbar; bei
+#      späteren Repo-Updates zeigt der Installer einen Diff und lässt dich
+#      wählen, ob du deine Version behalten oder die Repo-Version
+#      übernehmen willst)
+#    - hängt [include lll.cfg] in die printer.cfg
+#    - registriert moonraker update_manager (optional)
 ./install.sh
 
-# 3. Config einhängen
-ln -sf "$(pwd)/lll.cfg" ~/printer_data/config/lll.cfg
-
-# 4. In printer.cfg ergänzen:
-#    [include lll.cfg]
+# 3. In printer.cfg muss zusätzlich vorhanden sein (nicht automatisch ergänzt):
 #    [pause_resume]
 #    [extruder]
 #      max_extrude_only_distance: 200
 
-# 5. Klipper neu starten
+# 4. Klipper neu starten
 sudo systemctl restart klipper
 
 # 6. Verifizieren

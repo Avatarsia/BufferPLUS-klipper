@@ -91,12 +91,25 @@ status_extension() {
 }
 
 status_cfg() {
+    # Config wird als KOPIE installiert (nicht Symlink), damit Mainsail
+    # sie direkt editieren kann. Mögliche Zustände:
+    #   missing          — Datei existiert nicht
+    #   legacy_symlink   — Symlink auf Repo-Version (alter Install-Stil)
+    #   wrong_symlink:X  — Symlink auf andere Datei
+    #   copy_in_sync     — normale Datei, Inhalt identisch zur Repo-Version
+    #   copy_diverged    — normale Datei, Inhalt weicht von Repo-Version ab
     if [ -L "${CFG_TARGET}" ]; then
         local link; link="$(readlink "${CFG_TARGET}")"
         if [ "${link}" = "${CFG_SOURCE}" ]; then
-            echo "installed"
+            echo "legacy_symlink"
         else
             echo "wrong_symlink:${link}"
+        fi
+    elif [ -f "${CFG_TARGET}" ]; then
+        if cmp -s "${CFG_TARGET}" "${CFG_SOURCE}"; then
+            echo "copy_in_sync"
+        else
+            echo "copy_diverged"
         fi
     elif [ -e "${CFG_TARGET}" ]; then
         echo "regular_file"
@@ -155,10 +168,12 @@ esac
 
 S_CFG="$(status_cfg)"
 case "${S_CFG}" in
-    installed)  ok "Config-Symlink: ${CFG_TARGET}" ;;
-    missing)    miss "Config-Symlink fehlt: ${CFG_TARGET}" ;;
-    wrong_symlink:*) warn "Config-Symlink zeigt auf ${S_CFG#wrong_symlink:}" ;;
-    regular_file)    warn "${CFG_TARGET} existiert als normale Datei" ;;
+    copy_in_sync)    ok "Config (Kopie): ${CFG_TARGET} — identisch mit Repo-Version" ;;
+    copy_diverged)   warn "Config (Kopie): ${CFG_TARGET} — unterscheidet sich von Repo-Version" ;;
+    legacy_symlink)  warn "Config: ${CFG_TARGET} ist Symlink — sollte Kopie sein, damit Mainsail editieren kann" ;;
+    wrong_symlink:*) warn "Config-Symlink zeigt auf ${S_CFG#wrong_symlink:} (nicht aufs Repo)" ;;
+    regular_file)    warn "${CFG_TARGET} existiert in unklarem Zustand (weder Datei noch Symlink)" ;;
+    missing)         miss "Config fehlt: ${CFG_TARGET}" ;;
 esac
 
 S_INC="$(status_printer_cfg_include)"
@@ -200,12 +215,12 @@ case "${ALL_YN}" in
     *) AUTO_ALL=0 ;;
 esac
 
-# Hilfsfunktion: falls AUTO_ALL und Status=missing → automatisch ja; sonst fragen.
+# Hilfsfunktion: falls AUTO_ALL und Status nicht "alles ok" → automatisch ja; sonst fragen.
 want() {
     # $1 = status, $2 = prompt
     local status="$1" prompt="$2"
     case "$status" in
-        installed|present) return 1 ;;  # nichts zu tun
+        installed|present|copy_in_sync) return 1 ;;  # nichts zu tun
     esac
     if [ "${AUTO_ALL}" = "1" ]; then
         return 0
@@ -221,10 +236,58 @@ if want "${S_EXT}" "Extension-Symlink ${EXT_TARGET} anlegen"; then
     ACTIONS="${ACTIONS} ext"
 fi
 
-# 2) Config
-if want "${S_CFG}" "Config-Symlink ${CFG_TARGET} anlegen"; then
-    ACTIONS="${ACTIONS} cfg"
-fi
+# 2) Config — wird als Kopie installiert (Mainsail-editierbar).
+# Verhalten je nach aktuellem Zustand:
+#   missing        → kopieren
+#   legacy_symlink → Symlink ersetzen durch Kopie
+#   wrong_symlink  → Symlink ersetzen durch Kopie (nach Backup)
+#   regular_file   → Spezialfall, Backup + neu kopieren
+#   copy_diverged  → Diff zeigen, User entscheidet (k = behalten / r = Repo nehmen)
+#   copy_in_sync   → nichts zu tun
+case "${S_CFG}" in
+    missing)
+        if want "${S_CFG}" "Config ${CFG_TARGET} aus Repo kopieren"; then
+            ACTIONS="${ACTIONS} cfg_copy"
+        fi
+        ;;
+    legacy_symlink|wrong_symlink:*)
+        if want "${S_CFG}" "Config ${CFG_TARGET} ist Symlink — durch Kopie ersetzen (Mainsail kann dann editieren)"; then
+            ACTIONS="${ACTIONS} cfg_replace_link"
+        fi
+        ;;
+    regular_file)
+        if want "${S_CFG}" "Config ${CFG_TARGET} ist in unklarem Zustand — Backup machen und neu aus Repo kopieren"; then
+            ACTIONS="${ACTIONS} cfg_replace_link"
+        fi
+        ;;
+    copy_diverged)
+        say ""
+        say "${C_BOLD}Lokale ${CFG_TARGET} weicht von Repo-Version ab.${C_RESET}"
+        say "Diff (lokale ↔ Repo, gekürzt auf 60 Zeilen):"
+        diff -u "${CFG_TARGET}" "${CFG_SOURCE}" | head -60 || true
+        say ""
+        say "Optionen:"
+        say "  k) ${C_BOLD}Lokale Version behalten${C_RESET} — Repo-Updates werden nicht übernommen"
+        say "  r) Repo-Version übernehmen — lokale wird gesichert nach ${CFG_TARGET}.bak.<ts>"
+        if [ "${AUTO_ALL}" = "1" ]; then
+            say "${C_YELLOW}AUTO-Modus: lokale Version wird beibehalten (k).${C_RESET}"
+        else
+            CHOICE=""
+            while true; do
+                read -r -p "Auswahl [k/r] (default k): " CHOICE
+                CHOICE="${CHOICE:-k}"
+                case "${CHOICE}" in
+                    k|K) break ;;
+                    r|R) ACTIONS="${ACTIONS} cfg_replace_with_backup"; break ;;
+                    *) say "Bitte 'k' oder 'r' eingeben." ;;
+                esac
+            done
+        fi
+        ;;
+    copy_in_sync)
+        : # nichts zu tun
+        ;;
+esac
 
 # 3) printer.cfg-Include
 if [ -f "${PRINTER_CFG}" ] && want "${S_INC}" "[include lll.cfg] in printer.cfg am Ende ergänzen"; then
@@ -273,14 +336,28 @@ for ACT in $ACTIONS; do
             ln -sf "${EXT_SOURCE}" "${EXT_TARGET}"
             ok "Extension-Symlink gesetzt."
             ;;
-        cfg)
+        cfg_copy)
             mkdir -p "${PRINTER_CFG_DIR}"
-            if [ -e "${CFG_TARGET}" ] && [ ! -L "${CFG_TARGET}" ]; then
-                warn "${CFG_TARGET} ist eine normale Datei. Backup: ${CFG_TARGET}.bak"
-                mv "${CFG_TARGET}" "${CFG_TARGET}.bak"
-            fi
-            ln -sf "${CFG_SOURCE}" "${CFG_TARGET}"
-            ok "Config-Symlink gesetzt."
+            cp "${CFG_SOURCE}" "${CFG_TARGET}"
+            ok "Config kopiert: ${CFG_TARGET} (editierbar via Mainsail)."
+            ;;
+        cfg_replace_link)
+            mkdir -p "${PRINTER_CFG_DIR}"
+            # Bestehender Symlink/Spezialeintrag wird gesichert (auch
+            # wenn er kaputt ist — readlink/cp -a übernimmt das ohne
+            # die Repo-Datei zu touchieren).
+            BAK="${CFG_TARGET}.bak.$(date +%Y%m%d-%H%M%S)"
+            mv "${CFG_TARGET}" "${BAK}"
+            warn "Bestehende Datei/Symlink gesichert: ${BAK}"
+            cp "${CFG_SOURCE}" "${CFG_TARGET}"
+            ok "Config kopiert: ${CFG_TARGET} (editierbar via Mainsail)."
+            ;;
+        cfg_replace_with_backup)
+            BAK="${CFG_TARGET}.bak.$(date +%Y%m%d-%H%M%S)"
+            cp -a "${CFG_TARGET}" "${BAK}"
+            warn "Lokale Version gesichert: ${BAK}"
+            cp "${CFG_SOURCE}" "${CFG_TARGET}"
+            ok "Repo-Version übernommen: ${CFG_TARGET}."
             ;;
         inc)
             # Backup vorher
@@ -350,10 +427,12 @@ hr
 say "Was gemacht wurde:"
 for ACT in $ACTIONS; do
     case "$ACT" in
-        ext) say "  - Extension-Symlink ${EXT_TARGET} → ${EXT_SOURCE}" ;;
-        cfg) say "  - Config-Symlink ${CFG_TARGET} → ${CFG_SOURCE}" ;;
-        inc) say "  - [include lll.cfg] an printer.cfg angehängt (Backup: ${PRINTER_CFG}.bak.*)" ;;
-        mr)  say "  - [update_manager buffer_feeder] in moonraker.conf ergänzt (Backup: ${MOONRAKER_CONF}.bak.*)" ;;
+        ext)                     say "  - Extension-Symlink ${EXT_TARGET} → ${EXT_SOURCE}" ;;
+        cfg_copy)                say "  - Config kopiert: ${CFG_SOURCE} → ${CFG_TARGET}" ;;
+        cfg_replace_link)        say "  - Config-Symlink ersetzt durch Kopie: ${CFG_TARGET} (alte Datei in ${CFG_TARGET}.bak.*)" ;;
+        cfg_replace_with_backup) say "  - Config überschrieben mit Repo-Version: ${CFG_TARGET} (lokale Version in ${CFG_TARGET}.bak.*)" ;;
+        inc)                     say "  - [include lll.cfg] an printer.cfg angehängt (Backup: ${PRINTER_CFG}.bak.*)" ;;
+        mr)                      say "  - [update_manager buffer_feeder] in moonraker.conf ergänzt (Backup: ${MOONRAKER_CONF}.bak.*)" ;;
     esac
 done
 [ "${RESTART}" = "1" ] && say "  - Klipper-Service neu gestartet."
@@ -364,6 +443,12 @@ say "  - [pause_resume] in printer.cfg vorhanden? (manchmal in includierter macr
 say "  - [extruder] max_extrude_only_distance >= 200 ?"
 say "  - Nach Klipper-Boot: 'BUFFER_STATE_DUMP' in der Konsole — die Extension"
 say "    sollte 'state = IDLE' und die Sensor-States ausgeben."
+say ""
+say "${C_BOLD}Config bearbeiten:${C_RESET}"
+say "  ${CFG_TARGET} ist eine Kopie und kann direkt in Mainsail editiert werden."
+say "  Beim nächsten ./install.sh wird ein Diff zur Repo-Version angezeigt — du"
+say "  entscheidest dann, ob deine Änderungen behalten oder Repo-Updates"
+say "  übernommen werden sollen."
 say ""
 say "${C_BOLD}Recovery-Cheatsheet (im Mainsail-Terminal):${C_RESET}"
 say "  - BUFFER_STATE_DUMP        → kompletten State + Sensoren ausgeben"
