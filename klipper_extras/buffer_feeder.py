@@ -66,6 +66,7 @@ JAM_WATCH_STATES = {STATE_AUTO, STATE_LOAD_PHASE_3}
 # Main reactor tick interval (sensor polling, bang-bang decisions).
 MAIN_TICK_INTERVAL = 0.02            # 50 Hz
 JAM_TICK_INTERVAL  = 1.0             # 1 Hz
+IDLE_DETACH_GAP    = 10.0            # detach if attached + idle > 10s
 
 # Triple-click action kinds.
 CLICK_SINGLE = 1
@@ -1237,6 +1238,21 @@ class BufferFeeder:
                 # _submit_single_trapezoid.
                 self._detach_from_motion_queuing()
 
+            # Periodischer Idle-Detach: faengt Faelle wo der Stepper
+            # enabled+attached aber quiescent bleibt — z.B. STATE_AUTO
+            # mit hall_full (bang-bang stoppt feeden, _halt_motion ohne
+            # disable). Ohne diesen Check wuerde >17s solche Quiescenz
+            # zum CLOCK_DIFF_MAX-Crash fuehren. _safe_to_flush()-Guard
+            # in _detach_from_motion_queuing schuetzt vor Mid-Print-
+            # Stall, daher hier kein zweiter Print-Check noetig.
+            if (self._stepper_attached
+                    and not self._move_in_flight()
+                    and self._pending_remaining_mm <= 0):
+                mcu = self.stepper.get_mcu()
+                mcu_now = mcu.estimated_print_time(eventtime)
+                if mcu_now - self._last_move_end_time > IDLE_DETACH_GAP:
+                    self._detach_from_motion_queuing()
+
             # Cooldown end: back to AUTO if entrance present AND the
             # operator hasn't explicitly disabled AUTO.
             if self._cooldown_deadline is not None and eventtime >= self._cooldown_deadline:
@@ -1551,6 +1567,10 @@ class BufferFeeder:
             self._pending_disable = True
         else:
             self._disable_stepper()
+            # Wie im deferred-Zweig (_main_tick) — Detach lazy, falls
+            # safe_to_flush. Mid-Print bleibt der Stepper attached, wird
+            # durch normale Toolhead-Stepgen-Activity wachgehalten.
+            self._detach_from_motion_queuing()
 
     def _enable_stepper(self):
         if self._stepper_enable is None:
@@ -1571,6 +1591,17 @@ class BufferFeeder:
         except Exception:
             logging.exception("buffer_feeder: disable_stepper failed")
 
+    def _safe_to_flush(self):
+        """True wenn toolhead.flush_step_generation() jetzt sicher ist.
+
+        Sicher sind: ausserhalb eines aktiven Drucks (_print_running=False)
+        oder waehrend einer Pause (_bang_bang_suspended=True — gesetzt
+        durch idle_timeout:ready, also PAUSE/M600). Im aktiven Druck-
+        Hotpath wuerde der globale flush die Toolhead-Lookahead-Queue
+        leeren -> kurzer Print-Stall.
+        """
+        return (not self._print_running) or self._bang_bang_suspended
+
     def _detach_from_motion_queuing(self):
         """Detach feeder stepper from motion_queuing for idle hold.
 
@@ -1585,6 +1616,8 @@ class BufferFeeder:
         the print hotpath.
         """
         if not self._stepper_attached:
+            return
+        if not self._safe_to_flush():
             return
         try:
             toolhead = self.printer.lookup_object('toolhead')
