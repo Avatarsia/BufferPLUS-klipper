@@ -1127,7 +1127,11 @@ class BufferFeeder:
                 self._feed_deadline_time = None
                 self._trigger_jam(
                     "SAFETY_TIMEOUT",
-                    "max_feed_time %ds reached without reaching HALL2" % int(self.max_feed_time))
+                    "max_feed_time %ds reached without HALL2 — motor stall, "
+                    "empty spool, or value too low for setup (typical 2m "
+                    "bowden+buffer fill at %dmm/s needs ~90s; bump "
+                    "max_feed_time in lll.cfg if first-fill is legit)"
+                    % (int(self.max_feed_time), int(self.feed_speed)))
 
             # max_feed_distance is a forward-feed safety only. Manual
             # retract (Retract-Taster Dauerlauf, BUFFER_RETRACT without
@@ -1138,7 +1142,11 @@ class BufferFeeder:
                     and self._feed_distance_accumulator >= self.max_feed_distance):
                 self._trigger_jam(
                     "SAFETY_DISTANCE",
-                    "max_feed_distance %dmm reached in one continuous feed" % int(self.max_feed_distance))
+                    "max_feed_distance %dmm reached without HALL2 — slipping "
+                    "drive gear, kinked filament, or value too low for setup "
+                    "(bowden+buffer path; bump max_feed_distance in lll.cfg "
+                    "if first-fill is legit)"
+                    % int(self.max_feed_distance))
 
             # Deferred disable: motor_disable must not be called while steps
             # are unprocessed in the trapq (step-gen fires motor_enable with
