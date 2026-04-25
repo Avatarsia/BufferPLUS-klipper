@@ -1132,6 +1132,11 @@ class BufferFeeder:
             if self._pending_remaining_mm > 0:
                 if self._abort_signalled():
                     self._pending_remaining_mm = 0.0
+                elif (self._pending_direction < 0
+                        and self._state == STATE_MANUAL_RETRACT
+                        and not self.entrance_detected):
+                    self._halt_motion()
+                    self._respond("Retract-Burst gestoppt — Filament am Eingang weg")
                 elif self._pending_speed > 0:
                     chunk_duration = (self.max_move_chunk_mm
                                       / self._pending_speed)
