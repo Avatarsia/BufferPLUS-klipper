@@ -1183,12 +1183,14 @@ class BufferFeeder:
                 return eventtime + MAIN_TICK_INTERVAL
 
             # HALL1 has absolute priority — AUSSER bei aktivem Manual-
-            # Retract: dann lassen wir den Operator den Buffer entlasten.
-            # Sobald der Retract beendet ist (state geht via Cooldown
-            # zurueck nach IDLE/AUTO), greift der OVERFLOW-Reassert wieder.
+            # Retract oder einer UNLOAD-Phase: dann lassen wir den
+            # Operator/das Macro den Buffer entlasten. Sobald die
+            # Retract-Sequenz endet, greift der Reassert wieder normal.
             if (self.hall_overflow
-                    and self._state != STATE_OVERFLOW
-                    and self._state != STATE_MANUAL_RETRACT):
+                    and self._state not in (
+                        STATE_OVERFLOW, STATE_MANUAL_RETRACT,
+                        STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2,
+                        STATE_UNLOAD_PHASE_3)):
                 self._enter_overflow()
                 return eventtime + MAIN_TICK_INTERVAL
 
@@ -2008,7 +2010,7 @@ class BufferFeeder:
                 or self._jam_active
                 or self.hall_overflow)
 
-    def _wait_for_move_done(self, gcmd=None):
+    def _wait_for_move_done(self, gcmd=None, direction=+1):
         """Internal: block until both in-flight and pending-stream
         moves are done, OR an emergency condition trips.
 
@@ -2020,13 +2022,16 @@ class BufferFeeder:
         Early-exits on HALT / OVERFLOW / JAM because at that point
         the motor has already been disabled (or is about to be) and
         waiting out the nominal trapq end_time is pointless.
+
+        direction=-1 (UNLOAD/Retract): OVERFLOW/JAM blockieren nicht
+        — Retract ist Recovery. Nur HALT bricht ab.
         """
         while self._move_in_flight() or self._pending_remaining_mm > 0:
             if self._abort_signalled():
                 break
             self.reactor.pause(self.reactor.monotonic() + 0.05)
         if gcmd is not None:
-            self._raise_if_locked_out(gcmd)
+            self._raise_if_locked_out(gcmd, direction=direction)
 
     def _wait_for_move_done_resume_on_overflow(self, gcmd=None):
         """Like _wait_for_move_done but waits out HALL1 overflow instead of
@@ -2149,11 +2154,13 @@ class BufferFeeder:
                                      "(so buttons / FORCE_BUFFER_FILL don't interfere)")
     def cmd_BUFFER_UNLOAD_PHASE1(self, gcmd):
         self._halt_requested = False
-        self._raise_if_locked_out(gcmd)
-        # Idempotent re-entry from UNLOAD_PHASE_1 is allowed so a retry
-        # of a partially-completed UNLOAD doesn't get stuck.
+        # UNLOAD ist Retract → darf bei OVERFLOW/JAM laufen (Recovery).
+        self._raise_if_locked_out(gcmd, direction=-1)
+        # Allow-Liste enthaelt OVERFLOW + JAM, damit UNLOAD den Lockout
+        # aufloesen kann. Self-Entry idempotent fuer Retry-Sicherheit.
         self._check_phase_entry('UNLOAD_PHASE1', {
             STATE_IDLE, STATE_AUTO, STATE_RUNOUT, STATE_UNLOAD_PHASE_1,
+            STATE_OVERFLOW, STATE_JAM,
         })
         # Tip-Forming runs on the extruder alone. Feeder must stand
         # still, and the state must NOT be IDLE — otherwise manual
@@ -2165,13 +2172,12 @@ class BufferFeeder:
         self._set_state(STATE_UNLOAD_PHASE_1)
         # Block until any in-flight chunk has finished (internal
         # helper — state stays UNLOAD_PHASE_1 during the wait, so
-        # the public BUFFER_WAIT_IDLE would deadlock).
+        # the public BUFFER_WAIT_IDLE would deadlock). UNLOAD ist
+        # Retract → direction=-1 laesst OVERFLOW/JAM passieren.
         try:
-            self._wait_for_move_done(gcmd)
+            self._wait_for_move_done(gcmd, direction=-1)
         except Exception:
-            # On error (HALT/JAM/OVERFLOW raising), release the phase
-            # state so it doesn't stay sticky. OVERFLOW/JAM will be
-            # reasserted by the next main_tick if still active.
+            # Auf HALT release wir die Phase damit's nicht sticky bleibt.
             self._set_state(STATE_IDLE)
             raise
         self._disable_stepper()
@@ -2180,18 +2186,19 @@ class BufferFeeder:
     cmd_BUFFER_UNLOAD_PHASE2_help = "UNLOAD Phase 2 — feeder retract parallel to extruder"
     def cmd_BUFFER_UNLOAD_PHASE2(self, gcmd):
         self._halt_requested = False
-        self._raise_if_locked_out(gcmd)
-        # UNLOAD_PHASE_1 is the legitimate predecessor (tip-forming
-        # keeps the state to block button input). Self-entry stays
-        # idempotent for retry safety.
+        self._raise_if_locked_out(gcmd, direction=-1)
+        # UNLOAD_PHASE_1 ist der legitimate Vorgaenger (Tip-Forming
+        # haelt den State, um Button-Input zu blocken). Self-Entry
+        # idempotent. OVERFLOW/JAM erlaubt fuer Retract-Recovery.
         self._check_phase_entry('UNLOAD_PHASE2', {
             STATE_IDLE, STATE_AUTO, STATE_RUNOUT,
             STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2,
+            STATE_OVERFLOW, STATE_JAM,
         })
         distance = gcmd.get_float('DISTANCE', self.unload_sync_distance, above=0.)
         speed    = gcmd.get_float('SPEED',    self.unload_fast_speed,    above=0.)
         self._continuous_feed = False
-        self._wait_for_move_done(gcmd)
+        self._wait_for_move_done(gcmd, direction=-1)
         self._set_state(STATE_UNLOAD_PHASE_2)
         self._enable_stepper()
         self._submit_move(-distance, speed)
@@ -2199,10 +2206,12 @@ class BufferFeeder:
     cmd_BUFFER_UNLOAD_PHASE3_help = "UNLOAD Phase 3 — chunked retract until entrance free"
     def cmd_BUFFER_UNLOAD_PHASE3(self, gcmd):
         self._halt_requested = False
-        self._raise_if_locked_out(gcmd)
+        self._raise_if_locked_out(gcmd, direction=-1)
+        # OVERFLOW/JAM erlaubt fuer Retract-Recovery (siehe PHASE1/2).
         self._check_phase_entry('UNLOAD_PHASE3', {
             STATE_IDLE, STATE_AUTO, STATE_RUNOUT,
             STATE_UNLOAD_PHASE_2, STATE_UNLOAD_PHASE_3,
+            STATE_OVERFLOW, STATE_JAM,
         })
         max_distance = gcmd.get_float('MAX_DISTANCE', self.unload_fast_max, above=0.)
         speed        = gcmd.get_float('SPEED',        self.unload_fast_speed, above=0.)
@@ -2210,14 +2219,15 @@ class BufferFeeder:
         # Clean start: cancel any inherited continuous feed and drain
         # any in-flight move so residual motion doesn't join the retract.
         self._continuous_feed = False
-        self._wait_for_move_done(gcmd)
+        self._wait_for_move_done(gcmd, direction=-1)
         self._set_state(STATE_UNLOAD_PHASE_3)
         self._enable_stepper()
         retracted = 0.0
         overshoot = False
         while retracted < max_distance:
-            # Abort immediately on lockout.
-            self._raise_if_locked_out(gcmd)
+            # Abort immediately on HALT. OVERFLOW/JAM duerfen weiterlaufen
+            # (UNLOAD ist Recovery, direction=-1).
+            self._raise_if_locked_out(gcmd, direction=-1)
             if not self.entrance_detected:
                 self._respond("UNLOAD Phase 3: entrance clear after %.0f mm" % retracted)
                 break
@@ -2231,8 +2241,8 @@ class BufferFeeder:
             self._submit_move(-chunk, speed)
             retracted += chunk
             # Wait on move-only; state stays UNLOAD_PHASE_3 until we
-            # exit the loop. _wait_for_move_done raises on OVERFLOW/JAM.
-            self._wait_for_move_done(gcmd)
+            # exit the loop. UNLOAD ist Retract → OVERFLOW/JAM erlaubt.
+            self._wait_for_move_done(gcmd, direction=-1)
         else:
             overshoot = True
         self._disable_stepper()
@@ -2482,7 +2492,7 @@ class BufferFeeder:
         gc = self.printer.lookup_object('gcode')
         return gc.error(msg)
 
-    def _raise_if_locked_out(self, gcmd=None):
+    def _raise_if_locked_out(self, gcmd=None, direction=+1):
         """Abort a caller if the feeder is in a safety lockout.
 
         Called from blocking phase commands and from BUFFER_WAIT_IDLE so
@@ -2496,15 +2506,23 @@ class BufferFeeder:
         if self._halt_requested:
             self._halt_requested = False
             raise self._cmd_error("BufferFeeder: HALT requested — aborting workflow")
-        # Check hall_overflow directly, not just state, to catch the
-        # race where AUTO_OFF / STOP_BUFFER_FILL reset state to IDLE
-        # while HALL1 is still physically active (the next main_tick
-        # would transition back to OVERFLOW, but until then a
-        # freshly-arriving motion command could sneak a move in).
-        if self._state == STATE_OVERFLOW or self.hall_overflow:
-            raise self._cmd_error("BufferFeeder: HALL1 OVERFLOW active — aborting. Clear overflow, then retry.")
-        if self._state == STATE_JAM or self._jam_active:
-            raise self._cmd_error("BufferFeeder: JAM active — aborting. Use BUFFER_CLEAR_JAM after inspection.")
+        # Forward-Operationen (LOAD/feed) werden bei OVERFLOW/JAM
+        # geblockt. UNLOAD ist Retract — die einzige sinnvolle Recovery
+        # bei Overflow oder Jam. Daher direction=-1 fuer Retract-Pfade,
+        # die Lockout durchbrechen duerfen. HALT bleibt absolut.
+        if direction > 0:
+            # hall_overflow direkt pruefen, nicht nur state — catched
+            # die Race, wenn AUTO_OFF / STOP_BUFFER_FILL state schon nach
+            # IDLE gesetzt hat, der naechste main_tick aber erst noch
+            # OVERFLOW reasserten wird.
+            if self._state == STATE_OVERFLOW or self.hall_overflow:
+                raise self._cmd_error(
+                    "BufferFeeder: HALL1 OVERFLOW active — aborting. "
+                    "Clear overflow, then retry. (UNLOAD is allowed.)")
+            if self._state == STATE_JAM or self._jam_active:
+                raise self._cmd_error(
+                    "BufferFeeder: JAM active — aborting. "
+                    "Use BUFFER_CLEAR_JAM after inspection. (UNLOAD is allowed.)")
 
     # -----------------------------------------------------------------------
     # Status API
