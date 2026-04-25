@@ -150,6 +150,13 @@ class BufferFeeder:
         # am Eingang ist und kein Operator-Lockout aktiv. Auf False setzen,
         # um Bang-bang nur ueber explizites BUFFER_AUTO_ON zu starten.
         self.auto_engage_on_print_start = config.getboolean('auto_engage_on_print_start', True)
+        # AUTO direkt beim Klipper-Boot engagen wenn Filament am Eingang
+        # da ist und kein Overflow aktiv. Damit reagiert der Buffer auch
+        # auf manuelle Mainsail-Extrusionen ohne aktiven Print — sonst
+        # wuerde nach ~30 mm manueller Extrusion der Buffer leer laufen
+        # und das Filament im Hauptextruder grinden. Auf False setzen
+        # falls der Buffer beim Boot trotz Filament im IDLE bleiben soll.
+        self.auto_engage_on_boot = config.getboolean('auto_engage_on_boot', True)
         self.min_temp               = config.getfloat('min_temp', 180., minval=0.)
 
         # ----- Stepper + trapq -----
@@ -586,7 +593,19 @@ class BufferFeeder:
             force_display=True)
         # Drop into normal operation. If HALL1 is currently active,
         # main_tick will immediately transition to OVERFLOW.
-        self._set_state(STATE_IDLE)
+        # P7-15: optional direkt zu AUTO wenn Filament da ist — manuelle
+        # Mainsail-Extrusionen brauchen Bang-Bang um nicht nach ~30 mm
+        # leer zu laufen. Bei aktivem Overflow oder fehlender Filament-
+        # Praesenz fallen wir auf IDLE zurueck (uebliches Verhalten).
+        if (self.auto_engage_on_boot
+                and self.entrance_detected
+                and not self.hall_overflow):
+            self._enable_stepper()
+            self._set_state(STATE_AUTO)
+            self._respond("AUTO engaged on boot — filament at entrance, "
+                          "buffer follows extruder demand")
+        else:
+            self._set_state(STATE_IDLE)
 
     def _handle_shutdown(self):
         # Stop timers and halt motion.
