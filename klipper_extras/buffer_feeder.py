@@ -66,7 +66,6 @@ JAM_WATCH_STATES = {STATE_AUTO, STATE_LOAD_PHASE_3}
 # Main reactor tick interval (sensor polling, bang-bang decisions).
 MAIN_TICK_INTERVAL = 0.02            # 50 Hz
 JAM_TICK_INTERVAL  = 1.0             # 1 Hz
-IDLE_DETACH_GAP    = 10.0            # detach if attached + idle > 10s
 
 # Triple-click action kinds.
 CLICK_SINGLE = 1
@@ -171,16 +170,15 @@ class BufferFeeder:
         self._feed_distance_accumulator = 0.0  # for safety max_feed_distance
         self._feed_start_time = None       # reactor time when continuous feed started
         self._accumulated_feed_distance = 0.0  # lifetime counter
-        # Idle-Detach gegen "stepcompress o=0 i=0 c=12 a=0: Invalid
-        # sequence"-Crash. Hintergrund: nach >17s Idle (Klippers
-        # CLOCK_DIFF_MAX) trifft der periodische Background-Stepgen-
-        # Flush auf einen alten last_step_clock und stepcompress entartet
-        # in eine degenerierte queue_step → MCU shutdown.
-        # Loesung: nach Move-Drain in IDLE den Stepper via set_trapq(None)
-        # vom motion_queuing detachen (Background-Flush sieht uns dann
-        # nicht), vor naechstem Submit reattachen. Pattern aus
-        # klippy/kinematics/extruder.py ExtruderStepper.sync_to_extruder.
-        self._stepper_attached = True
+        # stepcompress for a stepper starts with last_step_clock=0 and stays
+        # there until the first step. On a printer that idles for long
+        # enough (>~17s — Klipper's CLOCK_DIFF_MAX), the first step's clock
+        # exceeds uint32_t and stepcompress emits an invalid queue_step
+        # ("stepcompress o=X i=... c=... a=...: Invalid sequence" → MCU
+        # shutdown). Prime the stepper once before the first real move by
+        # calling stepper.set_position — same pattern force_move.manual_move
+        # uses. Flag gates it so we do it exactly once.
+        self._stepcompress_primed = False
         # Monotonic clock tracker for motor_enable/disable scheduling.
         # queue_digital_out commands on the same pin MUST be scheduled
         # with strictly non-decreasing MCU clocks: a disable at clock A
@@ -1231,27 +1229,6 @@ class BufferFeeder:
             if self._pending_disable and not self._move_in_flight():
                 self._pending_disable = False
                 self._disable_stepper()
-                # Nach Move-Drain in IDLE vom motion_queuing detachen,
-                # damit der periodische Background-Stepgen-Flush waehrend
-                # langer Idle-Phasen (>17s) nicht in den CLOCK_DIFF_MAX-
-                # Overflow laeuft. Reattach passiert lazy beim naechsten
-                # _submit_single_trapezoid.
-                self._detach_from_motion_queuing()
-
-            # Periodischer Idle-Detach: faengt Faelle wo der Stepper
-            # enabled+attached aber quiescent bleibt — z.B. STATE_AUTO
-            # mit hall_full (bang-bang stoppt feeden, _halt_motion ohne
-            # disable). Ohne diesen Check wuerde >17s solche Quiescenz
-            # zum CLOCK_DIFF_MAX-Crash fuehren. _safe_to_flush()-Guard
-            # in _detach_from_motion_queuing schuetzt vor Mid-Print-
-            # Stall, daher hier kein zweiter Print-Check noetig.
-            if (self._stepper_attached
-                    and not self._move_in_flight()
-                    and self._pending_remaining_mm <= 0):
-                mcu = self.stepper.get_mcu()
-                mcu_now = mcu.estimated_print_time(eventtime)
-                if mcu_now - self._last_move_end_time > IDLE_DETACH_GAP:
-                    self._detach_from_motion_queuing()
 
             # Cooldown end: back to AUTO if entrance present AND the
             # operator hasn't explicitly disabled AUTO.
@@ -1567,10 +1544,6 @@ class BufferFeeder:
             self._pending_disable = True
         else:
             self._disable_stepper()
-            # Wie im deferred-Zweig (_main_tick) — Detach lazy, falls
-            # safe_to_flush. Mid-Print bleibt der Stepper attached, wird
-            # durch normale Toolhead-Stepgen-Activity wachgehalten.
-            self._detach_from_motion_queuing()
 
     def _enable_stepper(self):
         if self._stepper_enable is None:
@@ -1590,87 +1563,6 @@ class BufferFeeder:
             self._stepper_enable.motor_disable(pt)
         except Exception:
             logging.exception("buffer_feeder: disable_stepper failed")
-
-    def _safe_to_flush(self):
-        """True wenn toolhead.flush_step_generation() jetzt sicher ist.
-
-        Sicher sind: ausserhalb eines aktiven Drucks (_print_running=False)
-        oder waehrend einer Pause (_bang_bang_suspended=True — gesetzt
-        durch idle_timeout:ready, also PAUSE/M600). Im aktiven Druck-
-        Hotpath wuerde der globale flush die Toolhead-Lookahead-Queue
-        leeren -> kurzer Print-Stall.
-        """
-        return (not self._print_running) or self._bang_bang_suspended
-
-    def _detach_from_motion_queuing(self):
-        """Detach feeder stepper from motion_queuing for idle hold.
-
-        Drains pending steps via toolhead.flush_step_generation, clears
-        the trapq binding so the background step-gen pass no longer
-        touches our stepper, and recalcs scan windows — same sequence
-        klippy/kinematics/extruder.py:ExtruderStepper.sync_to_extruder
-        uses on unsync.
-
-        Called only after Move-Drain into IDLE — never during active
-        AUTO/print, so the one-shot toolhead-flush cost stays out of
-        the print hotpath.
-        """
-        if not self._stepper_attached:
-            return
-        if not self._safe_to_flush():
-            return
-        try:
-            toolhead = self.printer.lookup_object('toolhead')
-            toolhead.flush_step_generation()
-            self.stepper.set_trapq(None)
-            self.motion_queuing.check_step_generation_scan_windows()
-            self._stepper_attached = False
-            logging.info("buffer_feeder: detached from motion_queuing "
-                         "(idle hold)")
-        except Exception:
-            logging.exception("buffer_feeder: detach failed")
-
-    def _reattach_to_motion_queuing(self):
-        """Re-bind feeder stepper to its trapq before next move.
-
-        Ruft toolhead.flush_step_generation() VOR set_trapq — mainline-
-        parity mit klippy/kinematics/extruder.py:ExtruderStepper
-        .sync_to_extruder. Ohne diesen Flush bleibt stepcompress
-        sc->last_step_clock seit Boot oder letztem Detach veraltet,
-        und der naechste _advance_flush_time emittiert eine degenerate
-        queue_step (interval=0 count=N add=0) → MCU shutdown via
-        stepcompress.c:check_line "Invalid sequence".
-
-        KEIN _safe_to_flush()-Guard hier — wenn detach in safer Phase
-        passierte und Reattach jetzt mid-print noetig ist (z.B. RESUME
-        nach M600), waere der einzige Alternative der Stepper auf
-        trapq=None zu lassen, was Submits nicht mehr konsumiert →
-        Feeder-Logik driftet. Kurzer Stall ist die akzeptable Wahl
-        gegen Crash-Risiko, mainline akzeptiert ihn bei Trapq-
-        Topologie-Wechseln genauso.
-        """
-        if self._stepper_attached:
-            return
-        try:
-            toolhead = self.printer.lookup_object('toolhead')
-            toolhead.flush_step_generation()
-            # set_position vor set_trapq — kompletter sync_to_extruder
-            # Pattern (extruder.py:968-991). flush_step_generation allein
-            # advance den last_step_clock NICHT fuer den detachten Stepper,
-            # weil set_trapq=None heisst er ist nicht im Step-Gen-Pfad.
-            # set_position triggert intern stepcompress_set_last_position
-            # (stepper.py:1563-1600), das den Stepcompress-Cursor auf einen
-            # gueltigen Wert rebased. Ohne diesen Schritt waere der naechste
-            # trapq_append eine degenerate queue_step (i=0 a=0 c>1) →
-            # stepcompress.c:1880-1884 "Invalid sequence" Crash.
-            self.stepper.set_position((0., 0., 0.))
-            self._commanded_pos = 0.0
-            self.stepper.set_trapq(self.trapq)
-            self.motion_queuing.check_step_generation_scan_windows()
-            self._stepper_attached = True
-            logging.info("buffer_feeder: reattached to motion_queuing")
-        except Exception:
-            logging.exception("buffer_feeder: reattach failed")
 
     def _submit_move(self, signed_distance, speed):
         """Submit a move. Chunks long moves asynchronously.
@@ -1725,13 +1617,40 @@ class BufferFeeder:
 
     def _submit_single_trapezoid(self, signed_distance, speed):
         """Append one trapezoid to our trapq. Low-level primitive."""
-        # Lazy reattach falls wir im Idle vom motion_queuing detached
-        # waren. Idle-Detach loest den "stepcompress o=0 i=0 c=12 a=0:
-        # Invalid sequence"-Crash (>17s Idle nach UNLOAD/Manual-Move):
-        # waehrend Idle-Hold ist die Stepper-Trapq-Bindung gekappt, der
-        # periodische Background-Stepgen-Flush sieht uns nicht, und
-        # last_step_clock waechst nicht aus dem uint32_t-Fenster heraus.
-        self._reattach_to_motion_queuing()
+        # Prime/re-prime stepcompress nach Idle-Pause die laenger ist als
+        # CLOCK_DIFF_MAX (Klipper: 3<<28 ticks = ~16.7s @ 48MHz). Dahinter
+        # laeuft compress_bisect_add in degenerierte Sequenzen ein
+        # ("stepcompress o=X i=0 c=N a=0: Invalid sequence" → MCU shutdown).
+        #
+        # Loesung: toolhead.flush_step_generation() drainiert alle pending
+        # Toolhead-Bewegungen und syncted last_step_gen_time fuer ALLE
+        # Syncemitter (inkl. unserem Buffer-Feeder-Stepper). set_position
+        # danach setzt _commanded_pos und itersolve's commanded_pos auf 0,
+        # damit der naechste trapq_append einen sauberen start_pos_x hat.
+        #
+        # KEIN _print_running-Guard: der Re-Prime muss IMMER laufen, auch
+        # mid-print. Drei Iterationen Detach/Reattach (P7-2 bis P7-5)
+        # haben versucht das mid-print elegant zu vermeiden, aber alle
+        # crashten an genau dem Pfad wo _print_running=True war (UNLOAD
+        # mid-print, Bang-bang nach Heater-Warmup). Mid-print-Stall durch
+        # flush_step_generation ist ein paar Millisekunden, bei UNLOAD/
+        # erstem Buffer-Move kaum spuerbar — Crash-Vermeidung wiegt schwerer.
+        REPRIME_GAP = 5.0
+        mcu = self.stepper.get_mcu()
+        mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
+        gap = mcu_now - self._last_move_end_time
+        need_reprime = (not self._stepcompress_primed) or (gap > REPRIME_GAP)
+        if need_reprime:
+            try:
+                toolhead = self.printer.lookup_object('toolhead')
+                toolhead.flush_step_generation()
+                logging.info("buffer_feeder: stepcompress re-primed via "
+                             "flush_step_generation (gap=%.1fs)", gap)
+            except Exception:
+                logging.exception("buffer_feeder: flush_step_generation failed")
+            self.stepper.set_position((0., 0., 0.))
+            self._commanded_pos = 0.0
+            self._stepcompress_primed = True
 
         self._enable_stepper()
 
@@ -1747,8 +1666,8 @@ class BufferFeeder:
         #   step-gen cursor. Without this, estimated_print_time drifts
         #   during long idle and the first step lands at a clock the MCU
         #   has no baseline for → "Invalid sequence" shutdown.
-        mcu = self.stepper.get_mcu()
-        mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
+        # mcu/mcu_now sind oben fuer den Re-Prime-Gap-Check schon
+        # berechnet — wiederverwenden statt neu fetchen.
         if self._last_move_end_time > mcu_now + self.lead_time:
             # Streaming: previous chunk is still in the future — abut.
             t0 = self._last_move_end_time
