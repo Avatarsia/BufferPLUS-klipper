@@ -48,9 +48,11 @@ USER_STATES = {STATE_IDLE, STATE_AUTO, STATE_MANUAL_FEED,
 
 # States where LOAD/UNLOAD is active — override commands
 # (BUFFER_FEED/RETRACT/AUTO_ON/FORCE_BUFFER_FILL) must refuse.
+# UNLOAD_PHASE_1/_2 wurden mit P7-20 obsolet (sync-mode Macro nutzt
+# nur noch UNLOAD_PHASE_3 fuer den Buffer-allein-Retract).
 BUSY_PHASE_STATES = {STATE_INITIAL_GRIP,
                      STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2, STATE_LOAD_PHASE_3,
-                     STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2, STATE_UNLOAD_PHASE_3}
+                     STATE_UNLOAD_PHASE_3}
 
 # States where the main_tick continuous-feed chunk-pump is allowed
 # to run. In any other state, a stale _continuous_feed must NOT
@@ -58,12 +60,7 @@ BUSY_PHASE_STATES = {STATE_INITIAL_GRIP,
 # bang-bang or manual dauerfeed leaks into subsequent phases.
 CONTINUOUS_FEED_STATES = {STATE_AUTO, STATE_MANUAL_FEED,
                           STATE_MANUAL_RETRACT, STATE_LOAD_PHASE_3,
-                          STATE_INITIAL_GRIP,
-                          # P7-16: Bang-Bang reagiert waehrend UNLOAD-
-                          # Tip-Forming auf Sensor-Trigger. Tip-Forming
-                          # bewegt typisch >30 mm Filament hin/her, der
-                          # Buffer wuerde sonst leer laufen / overfillen.
-                          STATE_UNLOAD_PHASE_1}
+                          STATE_INITIAL_GRIP}
 
 # States where jam-detection watches for HALL dwell anomalies.
 JAM_WATCH_STATES = {STATE_AUTO, STATE_LOAD_PHASE_3}
@@ -472,12 +469,6 @@ class BufferFeeder:
         gcode.register_command('BUFFER_LOAD_PHASE3',
                                self.cmd_BUFFER_LOAD_PHASE3,
                                desc=self.cmd_BUFFER_LOAD_PHASE3_help)
-        gcode.register_command('BUFFER_UNLOAD_PHASE1',
-                               self.cmd_BUFFER_UNLOAD_PHASE1,
-                               desc=self.cmd_BUFFER_UNLOAD_PHASE1_help)
-        gcode.register_command('BUFFER_UNLOAD_PHASE2',
-                               self.cmd_BUFFER_UNLOAD_PHASE2,
-                               desc=self.cmd_BUFFER_UNLOAD_PHASE2_help)
         gcode.register_command('BUFFER_UNLOAD_PHASE3',
                                self.cmd_BUFFER_UNLOAD_PHASE3,
                                desc=self.cmd_BUFFER_UNLOAD_PHASE3_help)
@@ -845,9 +836,7 @@ class BufferFeeder:
                 if (self._state == STATE_LOAD_PHASE_3
                         and self._load_phase3_overflow_ok):
                     pass
-                elif self._state in (STATE_UNLOAD_PHASE_1,
-                                     STATE_UNLOAD_PHASE_2,
-                                     STATE_UNLOAD_PHASE_3,
+                elif self._state in (STATE_UNLOAD_PHASE_3,
                                      STATE_MANUAL_RETRACT):
                     pass
                 elif self._stepper_synced_to is not None:
@@ -1035,7 +1024,6 @@ class BufferFeeder:
         self._entrance_was_empty = True
         # Planned filament exit: suppress during LOAD/UNLOAD/MANUAL.
         if self._state in (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2, STATE_LOAD_PHASE_3,
-                           STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2,
                            STATE_UNLOAD_PHASE_3, STATE_MANUAL_FEED,
                            STATE_MANUAL_RETRACT):
             return
@@ -1125,7 +1113,6 @@ class BufferFeeder:
         # where AUTO_OFF/STOP_BUFFER_FILL reset state to IDLE before
         # the next main_tick re-asserts OVERFLOW.
         block_states = (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2, STATE_LOAD_PHASE_3,
-                        STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2,
                         STATE_UNLOAD_PHASE_3, STATE_OVERFLOW, STATE_JAM,
                         STATE_INITIAL_GRIP)
         if self._state in block_states and not retract_overflow_override:
@@ -1135,9 +1122,7 @@ class BufferFeeder:
             elif self._state == STATE_OVERFLOW:
                 hint = " — clear HALL1 (lockout releases automatically); retract button is allowed"
             elif self._state in (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2,
-                                 STATE_LOAD_PHASE_3,
-                                 STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2,
-                                 STATE_UNLOAD_PHASE_3):
+                                 STATE_LOAD_PHASE_3, STATE_UNLOAD_PHASE_3):
                 hint = " — wait for LOAD/UNLOAD to finish, or BUFFER_HALT"
             elif self._state == STATE_INITIAL_GRIP:
                 hint = " — wait for grip to finish, or STOP_BUFFER_FILL"
@@ -1318,7 +1303,6 @@ class BufferFeeder:
             if (self.hall_overflow
                     and self._state not in (
                         STATE_OVERFLOW, STATE_MANUAL_RETRACT,
-                        STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2,
                         STATE_UNLOAD_PHASE_3)
                     and not phase3_overflow_ok
                     and not sync_active):
@@ -1432,11 +1416,11 @@ class BufferFeeder:
                             " (%.0f/%.0f °C)" % (
                                 self._hotend_temp(), self.min_temp))
 
-            # Bang-bang in AUTO und UNLOAD_PHASE_1 (P7-16: waehrend
-            # Tip-Forming muss der Buffer auf HALL3/HALL2-Trigger
-            # reagieren, sonst grindet der Hauptextruder im leeren
-            # Buffer-Eingang nach ~30 mm Filament-Bewegung).
-            if self._state in (STATE_AUTO, STATE_UNLOAD_PHASE_1):
+            # Bang-bang nur in AUTO. (P7-16 erweiterte das auf
+            # UNLOAD_PHASE_1, aber P7-20 hat den Tip-Forming-Pfad
+            # auf SYNC_TO_EXTRUDER umgestellt — UNLOAD_PHASE_1 wird
+            # nicht mehr betreten.)
+            if self._state == STATE_AUTO:
                 self._bang_bang_tick(eventtime)
 
             # RUNOUT follow (runout_pause=0 mode): bang-bang keeps
@@ -1462,13 +1446,13 @@ class BufferFeeder:
 
             # Auto-return to IDLE after non-blocking phase moves end.
             # LOAD_PHASE_1 is synchronous and transitions itself.
-            # LOAD/UNLOAD_PHASE_2 are non-blocking: the macro calls
+            # LOAD_PHASE_2 is non-blocking: the macro calls
             # BUFFER_WAIT_IDLE and main_tick finalizes the state here.
             # Must wait for BOTH in-flight trapezoid AND pending-stream
-            # to drain — with 180mm Phase 2 / 50mm chunks, the default
-            # case streams 3-4 chunks; finalizing after the first one
-            # releases the state mid-move.
-            if (self._state in (STATE_LOAD_PHASE_2, STATE_UNLOAD_PHASE_2)
+            # to drain. (UNLOAD_PHASE_2 wurde mit P7-20 obsolet — der
+            # neue sync-mode behandelt die parallele Retract-Phase im
+            # Macro selbst per G1 E waehrend SYNC_TO_EXTRUDER.)
+            if (self._state == STATE_LOAD_PHASE_2
                     and not self._move_in_flight()
                     and self._pending_remaining_mm <= 0):
                 self._set_state(STATE_IDLE)
@@ -2311,10 +2295,11 @@ class BufferFeeder:
     def _check_phase_entry(self, cmd_name, allowed_states):
         """Reject a phase command if the current state isn't in the
         allow-list. Callers pass exactly the states from which a legit
-        progression (or idempotent re-entry) is permitted — this lets
-        e.g. UNLOAD_PHASE_2 accept UNLOAD_PHASE_1 (the tip-forming
-        hand-off keeps state=UNLOAD_PHASE_1) while still rejecting
-        cross-flow stomps like LOAD_PHASE_2 from UNLOAD_PHASE_1.
+        progression (or idempotent re-entry) is permitted — e.g. each
+        phase command accepts its own STATE_* for retry idempotence,
+        plus IDLE/AUTO/RUNOUT for the normal entry path. UNLOAD-phase
+        commands also accept OVERFLOW/JAM because UNLOAD is the
+        recovery operation for those lockouts.
         """
         if self._state in allowed_states:
             return
@@ -2458,71 +2443,18 @@ class BufferFeeder:
         if not overflow_ok:
             self._raise_if_locked_out(gcmd)
 
-    cmd_BUFFER_UNLOAD_PHASE1_help = ("UNLOAD Phase 1 — halt feeder and lock state for tip-forming "
-                                     "(so buttons / FORCE_BUFFER_FILL don't interfere)")
-    def cmd_BUFFER_UNLOAD_PHASE1(self, gcmd):
-        self._halt_requested = False
-        # UNLOAD ist Retract → darf bei OVERFLOW/JAM laufen (Recovery).
-        self._raise_if_locked_out(gcmd, direction=-1)
-        # Allow-Liste enthaelt OVERFLOW + JAM, damit UNLOAD den Lockout
-        # aufloesen kann. Self-Entry idempotent fuer Retry-Sicherheit.
-        self._check_phase_entry('UNLOAD_PHASE1', {
-            STATE_IDLE, STATE_AUTO, STATE_RUNOUT, STATE_UNLOAD_PHASE_1,
-            STATE_OVERFLOW, STATE_JAM,
-        })
-        # Tip-Forming runs on the extruder alone. State STATE_UNLOAD_PHASE_1
-        # blocks manual buttons and FORCE_BUFFER_FILL waehrend des
-        # Tip-Formings — aber Bang-Bang darf reagieren (P7-16: state
-        # ist in CONTINUOUS_FEED_STATES und _bang_bang_tick wird in
-        # _main_tick auch fuer UNLOAD_PHASE_1 aufgerufen). Damit der
-        # Buffer auf den Filament-Strom des Hauptextruders reagieren
-        # kann (~30+ mm pro Tip-Forming-Cycle), ohne dass der Buffer
-        # leer laeuft oder overflowed.
-        self._continuous_feed = False
-        self._halt_motion()
-        # Pending moves DRAINEN bevor state wechselt — wenn wir VORHER
-        # in AUTO/MANUAL waren, koennten chunks noch in flight sein.
-        # Nach state-change waere das wait_for_move_done von Bang-Bang-
-        # Submits blockiert, daher Drain VOR set_state.
-        try:
-            self._wait_for_move_done(gcmd, direction=-1)
-        except Exception:
-            raise
-        self._set_state(STATE_UNLOAD_PHASE_1)
-        # KEIN _disable_stepper hier mehr (P7-16): Bang-Bang waehrend
-        # Tip-Forming braucht den Stepper aktiv. _enable_stepper wird
-        # automatisch in _submit_move (von Bang-Bang) gerufen falls noch
-        # nicht aktiv. Bei Phase 2 wird ohnehin neu enabled.
-        self._respond("UNLOAD Phase 1: state set, bang-bang follows feed")
-
-    cmd_BUFFER_UNLOAD_PHASE2_help = "UNLOAD Phase 2 — feeder retract parallel to extruder"
-    def cmd_BUFFER_UNLOAD_PHASE2(self, gcmd):
-        self._halt_requested = False
-        self._raise_if_locked_out(gcmd, direction=-1)
-        # UNLOAD_PHASE_1 ist der legitimate Vorgaenger (Tip-Forming
-        # haelt den State, um Button-Input zu blocken). Self-Entry
-        # idempotent. OVERFLOW/JAM erlaubt fuer Retract-Recovery.
-        self._check_phase_entry('UNLOAD_PHASE2', {
-            STATE_IDLE, STATE_AUTO, STATE_RUNOUT,
-            STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2,
-            STATE_OVERFLOW, STATE_JAM,
-        })
-        distance = gcmd.get_float('DISTANCE', self.unload_sync_distance, above=0.)
-        speed    = gcmd.get_float('SPEED',    self.unload_fast_speed,    above=0.)
-        self._continuous_feed = False
-        self._wait_for_move_done(gcmd, direction=-1)
-        self._set_state(STATE_UNLOAD_PHASE_2)
-        self._enable_stepper()
-        self._submit_move(-distance, speed)
+    # P7-23: cmd_BUFFER_UNLOAD_PHASE1 und cmd_BUFFER_UNLOAD_PHASE2 entfernt.
+    # P7-20 hat das UNLOAD_FILAMENT-Macro auf SYNC_TO_EXTRUDER umgestellt —
+    # Tip-Forming und parallele sync-distance laufen jetzt im Macro selbst
+    # via G1 E waehrend BUFFER_SYNC_TO_EXTRUDER aktiv ist.
 
     cmd_BUFFER_UNLOAD_PHASE3_help = "UNLOAD Phase 3 — chunked retract until entrance free"
     def cmd_BUFFER_UNLOAD_PHASE3(self, gcmd):
         self._halt_requested = False
         self._raise_if_locked_out(gcmd, direction=-1)
-        # OVERFLOW/JAM erlaubt fuer Retract-Recovery (siehe PHASE1/2).
+        # OVERFLOW/JAM erlaubt fuer Retract-Recovery.
         self._check_phase_entry('UNLOAD_PHASE3', {
-            STATE_IDLE, STATE_AUTO, STATE_RUNOUT,
-            STATE_UNLOAD_PHASE_2, STATE_UNLOAD_PHASE_3,
+            STATE_IDLE, STATE_AUTO, STATE_RUNOUT, STATE_UNLOAD_PHASE_3,
             STATE_OVERFLOW, STATE_JAM,
         })
         max_distance = gcmd.get_float('MAX_DISTANCE', self.unload_fast_max, above=0.)
