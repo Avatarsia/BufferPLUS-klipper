@@ -951,10 +951,23 @@ class BufferFeeder:
                            STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2,
                            STATE_UNLOAD_PHASE_3, STATE_OVERFLOW, STATE_JAM,
                            STATE_INITIAL_GRIP):
-            self._respond("Button ignored — state=%s" % self._state)
+            hint = ""
+            if self._state == STATE_JAM:
+                hint = " — fix the cause, then BUFFER_CLEAR_JAM"
+            elif self._state == STATE_OVERFLOW:
+                hint = " — clear HALL1 (lockout releases automatically)"
+            elif self._state in (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2,
+                                 STATE_LOAD_PHASE_3,
+                                 STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2,
+                                 STATE_UNLOAD_PHASE_3):
+                hint = " — wait for LOAD/UNLOAD to finish, or BUFFER_HALT"
+            elif self._state == STATE_INITIAL_GRIP:
+                hint = " — wait for grip to finish, or STOP_BUFFER_FILL"
+            self._respond("Button ignored — state=%s%s" % (self._state, hint))
             return
         if self.hall_overflow:
-            self._respond("Button ignored — HALL1 overflow physically active")
+            self._respond("Button ignored — HALL1 overflow physically active "
+                          "(remove filament from buffer until HALL1 clears)")
             return
 
         # MEASURE_LOAD toggle-mode overrides normal click logic on feed button.
@@ -1950,14 +1963,29 @@ class BufferFeeder:
             self.reactor.pause(self.reactor.monotonic() + 0.05)
         self._raise_if_locked_out(gcmd)
 
+    def _check_phase_entry(self, cmd_name, allowed_states):
+        """Reject a phase command if the current state isn't in the
+        allow-list. Callers pass exactly the states from which a legit
+        progression (or idempotent re-entry) is permitted — this lets
+        e.g. UNLOAD_PHASE_2 accept UNLOAD_PHASE_1 (the tip-forming
+        hand-off keeps state=UNLOAD_PHASE_1) while still rejecting
+        cross-flow stomps like LOAD_PHASE_2 from UNLOAD_PHASE_1.
+        """
+        if self._state in allowed_states:
+            return
+        raise self._cmd_error(
+            "%s rejected — wrong state (state=%s, expected one of %s). "
+            "Use BUFFER_HALT or BUFFER_CLEAR_JAM/BUFFER_AUTO_OFF to clear, "
+            "or BUFFER_STATE_DUMP to inspect."
+            % (cmd_name, self._state, sorted(allowed_states)))
+
     cmd_BUFFER_LOAD_PHASE1_help = "LOAD Phase 1 — feeder alone fast to toolhead. DISTANCE=mm"
     def cmd_BUFFER_LOAD_PHASE1(self, gcmd):
         self._halt_requested = False    # ack any stale console HALT
         self._raise_if_locked_out(gcmd)
-        if self._state in BUSY_PHASE_STATES:
-            raise self._cmd_error(
-                "LOAD_PHASE1 rejected — another phase already active (state=%s)"
-                % self._state)
+        self._check_phase_entry('LOAD_PHASE1', {
+            STATE_IDLE, STATE_AUTO, STATE_RUNOUT, STATE_LOAD_PHASE_1,
+        })
         distance = gcmd.get_float('DISTANCE', self.load_fast_distance, above=0.)
         speed    = gcmd.get_float('SPEED',    self.load_fast_speed,    above=0.)
         # Stop any inherited bang-bang / manual dauerfeed and drain
@@ -1983,10 +2011,9 @@ class BufferFeeder:
     def cmd_BUFFER_LOAD_PHASE2(self, gcmd):
         self._halt_requested = False
         self._raise_if_locked_out(gcmd)
-        if self._state in BUSY_PHASE_STATES:
-            raise self._cmd_error(
-                "LOAD_PHASE2 rejected — another phase already active (state=%s)"
-                % self._state)
+        self._check_phase_entry('LOAD_PHASE2', {
+            STATE_IDLE, STATE_AUTO, STATE_RUNOUT, STATE_LOAD_PHASE_2,
+        })
         distance = gcmd.get_float('DISTANCE', self.load_slow_distance, above=0.)
         speed    = gcmd.get_float('SPEED',    self.load_slow_speed,    above=0.)
         self._continuous_feed = False
@@ -1999,10 +2026,9 @@ class BufferFeeder:
     def cmd_BUFFER_LOAD_PHASE3(self, gcmd):
         self._halt_requested = False
         self._raise_if_locked_out(gcmd)
-        if self._state in BUSY_PHASE_STATES:
-            raise self._cmd_error(
-                "LOAD_PHASE3 rejected — another phase already active (state=%s)"
-                % self._state)
+        self._check_phase_entry('LOAD_PHASE3', {
+            STATE_IDLE, STATE_AUTO, STATE_RUNOUT, STATE_LOAD_PHASE_3,
+        })
         max_distance = gcmd.get_float('MAX_DISTANCE', self.load_buffer_max, above=0.)
         speed        = gcmd.get_float('SPEED',        self.feed_speed,      above=0.)
         # Clean start: stop any inherited continuous feed and wait for
@@ -2027,10 +2053,11 @@ class BufferFeeder:
     def cmd_BUFFER_UNLOAD_PHASE1(self, gcmd):
         self._halt_requested = False
         self._raise_if_locked_out(gcmd)
-        if self._state in BUSY_PHASE_STATES:
-            raise self._cmd_error(
-                "UNLOAD_PHASE1 rejected — another phase already active (state=%s)"
-                % self._state)
+        # Idempotent re-entry from UNLOAD_PHASE_1 is allowed so a retry
+        # of a partially-completed UNLOAD doesn't get stuck.
+        self._check_phase_entry('UNLOAD_PHASE1', {
+            STATE_IDLE, STATE_AUTO, STATE_RUNOUT, STATE_UNLOAD_PHASE_1,
+        })
         # Tip-Forming runs on the extruder alone. Feeder must stand
         # still, and the state must NOT be IDLE — otherwise manual
         # buttons and FORCE_BUFFER_FILL would accept input and stomp
@@ -2057,10 +2084,13 @@ class BufferFeeder:
     def cmd_BUFFER_UNLOAD_PHASE2(self, gcmd):
         self._halt_requested = False
         self._raise_if_locked_out(gcmd)
-        if self._state in BUSY_PHASE_STATES:
-            raise self._cmd_error(
-                "UNLOAD_PHASE2 rejected — another phase already active (state=%s)"
-                % self._state)
+        # UNLOAD_PHASE_1 is the legitimate predecessor (tip-forming
+        # keeps the state to block button input). Self-entry stays
+        # idempotent for retry safety.
+        self._check_phase_entry('UNLOAD_PHASE2', {
+            STATE_IDLE, STATE_AUTO, STATE_RUNOUT,
+            STATE_UNLOAD_PHASE_1, STATE_UNLOAD_PHASE_2,
+        })
         distance = gcmd.get_float('DISTANCE', self.unload_sync_distance, above=0.)
         speed    = gcmd.get_float('SPEED',    self.unload_fast_speed,    above=0.)
         self._continuous_feed = False
@@ -2073,10 +2103,10 @@ class BufferFeeder:
     def cmd_BUFFER_UNLOAD_PHASE3(self, gcmd):
         self._halt_requested = False
         self._raise_if_locked_out(gcmd)
-        if self._state in BUSY_PHASE_STATES:
-            raise self._cmd_error(
-                "UNLOAD_PHASE3 rejected — another phase already active (state=%s)"
-                % self._state)
+        self._check_phase_entry('UNLOAD_PHASE3', {
+            STATE_IDLE, STATE_AUTO, STATE_RUNOUT,
+            STATE_UNLOAD_PHASE_2, STATE_UNLOAD_PHASE_3,
+        })
         max_distance = gcmd.get_float('MAX_DISTANCE', self.unload_fast_max, above=0.)
         speed        = gcmd.get_float('SPEED',        self.unload_fast_speed, above=0.)
         nominal_chunk = 50.0
