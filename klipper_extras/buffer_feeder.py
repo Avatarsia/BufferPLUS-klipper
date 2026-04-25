@@ -596,7 +596,7 @@ class BufferFeeder:
             % (self.hall_empty, self.hall_full,
                self.hall_overflow, self.entrance_detected),
             force_display=True)
-        # P7-18: Anchor-Step beim Boot — etabliert stepcompress
+        # P7-18/19: Anchor-Step beim Boot — etabliert stepcompress
         # last_step_clock auf einen echten Wert. Hintergrund: ohne
         # ersten Step seit Klipper-Boot bleibt last_step_clock=0
         # (allocator init-state). Spaeter, wenn der erste echte Move
@@ -606,14 +606,17 @@ class BufferFeeder:
         # im flush_handler. Solange wir den ersten Step beim Boot
         # machen (MCU-Clock noch klein, last_step_clock=0 → gap klein),
         # laeuft der Move ohne Crash und last_step_clock ist etabliert.
-        # 0.05mm Retract: kollidiert nicht mit HALL1-Forward-Reject,
-        # ist physisch unsichtbar (~250 Steps), Buffer verliert
-        # 0.05mm — bei einem 600mm-Buffer irrelevant.
+        # 0.05mm = ~250 Steps, physisch kaum spuerbar. Forward (Filament-
+        # Foerderrichtung) bei normalem Boot — entspricht der User-
+        # Erwartung "Buffer fettet kurz an". Bei HALL1-Boot retract,
+        # weil _submit_move forward-rejects bei aktivem hall_overflow.
         try:
             self._enable_stepper()
-            self._submit_move(-0.05, 10.0)
-            self._wait_for_move_done(direction=-1)
-            self._respond("Stepcompress anchor primed (boot retract 0.05mm)")
+            anchor_dir = -1.0 if self.hall_overflow else 1.0
+            self._submit_move(anchor_dir * 0.05, 10.0)
+            self._wait_for_move_done(direction=int(anchor_dir))
+            self._respond("Stepcompress anchor primed (boot %s 0.05mm)"
+                          % ("retract" if anchor_dir < 0 else "feed"))
         except Exception:
             logging.exception("buffer_feeder: boot anchor failed")
         # Drop into normal operation. If HALL1 is currently active,
