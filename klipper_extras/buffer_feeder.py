@@ -110,28 +110,6 @@ class BufferFeeder:
     #
     # Bis zur vollstaendigen Migration ist use_fault_overlay=1 ein No-Op.
     # ----------------------------------------------------------------------
-    # Aktuell sind OVERFLOW, RUNOUT und JAM exklusive _state-Werte. Das ist
-    # eine flache State-Maschine mit Fault-States. Industriestandard fuer
-    # Fault-Handling ist HSM mit Fault-Overlay-Flags: der "normale" State
-    # bleibt erhalten (FILLING/FEEDING/IDLE), Faults sind orthogonale
-    # Overlay-Flags (_fault_overflow, _fault_runout, _fault_jam) plus
-    # Guard-Bedingungen.
-    #
-    # Vorteil: ein Resume-Pfad statt drei separate Mechanismen.
-    #
-    # Migration ist mehrere Tage Arbeit pro State und braucht parallele
-    # Test-Coverage (Phase 0 erweitert). Daher schrittweise:
-    #
-    #   P7-30 (this commit): Flag use_fault_overlay + Overlay-Felder
-    #                        eingefuehrt, aber Logik noch unmigriert.
-    #   P7-31: cmd_BUFFER_LOAD_PHASE3 OVERFLOW-Behandlung migrieren
-    #   P7-32: _enter_overflow / _exit_overflow auf Overlay umstellen
-    #   P7-33: _trigger_jam / BUFFER_CLEAR_JAM auf Overlay umstellen
-    #   P7-34: RUNOUT-Pfade migrieren
-    #   P7-35: LOAD_PHASE_1/2/3 zu LOAD-Substate kollabieren
-    #
-    # Bis zur vollstaendigen Migration ist use_fault_overlay=1 ein No-Op.
-    # ----------------------------------------------------------------------
     # TODO(P7-29): Extract HallSensorMonitor / SyncCoordinator /
     # FaultManager once there is broader coverage for the current
     # overflow/runout/jam cross-links. With only smoke coverage,
@@ -2651,10 +2629,9 @@ class BufferFeeder:
         # Sonst raised der naechste LOAD_FILAMENT mit "JAM active" weil
         # _jam_active=True von einem frueheren LOAD_TIMEOUT haengt.
         # _set_state(STATE_IDLE) oben cleart nur _state, nicht die
-        # Begleit-Flags.
-        self._jam_active = False
-        self._hall2_start_time = None
-        self._hall3_start_time = None
+        # Begleit-Flags. (P7-31 review: nutzt jetzt _clear_recovery_flags
+        # konsistent mit den anderen vier Recovery-Pfaden.)
+        self._clear_recovery_flags()
 
     cmd_BUFFER_SYNC_TO_EXTRUDER_help = ("Sync buffer-feeder stepper to the named "
                                          "extruder's trapq for parallel motion. "
@@ -2694,7 +2671,7 @@ class BufferFeeder:
         """Idempotent unsync helper. Cleanup-Pfade (BUFFER_HALT,
         BUFFER_AUTO_OFF, STOP_BUFFER_FILL) rufen das auf damit ein
         zwischen SYNC_TO_EXTRUDER und UNSYNC abgebrochenes Macro nicht
-        den Stepper am Extruder-Trapq zurueckl??sst (P7-24).
+        den Stepper am Extruder-Trapq zurueck laesst (P7-24).
         """
         if self._stepper_synced_to is None:
             return False

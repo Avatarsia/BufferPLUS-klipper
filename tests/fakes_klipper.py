@@ -242,4 +242,18 @@ class FakeConfig:
         return int(self.values.get(key, default))
 
     def getboolean(self, key, default=None, **kwargs):
-        return bool(self.values.get(key, default))
+        # Klipper-konform: "0"/"false"/"no" → False, "1"/"true"/"yes" → True.
+        # Naive bool("0") wuerde True liefern (truthy) — review-finding fix.
+        v = self.values.get(key, default)
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return bool(v)
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ('0', 'false', 'no', 'off', ''):
+                return False
+            if s in ('1', 'true', 'yes', 'on'):
+                return True
+            raise ValueError("FakeConfig.getboolean: invalid '%s'" % v)
+        return bool(v)
