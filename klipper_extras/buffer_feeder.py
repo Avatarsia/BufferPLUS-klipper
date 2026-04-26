@@ -85,6 +85,31 @@ BUTTON_RETRACT = "retract"
 # ---------------------------------------------------------------------------
 
 class BufferFeeder:
+    # ----------------------------------------------------------------------
+    # TODO(P7-30+): Fault-Overlay Migration (siehe Issue #15 Phase 4)
+    # ----------------------------------------------------------------------
+    # Aktuell sind OVERFLOW, RUNOUT und JAM exklusive _state-Werte. Das ist
+    # eine flache State-Maschine mit Fault-States. Industriestandard fuer
+    # Fault-Handling ist HSM mit Fault-Overlay-Flags: der "normale" State
+    # bleibt erhalten (FILLING/FEEDING/IDLE), Faults sind orthogonale
+    # Overlay-Flags (_fault_overflow, _fault_runout, _fault_jam) plus
+    # Guard-Bedingungen.
+    #
+    # Vorteil: ein Resume-Pfad statt drei separate Mechanismen.
+    #
+    # Migration ist mehrere Tage Arbeit pro State und braucht parallele
+    # Test-Coverage (Phase 0 erweitert). Daher schrittweise:
+    #
+    #   P7-30 (this commit): Flag use_fault_overlay + Overlay-Felder
+    #                        eingefuehrt, aber Logik noch unmigriert.
+    #   P7-31: cmd_BUFFER_LOAD_PHASE3 OVERFLOW-Behandlung migrieren
+    #   P7-32: _enter_overflow / _exit_overflow auf Overlay umstellen
+    #   P7-33: _trigger_jam / BUFFER_CLEAR_JAM auf Overlay umstellen
+    #   P7-34: RUNOUT-Pfade migrieren
+    #   P7-35: LOAD_PHASE_1/2/3 zu LOAD-Substate kollabieren
+    #
+    # Bis zur vollstaendigen Migration ist use_fault_overlay=1 ein No-Op.
+    # ----------------------------------------------------------------------
     # Aktuell sind OVERFLOW, RUNOUT und JAM exklusive _state-Werte. Das ist
     # eine flache State-Maschine mit Fault-States. Industriestandard fuer
     # Fault-Handling ist HSM mit Fault-Overlay-Flags: der "normale" State
