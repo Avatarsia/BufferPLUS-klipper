@@ -85,6 +85,10 @@ BUTTON_RETRACT = "retract"
 # ---------------------------------------------------------------------------
 
 class BufferFeeder:
+    # TODO(P7-29): Extract HallSensorMonitor / SyncCoordinator /
+    # FaultManager once there is broader coverage for the current
+    # overflow/runout/jam cross-links. With only smoke coverage,
+    # a zero-behaviour-change split is still too risky.
 
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -622,7 +626,7 @@ class BufferFeeder:
         # Praesenz fallen wir auf IDLE zurueck (uebliches Verhalten).
         if (self.auto_engage_on_boot
                 and self.entrance_detected
-                and not self.hall_overflow):
+                and not self._is_hall1_active('auto_on')):
             self._set_state(STATE_AUTO)
             self._respond("AUTO engaged on boot — filament at entrance, "
                           "buffer follows extruder demand")
@@ -672,9 +676,7 @@ class BufferFeeder:
         jam_recovery = self._state == STATE_JAM or self._jam_active
         if jam_recovery:
             self._respond("RESUME: clearing JAM lockout")
-            self._jam_active = False
-            self._hall2_start_time = None
-            self._hall3_start_time = None
+            self._clear_recovery_flags()
             # If the jam interrupted a LOAD/UNLOAD macro mid-flight,
             # the macro's SAVE_GCODE_STATE is still pending. Restore
             # it now so the user's E-mode isn't stuck on M83 after
@@ -728,7 +730,7 @@ class BufferFeeder:
                 and self.entrance_detected
                 and not self._auto_off_by_user
                 and not self._halt_requested
-                and not self.hall_overflow):
+                and not self._is_hall1_active('auto_on')):
             self._respond("Print start — engaging AUTO")
             self._enable_stepper()
             self._set_state(STATE_AUTO)
@@ -804,6 +806,36 @@ class BufferFeeder:
     def retract_button_pressed(self):
         return self._semantic_state('retract_button')
 
+    def _is_hall1_active(self, context):
+        """Central HALL1 policy helper for lockout call sites."""
+        if not self.hall_overflow:
+            return False
+
+        phase3_overflow_ok = (self._state == STATE_LOAD_PHASE_3
+                              and self._load_phase3_overflow_ok)
+        if context == 'sensor_callback':
+            if phase3_overflow_ok:
+                return False
+            if self._state in (STATE_UNLOAD_PHASE_3, STATE_MANUAL_RETRACT):
+                return False
+            if self._stepper_synced_to is not None:
+                return False
+            return True
+        if context == 'main_tick':
+            if self._state in (STATE_OVERFLOW, STATE_MANUAL_RETRACT,
+                               STATE_UNLOAD_PHASE_3):
+                return False
+            if phase3_overflow_ok:
+                return False
+            if self._stepper_synced_to is not None:
+                return False
+            return True
+        if context == 'submit_move':
+            return not phase3_overflow_ok
+        if context in ('auto_on', 'phase3_entry'):
+            return True
+        raise ValueError("Unknown HALL1 context: %s" % (context,))
+
     def _on_stable_sensor_change(self, eventtime, name, raw_state):
         """Dispatch stable sensor change to the right handler."""
         if not self._startup_grace_done:
@@ -814,7 +846,7 @@ class BufferFeeder:
             # event paths handle the settled state normally.
             return
         if name == 'hall_overflow':
-            if self.hall_overflow:
+            if self._is_hall1_active('sensor_callback'):
                 # P7-11: in LOAD_PHASE_3 mit OVERFLOW_OK macht
                 # _load_phase3_tick das HALL1-Stable-Tracking selbst.
                 # Ohne diesen Bypass wuerde der direkte Sensor-Callback-
@@ -825,24 +857,9 @@ class BufferFeeder:
                 # via not-in-Liste; der direkte Sensor-Callback-Pfad
                 # muss konsistent sein, sonst kollidiert ein HALL1-Spike
                 # waehrend Tip-Forming mit dem laufenden UNLOAD-Macro.
-                if (self._state == STATE_LOAD_PHASE_3
-                        and self._load_phase3_overflow_ok):
-                    pass
-                elif self._state in (STATE_UNLOAD_PHASE_3,
-                                     STATE_MANUAL_RETRACT):
-                    pass
-                elif self._stepper_synced_to is not None:
-                    # P7-22: waehrend SYNC-Tip-Forming (UNLOAD_FILAMENT)
-                    # bewegt der Hauptextruder das Filament durchs
-                    # Hotend, der Buffer-Stepper folgt synchron. HALL1-
-                    # Spikes durch Pull-Cycles sind erwartet — kein
-                    # OVERFLOW-Lockout, sonst bricht das Macro mid-
-                    # tip-forming ab. Wenn nach dem Tip-Forming HALL1
-                    # noch aktiv waere, regelt das BUFFER_UNSYNC + die
-                    # naechste UNLOAD-Phase die Recovery.
-                    pass
-                else:
-                    self._enter_overflow()
+                # _is_hall1_active('sensor_callback') kapselt diese
+                # caller-spezifischen Bypasses.
+                self._enter_overflow()
             else:
                 self._exit_overflow()
         elif name == 'hall_full':
@@ -882,12 +899,14 @@ class BufferFeeder:
             self._initial_grip_end_time = None
         self._set_state(STATE_OVERFLOW)
 
-    def _exit_overflow(self):
-        if self._state != STATE_OVERFLOW:
-            return
-        self._respond("HALL1 cleared — overflow lockout released")
-        # Go to IDLE (the _set_state hook calls _halt_motion + stepper-disable).
-        self._set_state(STATE_IDLE)
+    def _clear_recovery_flags(self):
+        """Clear jam-related recovery flags reused by cleanup paths."""
+        self._jam_active = False
+        self._hall2_start_time = None
+        self._hall3_start_time = None
+
+    def _resume_after_overflow(self):
+        """Restore the pre-overflow workflow if it is still resumable."""
         interrupted = self._overflow_interrupted_state
         self._overflow_interrupted_state = None
 
@@ -926,9 +945,9 @@ class BufferFeeder:
             self._enable_stepper()
             self._set_state(STATE_LOAD_PHASE_1)
             self._pending_remaining_mm = self._overflow_resume_mm
-            self._pending_direction    = self._overflow_resume_dir
-            self._pending_speed        = self._overflow_resume_spd
-            self._overflow_resume_mm   = 0.0
+            self._pending_direction = self._overflow_resume_dir
+            self._pending_speed = self._overflow_resume_spd
+            self._overflow_resume_mm = 0.0
             return
 
         # --- Normal overflow recovery: no move to resume ---
@@ -940,6 +959,14 @@ class BufferFeeder:
                 and not self._halt_requested):
             self._enable_stepper()
             self._set_state(STATE_AUTO)
+
+    def _exit_overflow(self):
+        if self._state != STATE_OVERFLOW:
+            return
+        self._respond("HALL1 cleared — overflow lockout released")
+        # Go to IDLE (the _set_state hook calls _halt_motion + stepper-disable).
+        self._set_state(STATE_IDLE)
+        self._resume_after_overflow()
 
     # -----------------------------------------------------------------------
     # Entrance (buffer_entrance) events
@@ -1282,20 +1309,9 @@ class BufferFeeder:
             # Skip wuerde die State-Machine den Stepper sofort beim
             # ersten HALL1-Spike lockouten — aber wir wollen ja gerade
             # den Spike vom dauerhaften "Buffer wirklich ueberfuellt"
-            # unterscheiden.
-            phase3_overflow_ok = (self._state == STATE_LOAD_PHASE_3
-                                  and self._load_phase3_overflow_ok)
-            # P7-22: waehrend SYNC-Tip-Forming bewegt der Hauptextruder
-            # das Filament, der Buffer-Stepper folgt via gemeinsamer
-            # Trapq. HALL1-Spikes durch Pull-Cycles sind erwartet — kein
-            # Auto-OVERFLOW. _stepper_synced_to != None ist der Marker.
-            sync_active = self._stepper_synced_to is not None
-            if (self.hall_overflow
-                    and self._state not in (
-                        STATE_OVERFLOW, STATE_MANUAL_RETRACT,
-                        STATE_UNLOAD_PHASE_3)
-                    and not phase3_overflow_ok
-                    and not sync_active):
+            # unterscheiden. _is_hall1_active('main_tick') kapselt
+            # diese caller-spezifischen Bypasses.
+            if self._is_hall1_active('main_tick'):
                 self._enter_overflow()
                 return eventtime + MAIN_TICK_INTERVAL
 
@@ -1346,7 +1362,7 @@ class BufferFeeder:
                     else:
                         self._cooldown_deadline = None
                         if (self.entrance_detected
-                                and not self.hall_overflow
+                                and not self._is_hall1_active('auto_on')
                                 and not self._auto_off_by_user
                                 and not self._bang_bang_suspended
                                 and not self._retract_burst_done):
@@ -1764,10 +1780,7 @@ class BufferFeeder:
         # die Schwelle erreichen, weil der Arm bei jedem Reject zurueck-
         # faellt und HALL1 deaktiviert. _load_phase3_tick beendet die
         # Phase sauber sobald HALL1 stable lange genug ist.
-        phase3_overflow_ok = (self._state == STATE_LOAD_PHASE_3
-                              and self._load_phase3_overflow_ok)
-        if (self.hall_overflow and signed_distance > 0
-                and not phase3_overflow_ok):
+        if self._is_hall1_active('submit_move') and signed_distance > 0:
             logging.warning("buffer_feeder: forward move rejected — HALL1 active "
                             "(distance=%.1f speed=%.1f)", signed_distance, speed)
             self._continuous_feed = False
@@ -2146,7 +2159,7 @@ class BufferFeeder:
         BUFFER_CLEAR_JAM genutzt, das den JAM-Lockout selbst bereits
         aufloest und nur die anderen Guards weiter abfragen will.
         """
-        if self.hall_overflow or self._state == STATE_OVERFLOW:
+        if self._is_hall1_active('auto_on') or self._state == STATE_OVERFLOW:
             return "HALL1 overflow active"
         if not allow_jam and (self._state == STATE_JAM or self._jam_active):
             return ("JAM active — inspect and call BUFFER_CLEAR_JAM, "
@@ -2198,9 +2211,7 @@ class BufferFeeder:
         self._continuous_feed = False
         self._halt_motion()
         self._pending_remaining_mm = 0.0
-        self._jam_active = False
-        self._hall2_start_time = None
-        self._hall3_start_time = None
+        self._clear_recovery_flags()
         self._runout_follow_active = False
         self._runout_filament_ref = None
         self._measure_load_active = False
@@ -2386,7 +2397,8 @@ class BufferFeeder:
                 "BufferFeeder: JAM active — aborting. "
                 "Use BUFFER_CLEAR_JAM after inspection. (UNLOAD is allowed.)")
         if not overflow_ok:
-            if self._state == STATE_OVERFLOW or self.hall_overflow:
+            if (self._state == STATE_OVERFLOW
+                    or self._is_hall1_active('phase3_entry')):
                 raise self._cmd_error(
                     "BufferFeeder: HALL1 OVERFLOW active — aborting. "
                     "Clear overflow, then retry. (UNLOAD is allowed; "
@@ -2647,9 +2659,7 @@ class BufferFeeder:
         self._load_phase3_distance = 0.0
         self._measure_load_active = False
         self._measure_feeding = False
-        self._jam_active = False
-        self._hall2_start_time = None
-        self._hall3_start_time = None
+        self._clear_recovery_flags()
         self._runout_follow_active = False
         self._runout_filament_ref = None
         self._cooldown_deadline = None
@@ -2800,9 +2810,7 @@ class BufferFeeder:
     def cmd_BUFFER_CLEAR_JAM(self, gcmd):
         if self._state != STATE_JAM:
             raise self._cmd_error("Not in JAM state (state=%s)" % self._state)
-        self._jam_active = False
-        self._hall2_start_time = None
-        self._hall3_start_time = None
+        self._clear_recovery_flags()
         self._halt_requested = False
         # Best-effort restore of any LOAD/UNLOAD gcode-state that was
         # saved before the jam fired. Otherwise the operator would
