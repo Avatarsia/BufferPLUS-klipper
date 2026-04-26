@@ -470,10 +470,25 @@ class SyncCoordinator:
                 "Object '%s' is not an extruder (no get_trapq method)"
                 % extruder_name)
         toolhead = owner.printer.lookup_object('toolhead')
-        toolhead.flush_step_generation()
-        owner.stepper.set_position((0., 0., 0.))
-        owner.stepper.set_trapq(extruder.get_trapq())
-        self.motion_queuing.check_step_generation_scan_windows()
+        try:
+            toolhead.flush_step_generation()
+            owner.stepper.set_position((0., 0., 0.))
+            owner.stepper.set_trapq(extruder.get_trapq())
+            self.motion_queuing.check_step_generation_scan_windows()
+        except Exception:
+            # P7-36: best-effort rollback so the finally-cleanup of any
+            # caller (e.g. cmd_BUFFER_UNLOAD_FILAMENT) cannot mistake a
+            # half-mutated stepper for a clean state. Clear the arming
+            # flag last so a recursive failure inside the rollback still
+            # leaves the cleanup guard disarmed (unsync_if_synced returns
+            # False), avoiding double-rollback attempts.
+            try:
+                owner.stepper.set_trapq(self.trapq)
+                self.motion_queuing.check_step_generation_scan_windows()
+            except Exception:
+                pass
+            self._stepper_synced_to = None
+            raise
         self._stepper_synced_to = extruder_name
         owner._stepcompress_primed = True
         owner._enable_stepper()
@@ -589,6 +604,17 @@ class FaultManager:
             owner._pending_direction = self._overflow_resume_dir
             owner._pending_speed = self._overflow_resume_spd
             self._overflow_resume_mm = 0.0
+            return
+
+        # P7-36: in fault-overlay mode the cmd_BUFFER_LOAD_PHASE3 while-
+        # loop is still spinning — keep _state=LOAD_PHASE_3 so the loop
+        # continues feeding instead of falling through to STATE_AUTO and
+        # silently returning success on an aborted phase 3.
+        if (interrupted == STATE_LOAD_PHASE_3
+                and owner.use_fault_overlay
+                and owner._state == STATE_LOAD_PHASE_3):
+            self._overflow_resume_mm = 0.0
+            owner._enable_stepper()
             return
 
         self._overflow_resume_mm = 0.0
@@ -2258,6 +2284,14 @@ class BufferFeeder:
         if new_state == STATE_IDLE:
             self._halt_motion()
             self._schedule_stepper_disable()
+            # P7-36: ensure overlay flag is not stale across an abort
+            # path that bypasses _exit_overflow (STOP_BUFFER_FILL,
+            # BUFFER_HALT, BUFFER_AUTO_OFF). _exit_overflow only fires
+            # on HALL1 fall-edge — direct state transitions to IDLE
+            # while HALL1 is still asserted would otherwise leave
+            # _fault_overflow=True, blocking later main_tick re-entry.
+            self._fault_overflow = False
+            self._fault_pre_overflow_state = None
 
     # -----------------------------------------------------------------------
     # Helper: gcode interactions
