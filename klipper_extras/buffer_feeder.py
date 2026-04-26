@@ -241,6 +241,9 @@ class HallSensorMonitor:
             if owner._is_hall1_active('sensor_callback'):
                 owner._enter_overflow()
             else:
+                # P7-46 (Issue #16): clear post-LOAD grace on HALL1-fall.
+                # Buffer-Arm has dropped, normal sensor regime resumes.
+                owner._post_load_overflow_grace = False
                 owner._exit_overflow()
         elif name == 'hall_full':
             pass
@@ -469,6 +472,30 @@ class SyncCoordinator:
             raise owner._cmd_error(
                 "Object '%s' is not an extruder (no get_trapq method)"
                 % extruder_name)
+        # P7-46 (Issue #16): Gap-Reprime BEFORE the trapq-swap. The
+        # own-trapq path in _submit_single_trapezoid (~Z. 2148) has a
+        # gap-reprime check, but sync_to_extruder didn't — so if no
+        # buffer-stepper move ran for > CLOCK_DIFF_MAX (~16.7s), the
+        # first extruder-step after the swap would land at a
+        # print_time-clock far ahead of the stale stepcompress cursor
+        # → 'Invalid sequence' crash. Hardware-test 2026-04-26 saw
+        # this with a 19.9s gap between LOAD-macro abort and UNLOAD's
+        # SYNC (Issue #16 Re-Test). Refresh the cursor with a tiny
+        # anchor-step (0.05mm, direction follows HALL1 to avoid
+        # forward-feed when buffer is overfilled) so the swap finds
+        # an up-to-date last_step_clock.
+        REPRIME_GAP = 5.0
+        mcu = owner.stepper.get_mcu()
+        mcu_now = mcu.estimated_print_time(owner.reactor.monotonic())
+        gap = mcu_now - owner._last_move_end_time
+        if gap > REPRIME_GAP:
+            owner._enable_stepper()
+            anchor_dir = -1.0 if owner.hall_overflow else 1.0
+            owner._submit_move(anchor_dir * 0.05, 10.0)
+            owner._wait_for_move_done(direction=int(anchor_dir))
+            owner._respond("Sync prep: own-trapq cursor refreshed "
+                          "(idle %.1fs, anchor %s 0.05mm)"
+                          % (gap, "retract" if anchor_dir < 0 else "feed"))
         toolhead = owner.printer.lookup_object('toolhead')
         try:
             toolhead.flush_step_generation()
@@ -564,6 +591,13 @@ class FaultManager:
             # main_tick poll would otherwise re-enter _enter_overflow on
             # every cycle).
             if owner.use_fault_overlay and owner._fault_overflow:
+                return False
+            # P7-46 (Issue #16): post-LOAD HALL1-grace. After Phase 3
+            # exit via stable HALL1, the buffer is legitimately full —
+            # main_tick must not bounce back to STATE_OVERFLOW. Cleared
+            # when HALL1 actually falls (sensor_callback path) or via
+            # operator cleanup.
+            if owner._post_load_overflow_grace:
                 return False
             return True
         if context == 'submit_move':
@@ -900,6 +934,14 @@ class BufferFeeder:
         self._fault_runout = False
         self._fault_jam = False
         self._fault_pre_overflow_state = None
+        # P7-46 (Issue #16): Post-LOAD HALL1-bounce-suppression. Set
+        # when LOAD_PHASE_3 with overflow_ok=1 exits via stable HALL1
+        # (treating as full). Buffer is legitimately overfilled — the
+        # main_tick path would otherwise re-trigger _enter_overflow on
+        # the next cycle and bounce state IDLE/AUTO → OVERFLOW. Cleared
+        # when HALL1 actually falls (sensor_callback) or via operator
+        # cleanup (BUFFER_AUTO_OFF, STOP_BUFFER_FILL, BUFFER_HALT).
+        self._post_load_overflow_grace = False
 
         # ----- Jam detection state -----
         self._hall2_start_time = None
@@ -989,6 +1031,9 @@ class BufferFeeder:
         gcode.register_mux_command('BUFFER_AUTO_ON', 'BUFFER', self.name,
                                    self.cmd_BUFFER_AUTO_ON,
                                    desc=self.cmd_BUFFER_AUTO_ON_help)
+        gcode.register_mux_command('BUFFER_AUTO_ON_IF_READY', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_AUTO_ON_IF_READY,
+                                   desc=self.cmd_BUFFER_AUTO_ON_IF_READY_help)
         gcode.register_mux_command('BUFFER_AUTO_OFF', 'BUFFER', self.name,
                                    self.cmd_BUFFER_AUTO_OFF,
                                    desc=self.cmd_BUFFER_AUTO_OFF_help)
@@ -1908,6 +1953,11 @@ class BufferFeeder:
                     self._respond("LOAD Phase 3: HALL1 stable %.1fs, "
                                   "buffer overfilled (treating as full)"
                                   % overflow_dwell)
+                    # P7-46 (Issue #16): suppress _main_tick from
+                    # re-triggering _enter_overflow now that we have
+                    # legitimately accepted the overfilled buffer as
+                    # the LOAD-success exit. Cleared on HALL1-fall.
+                    self._post_load_overflow_grace = True
                     if (self._print_running
                             and self.entrance_detected
                             and not self._auto_off_by_user
@@ -2473,6 +2523,8 @@ class BufferFeeder:
         self._runout_recovery_pending = False
         # Wipe any cooldown timer so it can't later flip state.
         self._cooldown_deadline = None
+        # P7-46: clear post-LOAD grace on operator HALT.
+        self._post_load_overflow_grace = False
         # Preserve safety-lockout states (OVERFLOW / JAM); any other
         # state drops to IDLE. Our _set_state(STATE_IDLE) hook also
         # disables the stepper.
@@ -2500,6 +2552,30 @@ class BufferFeeder:
         # Also consume any pending RUNOUT-recovery: operator chose
         # to engage AUTO directly, so RESUME should not later insert
         # a grip on top.
+        self._halt_requested = False
+        self._auto_off_by_user = False
+        self._runout_recovery_pending = False
+        self._enable_stepper()
+        self._set_state(STATE_AUTO)
+        self._respond("AUTO engaged")
+
+    cmd_BUFFER_AUTO_ON_IF_READY_help = ("Enable bang-bang auto mode if precondition guard "
+                                         "passes. Otherwise log skip-reason and return without "
+                                         "raising. Used by macros where the AUTO call follows a "
+                                         "LOAD/UNLOAD that may legitimately leave HALL1 active.")
+    def cmd_BUFFER_AUTO_ON_IF_READY(self, gcmd):
+        # P7-46 (Issue #16): macro-render-time vs runtime fix.
+        # Klipper-Jinja-macros render the whole macro body once at
+        # macro-start. A `{% if bf.hall_overflow %}`-guard around
+        # BUFFER_AUTO_ON evaluates the snapshot from macro-start —
+        # the actual sensor reading at the time AUTO is reached can
+        # be different (e.g. LOAD Phase 3 ends with HALL1 active).
+        # This command does the runtime-check in Python, returning
+        # quietly if the guard rejects, so the macro continues.
+        reason = self._check_auto_ready()
+        if reason is not None:
+            self._respond("AUTO not engaged: " + reason)
+            return
         self._halt_requested = False
         self._auto_off_by_user = False
         self._runout_recovery_pending = False
@@ -2535,6 +2611,9 @@ class BufferFeeder:
         self._auto_off_by_user = True      # but reinsert auto-grip stays blocked
         self._runout_recovery_pending = False
         self._halt_requested = True
+        # P7-46: operator-explicit AUTO_OFF clears the post-LOAD grace
+        # so HALL1 returns to its normal lockout regime.
+        self._post_load_overflow_grace = False
         self._set_state(STATE_IDLE)
         # Best-effort restore of any pending LOAD/UNLOAD gcode-state
         # (E-mode etc.) so AUTO_OFF cleanly recovers after a failed
@@ -3034,6 +3113,8 @@ class BufferFeeder:
         self._auto_off_by_user = True
         self._runout_recovery_pending = False
         self._halt_requested = True
+        # P7-46: clear post-LOAD grace on operator stop.
+        self._post_load_overflow_grace = False
         self._set_state(STATE_IDLE)
         # Best-effort gcode-state restore after a failed LOAD/UNLOAD.
         self._try_restore_gcode_state(from_command=True)
@@ -3267,6 +3348,7 @@ class BufferFeeder:
             'fault_overflow':           self._fault_overflow,
             'fault_runout':             self._fault_runout,
             'fault_jam':                self._fault_jam,
+            'post_load_overflow_grace': self._post_load_overflow_grace,
             'bang_bang_suspended':      self._bang_bang_suspended,
             'halt_requested':           self._halt_requested,
             'runout_follow_active':     self._runout_follow_active,
