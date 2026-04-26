@@ -510,6 +510,14 @@ class SyncCoordinator:
         now_pt = mcu.estimated_print_time(owner.reactor.monotonic())
         owner._last_move_end_time = max(owner._last_move_end_time,
                                         now_pt + owner.lead_time)
+        # P7-45 (Issue #16): catch deferred _exit_overflow. If HALL1
+        # fell while we were synced, _exit_overflow short-circuited
+        # to avoid stranding the stepper on extruder_trapq during a
+        # state-transition. Now that the sync binding is released,
+        # run the deferred exit so state-machine catches up.
+        if (owner._state == STATE_OVERFLOW
+                and not owner.hall_overflow):
+            owner._exit_overflow()
         return True
 
 
@@ -571,6 +579,16 @@ class FaultManager:
 
     def resume_after_overflow(self):
         owner = self.owner
+        # P7-45 (Issue #16): refuse to promote out of OVERFLOW while
+        # SYNC is still active. _exit_overflow already short-circuits,
+        # but direct callers (fault-overlay branch, future re-entry)
+        # could land here with the sync binding intact. Promotion to
+        # STATE_AUTO/STATE_LOAD_PHASE_1/STATE_INITIAL_GRIP would let
+        # bang-bang or _submit_move queue moves to own_trapq while
+        # the stepper is on extruder_trapq → moves go live at next
+        # unsync, corrupting the stepcompress cursor.
+        if owner._stepper_synced_to is not None:
+            return
         interrupted = self._overflow_interrupted_state
         self._overflow_interrupted_state = None
 
@@ -1441,6 +1459,18 @@ class BufferFeeder:
         return self.fault.resume_after_overflow()
 
     def _exit_overflow(self):
+        # P7-45 (Issue #16): defer state-transition while SYNC is active.
+        # Otherwise we'd transition OVERFLOW → IDLE → AUTO while the
+        # stepper is still bound to extruder_trapq. The next bang-bang
+        # tick or _submit_move would then queue moves to own_trapq —
+        # those moves go live at the next BUFFER_UNSYNC and corrupt
+        # the stepcompress cursor (see Eifel-Joe's hardware log: SYNC
+        # #1 → HALL1-fall → OVERFLOW→IDLE→AUTO → UNSYNC → SYNC#2 →
+        # 'stepcompress Invalid sequence'). The macro will call
+        # BUFFER_UNSYNC itself; SyncCoordinator.unsync_if_synced
+        # re-runs this method once the sync binding is released.
+        if self._stepper_synced_to is not None:
+            return
         # P7-35 fault-overlay: clear overlay flag without state change
         # when overlay path is active. _resume_after_overflow handles
         # restarting the interrupted phase3 move via _overflow_resume_*.
