@@ -951,82 +951,89 @@ class BufferFeeder:
         self.printer.register_event_handler('klippy:shutdown', self._handle_shutdown)
 
         # ----- GCode registrations -----
+        # P7-40: Migration register_command -> register_mux_command.
+        # Mux-Key 'BUFFER' folgt der Klipper-Mainline-Konvention fuer
+        # load_config_prefix-Module mit Single-Type-Identifier. User-Aufruf:
+        #   BUFFER_AUTO_ON BUFFER=mellow
+        # Mux-Value = self.name (bei aktuellem Setup "mellow", aus
+        # [buffer_feeder mellow]). Mehrere Instanzen koennen denselben
+        # Command-Namen registrieren, der Dispatcher waehlt via BUFFER=...
         gcode = self.printer.lookup_object('gcode')
-        gcode.register_command('BUFFER_FEED',
-                               self.cmd_BUFFER_FEED,
-                               desc=self.cmd_BUFFER_FEED_help)
-        gcode.register_command('BUFFER_RETRACT',
-                               self.cmd_BUFFER_RETRACT,
-                               desc=self.cmd_BUFFER_RETRACT_help)
-        gcode.register_command('BUFFER_HALT',
-                               self.cmd_BUFFER_HALT,
-                               desc=self.cmd_BUFFER_HALT_help)
-        gcode.register_command('BUFFER_AUTO_ON',
-                               self.cmd_BUFFER_AUTO_ON,
-                               desc=self.cmd_BUFFER_AUTO_ON_help)
-        gcode.register_command('BUFFER_AUTO_OFF',
-                               self.cmd_BUFFER_AUTO_OFF,
-                               desc=self.cmd_BUFFER_AUTO_OFF_help)
-        gcode.register_command('BUFFER_WAIT_IDLE',
-                               self.cmd_BUFFER_WAIT_IDLE,
-                               desc=self.cmd_BUFFER_WAIT_IDLE_help)
-        gcode.register_command('BUFFER_LOAD_PHASE1',
-                               self.cmd_BUFFER_LOAD_PHASE1,
-                               desc=self.cmd_BUFFER_LOAD_PHASE1_help)
-        gcode.register_command('BUFFER_LOAD_PHASE2',
-                               self.cmd_BUFFER_LOAD_PHASE2,
-                               desc=self.cmd_BUFFER_LOAD_PHASE2_help)
-        gcode.register_command('BUFFER_LOAD_PHASE3',
-                               self.cmd_BUFFER_LOAD_PHASE3,
-                               desc=self.cmd_BUFFER_LOAD_PHASE3_help)
-        gcode.register_command('BUFFER_UNLOAD_FILAMENT',
-                               self.cmd_BUFFER_UNLOAD_FILAMENT,
-                               desc=self.cmd_BUFFER_UNLOAD_FILAMENT_help)
-        gcode.register_command('BUFFER_UNLOAD_PHASE3',
-                               self.cmd_BUFFER_UNLOAD_PHASE3,
-                               desc=self.cmd_BUFFER_UNLOAD_PHASE3_help)
-        gcode.register_command('BUFFER_SYNC_TO_EXTRUDER',
-                               self.cmd_BUFFER_SYNC_TO_EXTRUDER,
-                               desc=self.cmd_BUFFER_SYNC_TO_EXTRUDER_help)
-        gcode.register_command('BUFFER_UNSYNC',
-                               self.cmd_BUFFER_UNSYNC,
-                               desc=self.cmd_BUFFER_UNSYNC_help)
-        gcode.register_command('FORCE_BUFFER_FILL',
-                               self.cmd_FORCE_BUFFER_FILL,
-                               desc=self.cmd_FORCE_BUFFER_FILL_help)
-        gcode.register_command('STOP_BUFFER_FILL',
-                               self.cmd_STOP_BUFFER_FILL,
-                               desc=self.cmd_STOP_BUFFER_FILL_help)
-        gcode.register_command('BUFFER_STATE_DUMP',
-                               self.cmd_BUFFER_STATE_DUMP,
-                               desc=self.cmd_BUFFER_STATE_DUMP_help)
-        gcode.register_command('CALIBRATE_FEEDER_SYNC',
-                               self.cmd_CALIBRATE_FEEDER_SYNC,
-                               desc=self.cmd_CALIBRATE_FEEDER_SYNC_help)
-        gcode.register_command('MEASURE_LOAD_START',
-                               self.cmd_MEASURE_LOAD_START,
-                               desc=self.cmd_MEASURE_LOAD_START_help)
-        gcode.register_command('MEASURE_LOAD_STOP',
-                               self.cmd_MEASURE_LOAD_STOP,
-                               desc=self.cmd_MEASURE_LOAD_STOP_help)
-        gcode.register_command('ENABLE_RUNOUT_SENSOR',
-                               self.cmd_ENABLE_RUNOUT_SENSOR,
-                               desc="Set print_running=1 — enable runout PAUSE")
-        gcode.register_command('DISABLE_RUNOUT_SENSOR',
-                               self.cmd_DISABLE_RUNOUT_SENSOR,
-                               desc="Set print_running=0 — disable runout PAUSE")
-        gcode.register_command('BUFFER_CLEAR_JAM',
-                               self.cmd_BUFFER_CLEAR_JAM,
-                               desc="Clear JAM state after operator intervention")
-        gcode.register_command('BUFFER_RESTORE_STATE',
-                               self.cmd_BUFFER_RESTORE_STATE,
-                               desc="Best-effort restore of gcode-state saved by a failed LOAD/UNLOAD")
-        gcode.register_command('BUFFER_SAVE_MACRO_STATE',
-                               self.cmd_BUFFER_SAVE_MACRO_STATE,
-                               desc="Internal: mark gcode-state as saved (used by _SAVE_E_MODE)")
-        gcode.register_command('BUFFER_RESTORE_MACRO_STATE',
-                               self.cmd_BUFFER_RESTORE_MACRO_STATE,
-                               desc="Internal: restore + clear gcode-state save (used by _RESTORE_E_MODE)")
+        gcode.register_mux_command('BUFFER_FEED', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_FEED,
+                                   desc=self.cmd_BUFFER_FEED_help)
+        gcode.register_mux_command('BUFFER_RETRACT', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_RETRACT,
+                                   desc=self.cmd_BUFFER_RETRACT_help)
+        gcode.register_mux_command('BUFFER_HALT', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_HALT,
+                                   desc=self.cmd_BUFFER_HALT_help)
+        gcode.register_mux_command('BUFFER_AUTO_ON', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_AUTO_ON,
+                                   desc=self.cmd_BUFFER_AUTO_ON_help)
+        gcode.register_mux_command('BUFFER_AUTO_OFF', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_AUTO_OFF,
+                                   desc=self.cmd_BUFFER_AUTO_OFF_help)
+        gcode.register_mux_command('BUFFER_WAIT_IDLE', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_WAIT_IDLE,
+                                   desc=self.cmd_BUFFER_WAIT_IDLE_help)
+        gcode.register_mux_command('BUFFER_LOAD_PHASE1', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_LOAD_PHASE1,
+                                   desc=self.cmd_BUFFER_LOAD_PHASE1_help)
+        gcode.register_mux_command('BUFFER_LOAD_PHASE2', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_LOAD_PHASE2,
+                                   desc=self.cmd_BUFFER_LOAD_PHASE2_help)
+        gcode.register_mux_command('BUFFER_LOAD_PHASE3', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_LOAD_PHASE3,
+                                   desc=self.cmd_BUFFER_LOAD_PHASE3_help)
+        gcode.register_mux_command('BUFFER_UNLOAD_FILAMENT', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_UNLOAD_FILAMENT,
+                                   desc=self.cmd_BUFFER_UNLOAD_FILAMENT_help)
+        gcode.register_mux_command('BUFFER_UNLOAD_PHASE3', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_UNLOAD_PHASE3,
+                                   desc=self.cmd_BUFFER_UNLOAD_PHASE3_help)
+        gcode.register_mux_command('BUFFER_SYNC_TO_EXTRUDER', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_SYNC_TO_EXTRUDER,
+                                   desc=self.cmd_BUFFER_SYNC_TO_EXTRUDER_help)
+        gcode.register_mux_command('BUFFER_UNSYNC', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_UNSYNC,
+                                   desc=self.cmd_BUFFER_UNSYNC_help)
+        gcode.register_mux_command('FORCE_BUFFER_FILL', 'BUFFER', self.name,
+                                   self.cmd_FORCE_BUFFER_FILL,
+                                   desc=self.cmd_FORCE_BUFFER_FILL_help)
+        gcode.register_mux_command('STOP_BUFFER_FILL', 'BUFFER', self.name,
+                                   self.cmd_STOP_BUFFER_FILL,
+                                   desc=self.cmd_STOP_BUFFER_FILL_help)
+        gcode.register_mux_command('BUFFER_STATE_DUMP', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_STATE_DUMP,
+                                   desc=self.cmd_BUFFER_STATE_DUMP_help)
+        gcode.register_mux_command('CALIBRATE_FEEDER_SYNC', 'BUFFER', self.name,
+                                   self.cmd_CALIBRATE_FEEDER_SYNC,
+                                   desc=self.cmd_CALIBRATE_FEEDER_SYNC_help)
+        gcode.register_mux_command('MEASURE_LOAD_START', 'BUFFER', self.name,
+                                   self.cmd_MEASURE_LOAD_START,
+                                   desc=self.cmd_MEASURE_LOAD_START_help)
+        gcode.register_mux_command('MEASURE_LOAD_STOP', 'BUFFER', self.name,
+                                   self.cmd_MEASURE_LOAD_STOP,
+                                   desc=self.cmd_MEASURE_LOAD_STOP_help)
+        gcode.register_mux_command('ENABLE_RUNOUT_SENSOR', 'BUFFER', self.name,
+                                   self.cmd_ENABLE_RUNOUT_SENSOR,
+                                   desc="Set print_running=1 — enable runout PAUSE")
+        gcode.register_mux_command('DISABLE_RUNOUT_SENSOR', 'BUFFER', self.name,
+                                   self.cmd_DISABLE_RUNOUT_SENSOR,
+                                   desc="Set print_running=0 — disable runout PAUSE")
+        gcode.register_mux_command('BUFFER_CLEAR_JAM', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_CLEAR_JAM,
+                                   desc="Clear JAM state after operator intervention")
+        gcode.register_mux_command('BUFFER_RESTORE_STATE', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_RESTORE_STATE,
+                                   desc="Best-effort restore of gcode-state saved by a failed LOAD/UNLOAD")
+        gcode.register_mux_command('BUFFER_SAVE_MACRO_STATE', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_SAVE_MACRO_STATE,
+                                   desc="Internal: mark gcode-state as saved (used by _SAVE_E_MODE)")
+        gcode.register_mux_command('BUFFER_RESTORE_MACRO_STATE', 'BUFFER', self.name,
+                                   self.cmd_BUFFER_RESTORE_MACRO_STATE,
+                                   desc="Internal: restore + clear gcode-state save (used by _RESTORE_E_MODE)")
 
         logging.info("buffer_feeder '%s' initialised", self.name)
 

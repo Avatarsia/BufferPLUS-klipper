@@ -106,7 +106,7 @@ sudo systemctl restart klipper
 
 # 6. Verifizieren
 #    Klipper-Konsole:
-#      BUFFER_STATE_DUMP
+#      BUFFER_STATE_DUMP BUFFER=mellow
 #    → sollte state=IDLE plus alle Sensor-Zustände ausgeben.
 ```
 
@@ -176,30 +176,37 @@ markiert.
 Alle Commands werden direkt von der Extension bereitgestellt und können
 in der Konsole oder aus Macros aufgerufen werden.
 
+> **Hinweis:** Alle Commands sind als **Mux-Commands** registriert (Mux-Key
+> `BUFFER`). Beim Aufruf muss daher der Instanz-Name mitgegeben werden,
+> z. B. `BUFFER_AUTO_ON BUFFER=mellow`. In den Tabellen unten ist
+> `BUFFER=mellow` für die hier mitgelieferte `lll.cfg`-Standardinstanz
+> angegeben — bei abweichendem `[buffer_feeder <name>]` entsprechend
+> anpassen.
+
 ### Basis-Steuerung
 
 | Command | Beschreibung |
 |---|---|
-| `BUFFER_FEED DISTANCE=<mm> SPEED=<mm/s>` | Feeder vorwärts. Ohne DISTANCE: Dauerlauf bis `BUFFER_HALT`. |
-| `BUFFER_RETRACT DISTANCE=<mm> SPEED=<mm/s>` | Feeder rückwärts. |
-| `BUFFER_HALT` | Sofort stoppen. |
-| `BUFFER_AUTO_ON` | Bang-Bang aktivieren. Verweigert sich während Druck-PAUSE (`bang_bang_suspended=True`) — zuerst RESUME oder AUTO_OFF ausführen. |
-| `BUFFER_AUTO_OFF` | Bang-Bang aus, State → IDLE. Full-Reset inkl. `bang_bang_suspended`-Clear (Operator-Override, falls RESUME nie kommt). Armt `halt_requested` → wartende Macros abortiert. Setzt `auto_off_by_user` → Reinsert triggert keinen automatischen Grip mehr. |
-| `BUFFER_WAIT_IDLE` | Blockt bis Move fertig **und** State nicht mehr in einer LOAD/UNLOAD/GRIP-Phase. Raised auf OVERFLOW/JAM/HALT. |
-| `BUFFER_STATE_DUMP` | Vollständigen State (inkl. Recovery-Flags) in Konsole. |
-| `BUFFER_CLEAR_JAM` | Nach Jam-Event und Operator-Check: State → AUTO (falls entrance) oder IDLE (sonst). Restauriert GCode-State (E-Mode) aus failed LOAD/UNLOAD. Während pausiertem Druck bleibt Bang-Bang suspended bis RESUME. |
-| `BUFFER_RESTORE_STATE` | Best-Effort Restore des vollen GCode-States (E-Mode, Position, Feedrate etc.) nach einem abgebrochenen LOAD_FILAMENT / UNLOAD_FILAMENT. Basiert auf Klippers `SAVE_GCODE_STATE` / `RESTORE_GCODE_STATE MOVE=0` unter `NAME=buffer_feeder_op`. Single-Shot (verbraucht den Save). No-op wenn kein Save anstehend. |
+| `BUFFER_FEED BUFFER=mellow DISTANCE=<mm> SPEED=<mm/s>` | Feeder vorwärts. Ohne DISTANCE: Dauerlauf bis `BUFFER_HALT`. |
+| `BUFFER_RETRACT BUFFER=mellow DISTANCE=<mm> SPEED=<mm/s>` | Feeder rückwärts. |
+| `BUFFER_HALT BUFFER=mellow` | Sofort stoppen. |
+| `BUFFER_AUTO_ON BUFFER=mellow` | Bang-Bang aktivieren. Verweigert sich während Druck-PAUSE (`bang_bang_suspended=True`) — zuerst RESUME oder AUTO_OFF ausführen. |
+| `BUFFER_AUTO_OFF BUFFER=mellow` | Bang-Bang aus, State → IDLE. Full-Reset inkl. `bang_bang_suspended`-Clear (Operator-Override, falls RESUME nie kommt). Armt `halt_requested` → wartende Macros abortiert. Setzt `auto_off_by_user` → Reinsert triggert keinen automatischen Grip mehr. |
+| `BUFFER_WAIT_IDLE BUFFER=mellow` | Blockt bis Move fertig **und** State nicht mehr in einer LOAD/UNLOAD/GRIP-Phase. Raised auf OVERFLOW/JAM/HALT. |
+| `BUFFER_STATE_DUMP BUFFER=mellow` | Vollständigen State (inkl. Recovery-Flags) in Konsole. |
+| `BUFFER_CLEAR_JAM BUFFER=mellow` | Nach Jam-Event und Operator-Check: State → AUTO (falls entrance) oder IDLE (sonst). Restauriert GCode-State (E-Mode) aus failed LOAD/UNLOAD. Während pausiertem Druck bleibt Bang-Bang suspended bis RESUME. |
+| `BUFFER_RESTORE_STATE BUFFER=mellow` | Best-Effort Restore des vollen GCode-States (E-Mode, Position, Feedrate etc.) nach einem abgebrochenen LOAD_FILAMENT / UNLOAD_FILAMENT. Basiert auf Klippers `SAVE_GCODE_STATE` / `RESTORE_GCODE_STATE MOVE=0` unter `NAME=buffer_feeder_op`. Single-Shot (verbraucht den Save). No-op wenn kein Save anstehend. |
 
 ### LOAD/UNLOAD — Phasen-Primitive
 
 | Command | Beschreibung |
 |---|---|
-| `BUFFER_LOAD_PHASE1 DISTANCE=<mm>` | Feeder allein schnell zum Toolhead (blocking). |
-| `BUFFER_LOAD_PHASE2 DISTANCE=<mm> SPEED=<mm/s>` | Feeder parallel (non-blocking). |
-| `BUFFER_LOAD_PHASE3` | Feed bis HALL2 aktiv (blocking). |
-| `BUFFER_UNLOAD_PHASE1` | Feeder sauber anhalten, State → `UNLOAD_PHASE_1` für Tip-Forming (blocking). |
-| `BUFFER_UNLOAD_PHASE2 DISTANCE=<mm> SPEED=<mm/s>` | Feeder retract parallel (non-blocking). |
-| `BUFFER_UNLOAD_PHASE3` | Chunked retract bis entrance frei (blocking). |
+| `BUFFER_LOAD_PHASE1 BUFFER=mellow DISTANCE=<mm>` | Feeder allein schnell zum Toolhead (blocking). |
+| `BUFFER_LOAD_PHASE2 BUFFER=mellow DISTANCE=<mm> SPEED=<mm/s>` | Feeder parallel (non-blocking). |
+| `BUFFER_LOAD_PHASE3 BUFFER=mellow` | Feed bis HALL2 aktiv (blocking). |
+| `BUFFER_UNLOAD_PHASE1 BUFFER=mellow` | Feeder sauber anhalten, State → `UNLOAD_PHASE_1` für Tip-Forming (blocking). |
+| `BUFFER_UNLOAD_PHASE2 BUFFER=mellow DISTANCE=<mm> SPEED=<mm/s>` | Feeder retract parallel (non-blocking). |
+| `BUFFER_UNLOAD_PHASE3 BUFFER=mellow` | Chunked retract bis entrance frei (blocking). |
 
 Diese Primitive werden von den Macros `LOAD_FILAMENT` / `UNLOAD_FILAMENT`
 orchestriert. Direkter Aufruf nur für Debug.
@@ -208,25 +215,25 @@ orchestriert. Direkter Aufruf nur für Debug.
 
 | Command | Beschreibung |
 |---|---|
-| `LOAD_FILAMENT` | Komplette Ladesequenz (3 Phasen). Hotend-Check. |
-| `UNLOAD_FILAMENT` | Tip-Forming + Sync-Retract + Feeder-Rückzug. |
-| `FORCE_BUFFER_FILL` | Full Initial-Fill-Cycle: Grip-Phase, dann Continuous-Feed bis HALL2 aktiv (Buffer voll) → AUTO. Cleart `auto_off_by_user`, sodass die Bang-Bang-Regelung danach weiterläuft. Refused während Druck-PAUSE. |
-| `STOP_BUFFER_FILL` | Alles abbrechen, zurück in IDLE. |
+| `LOAD_FILAMENT` | Komplette Ladesequenz (3 Phasen). Hotend-Check. (Macro — kein BUFFER=-Parameter nötig) |
+| `UNLOAD_FILAMENT` | Tip-Forming + Sync-Retract + Feeder-Rückzug. (Macro — kein BUFFER=-Parameter nötig) |
+| `FORCE_BUFFER_FILL BUFFER=mellow` | Full Initial-Fill-Cycle: Grip-Phase, dann Continuous-Feed bis HALL2 aktiv (Buffer voll) → AUTO. Cleart `auto_off_by_user`, sodass die Bang-Bang-Regelung danach weiterläuft. Refused während Druck-PAUSE. |
+| `STOP_BUFFER_FILL BUFFER=mellow` | Alles abbrechen, zurück in IDLE. |
 
 ### Kalibrierung
 
 | Command | Beschreibung |
 |---|---|
-| `MEASURE_LOAD_START` | Feed-Taster in Toggle-Mode (1. Klick=start, 2. Klick=stop+Ausgabe). |
-| `MEASURE_LOAD_STOP` | Manuell beenden (auch ohne 2. Klick). |
-| `CALIBRATE_FEEDER_SYNC` | **Deprecated** — kein Sync mehr. Gibt Info aus. |
+| `MEASURE_LOAD_START BUFFER=mellow` | Feed-Taster in Toggle-Mode (1. Klick=start, 2. Klick=stop+Ausgabe). |
+| `MEASURE_LOAD_STOP BUFFER=mellow` | Manuell beenden (auch ohne 2. Klick). |
+| `CALIBRATE_FEEDER_SYNC BUFFER=mellow` | **Deprecated** — kein Sync mehr. Gibt Info aus. |
 
 ### Runout-Flags
 
 | Command | Beschreibung |
 |---|---|
-| `ENABLE_RUNOUT_SENSOR` | `print_running=1` — in PRINT_START einbinden. |
-| `DISABLE_RUNOUT_SENSOR` | `print_running=0` — in PRINT_END einbinden. |
+| `ENABLE_RUNOUT_SENSOR BUFFER=mellow` | `print_running=1` — in PRINT_START einbinden. |
+| `DISABLE_RUNOUT_SENSOR BUFFER=mellow` | `print_running=0` — in PRINT_END einbinden. |
 
 ---
 
@@ -302,10 +309,10 @@ Deaktivieren mit `jam_detection_enabled: 0` in der Config.
 ### LOAD_FILAMENT (sensor-driven)
 
 ```
-Phase 1: BUFFER_LOAD_PHASE1
+Phase 1: BUFFER_LOAD_PHASE1 BUFFER=mellow
          Feeder allein schnell (load_fast_speed) load_fast_distance mm
          bis kurz vor den Toolhead.
-Phase 2: BUFFER_LOAD_PHASE3
+Phase 2: BUFFER_LOAD_PHASE3 BUFFER=mellow
          Feeder füllt den Buffer bis HALL2 auslöst (oder load_buffer_max).
          HALL2 = Sensor-Bestätigung dass das Filament gestaged ist
          und der Pfad bis zum Toolhead frei.
@@ -322,16 +329,17 @@ aber nicht mehr genutzt.
 
 ```
 Phase 1: Tip-Forming — Extruder macht Push/Pull-Zyklen ALLEIN.
-         BUFFER_UNLOAD_PHASE1 setzt den State auf UNLOAD_PHASE_1,
-         hält alle Moves auf dem Feeder an und wartet bis die
-         letzte Chunk-Bewegung ausgelaufen ist. In diesem State
-         sind Operator-Buttons und FORCE_BUFFER_FILL blockiert —
-         keine Kollision mit Tip-Forming.
+         BUFFER_UNLOAD_PHASE1 BUFFER=mellow setzt den State auf
+         UNLOAD_PHASE_1, hält alle Moves auf dem Feeder an und
+         wartet bis die letzte Chunk-Bewegung ausgelaufen ist.
+         In diesem State sind Operator-Buttons und
+         FORCE_BUFFER_FILL blockiert — keine Kollision mit
+         Tip-Forming.
          Abweichung zur alten Config: früher lief der Feeder mit;
          jetzt bleibt er still (die kleinen Moves im Hotend
          werden vom Buffer absorbiert).
-Phase 2: BUFFER_UNLOAD_PHASE2 DISTANCE=180 + G1 E-180 parallel.
-Phase 3: BUFFER_UNLOAD_PHASE3 — chunked 50mm-Retracts bis
+Phase 2: BUFFER_UNLOAD_PHASE2 BUFFER=mellow DISTANCE=180 + G1 E-180 parallel.
+Phase 3: BUFFER_UNLOAD_PHASE3 BUFFER=mellow — chunked 50mm-Retracts bis
          buffer_entrance frei meldet (max unload_fast_max).
 ```
 
@@ -342,9 +350,9 @@ Phase 3: BUFFER_UNLOAD_PHASE3 — chunked 50mm-Retracts bis
 ### rotation_distance (1:1)
 
 1. Filament eingelegt, Hotend auf Drucktemperatur.
-2. `BUFFER_AUTO_OFF` in der Konsole.
+2. `BUFFER_AUTO_OFF BUFFER=mellow` in der Konsole.
 3. Markierung am Filament **direkt vor dem Feeder-Eingang** anbringen.
-4. `BUFFER_FEED DISTANCE=100 SPEED=5` — fördert 100 mm.
+4. `BUFFER_FEED BUFFER=mellow DISTANCE=100 SPEED=5` — fördert 100 mm.
 5. Am Markierung nachmessen: wie viel Filament ging durch?
 6. Neue `rotation_distance` = alte × (gemessen / 100).
 7. In `[buffer_feeder mellow]` eintragen, Klipper-Restart.
@@ -355,8 +363,8 @@ Phase 3: BUFFER_UNLOAD_PHASE3 — chunked 50mm-Retracts bis
 > **ACHTUNG:** Hotend KALT lassen!
 
 1. Filament vollständig aus dem System entfernen.
-2. `FORCE_BUFFER_FILL` (oder frisch einstecken) — Grip-Phase läuft.
-3. Nach ~10s: `MEASURE_LOAD_START`.
+2. `FORCE_BUFFER_FILL BUFFER=mellow` (oder frisch einstecken) — Grip-Phase läuft.
+3. Nach ~10s: `MEASURE_LOAD_START BUFFER=mellow`.
 4. Feed-Taster 1x drücken — Feeder läuft.
 5. Warten bis Filamentspitze am Toolhead erscheint.
 6. Feed-Taster erneut drücken — Ausgabe in Konsole.
@@ -430,7 +438,7 @@ Erst nach Log-Sicherung den Drucker wieder starten.
 ### Taster reagieren nicht
 
 - Verkabelung zu PB12 (Feed) / PB13 (Retract) prüfen.
-- `BUFFER_STATE_DUMP` beobachten während drückens — `feed_button_pressed`
+- `BUFFER_STATE_DUMP BUFFER=mellow` beobachten während drückens — `feed_button_pressed`
   sollte `True` werden.
 - Während LOAD/UNLOAD/OVERFLOW/JAM sind Taster blockiert (by design).
 
@@ -456,7 +464,7 @@ Fix ist in der Extension eingebaut:
   MCU-Clock.
 
 Sollte der Fehler trotz aktueller Version wieder auftreten: Log
-sichern (siehe oben), `BUFFER_STATE_DUMP` vor dem Crash prüfen,
+sichern (siehe oben), `BUFFER_STATE_DUMP BUFFER=mellow` vor dem Crash prüfen,
 Issue öffnen mit Traceback + Config-Snippet.
 
 ---
