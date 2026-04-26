@@ -81,6 +81,536 @@ BUTTON_RETRACT = "retract"
 
 
 # ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+class HallSensorMonitor:
+    def __init__(self, owner, config):
+        self.owner = owner
+        self.printer = owner.printer
+        self.reactor = owner.reactor
+
+        # ----- Sensor pin state -----
+        #
+        # Polarity convention (matches the old [gcode_button]-based config):
+        #
+        # The Mellow LLL Plus uses a single arm that swings through tilt
+        # positions based on buffer fill level. Each HALL is a photo-
+        # interrupter that is BLOCKED by the arm in its associated tilt
+        # position:
+        #   HALL3 blocked -> buffer empty
+        #   HALL2 blocked -> buffer full
+        #   HALL1 blocked -> overflow
+        #
+        # Electrical: arm-blocked -> phototransistor OFF -> pullup holds
+        # pin HIGH. Klipper config uses `^!` (pullup + invert), so the
+        # Klipper button callback delivers state=False when pin is HIGH.
+        #   -> arm blocked (threshold active)  <=>  state=False
+        #   -> arm not blocking (threshold idle) <=>  state=True
+        #
+        # The extension then inverts ONCE more below (polarity_flip=True)
+        # so `hall_empty`/`hall_full`/`hall_overflow` return True when
+        # the corresponding threshold is active. This is NOT a double
+        # invert bug - the config `!` handles the PHYSICAL polarity,
+        # the Python flip handles the "button-language vs threshold-
+        # language" semantic shift.
+        #
+        # Entrance switch uses `^!` with state=True = filament present
+        # (standard filament_switch_sensor wiring).
+        # Buttons use `^!` with state=True = pressed.
+        self._pin_raw_state = {}
+        self._pin_change_time = {}
+        self._pin_stable_state = {}
+        self._pin_polarity_flip = {
+            'hall_empty': True,
+            'hall_full': True,
+            'hall_overflow': True,
+            'entrance': False,
+            'feed_button': False,
+            'retract_button': False,
+        }
+        # Initial stable-state defaults - SAFETY-FIRST assumption:
+        # Klipper's buttons.register_buttons only fires initial callbacks
+        # for pins whose logical state != 0 at boot (last_button starts
+        # at 0, changed = new XOR 0). For pins that are in their "idle"
+        # logical state at boot, NO callback is delivered until the
+        # state actually changes.
+        #
+        # Consequence: if we defaulted to "inactive" and a HALL sensor
+        # was already physically active (e.g. HALL2 blocked because the
+        # buffer is already full at Klipper restart), we would never hear
+        # about it - and bang-bang would happily keep filling until
+        # overflow / safety-timeout.
+        #
+        # Fix: default HALLs to "active" (stable=False -> semantic=True),
+        # triggering OVERFLOW lockout at boot. As soon as Klipper
+        # delivers an initial callback for pins that are actually idle
+        # (the common case for HALL1), we transition out of lockout.
+        # Entrance and buttons default to "not present / not pressed"
+        # - that is the actual idle state for those switches, and
+        # initial-insert events are further suppressed by the
+        # _startup_grace_done gate below.
+        for name, flip in self._pin_polarity_flip.items():
+            if flip:
+                idle_raw = False
+            else:
+                idle_raw = False
+            self._pin_raw_state[name] = idle_raw
+            self._pin_change_time[name] = 0.0
+            self._pin_stable_state[name] = idle_raw
+
+        # ----- Register pins via buttons module -----
+        buttons = self.printer.load_object(config, 'buttons')
+        self.register_pin(buttons, config, 'hall_empty_pin', 'hall_empty')
+        self.register_pin(buttons, config, 'hall_full_pin', 'hall_full')
+        self.register_pin(buttons, config, 'hall_overflow_pin', 'hall_overflow')
+        self.register_pin(buttons, config, 'entrance_pin', 'entrance')
+        self.register_pin(buttons, config, 'feed_button_pin', 'feed_button')
+        self.register_pin(buttons, config, 'retract_button_pin', 'retract_button')
+
+        # ----- Click detection state -----
+        self._click_count = {BUTTON_FEED: 0, BUTTON_RETRACT: 0}
+        self._last_click_time = {BUTTON_FEED: 0.0, BUTTON_RETRACT: 0.0}
+        self._button_held = {BUTTON_FEED: False, BUTTON_RETRACT: False}
+        # Deferred click summary: ein einziger _respond pro Click-Window,
+        # statt einer Meldung pro Tastendruck. Aktionen feuern weiterhin
+        # sofort (responsives UX), aber die Summary kommt erst nach dem
+        # triple_click_window-Settling - so sieht der User bei einem
+        # Triple-Klick "Triple-Burst" statt "Dauerlauf / Puls / Burst".
+        self._pending_click_msg = {BUTTON_FEED: None, BUTTON_RETRACT: None}
+        self._click_settle_timer = {BUTTON_FEED: None, BUTTON_RETRACT: None}
+
+    def register_pin(self, buttons, config, config_key, logical_name):
+        pin = config.get(config_key)
+
+        def _callback(eventtime, raw_state, _ln=logical_name):
+            self.on_pin_raw_change(eventtime, _ln, bool(raw_state))
+
+        buttons.register_buttons([pin], _callback)
+
+    def on_pin_raw_change(self, eventtime, name, raw_state):
+        if raw_state == self._pin_raw_state[name]:
+            return
+        self._pin_raw_state[name] = raw_state
+        self._pin_change_time[name] = eventtime
+
+    def check_debounce(self, eventtime):
+        threshold = self.owner.hall_debounce_ms / 1000.0
+        for name, raw in self._pin_raw_state.items():
+            stable = self._pin_stable_state[name]
+            if stable == raw:
+                continue
+            if (eventtime - self._pin_change_time[name]) >= threshold:
+                self._pin_stable_state[name] = raw
+                self.on_stable_sensor_change(eventtime, name, raw)
+
+    def semantic_state(self, name):
+        raw = self._pin_stable_state[name]
+        return (not raw) if self._pin_polarity_flip[name] else raw
+
+    @property
+    def hall_empty(self):
+        return self.semantic_state('hall_empty')
+
+    @property
+    def hall_full(self):
+        return self.semantic_state('hall_full')
+
+    @property
+    def hall_overflow(self):
+        return self.semantic_state('hall_overflow')
+
+    @property
+    def entrance_detected(self):
+        return self.semantic_state('entrance')
+
+    @property
+    def feed_button_pressed(self):
+        return self.semantic_state('feed_button')
+
+    @property
+    def retract_button_pressed(self):
+        return self.semantic_state('retract_button')
+
+    def on_stable_sensor_change(self, eventtime, name, raw_state):
+        del raw_state
+        owner = self.owner
+        if not owner._startup_grace_done:
+            return
+        if name == 'hall_overflow':
+            if owner._is_hall1_active('sensor_callback'):
+                owner._enter_overflow()
+            else:
+                owner._exit_overflow()
+        elif name == 'hall_full':
+            pass
+        elif name == 'hall_empty':
+            pass
+        elif name == 'entrance':
+            if owner.entrance_detected:
+                owner._on_entrance_insert(eventtime)
+            else:
+                owner._on_entrance_runout(eventtime)
+        elif name == 'feed_button':
+            owner._on_button_change(BUTTON_FEED, owner.feed_button_pressed, eventtime)
+        elif name == 'retract_button':
+            owner._on_button_change(BUTTON_RETRACT, owner.retract_button_pressed, eventtime)
+
+    def on_entrance_insert(self, eventtime):
+        owner = self.owner
+        owner._respond("Filament at entrance detected")
+        if owner._runout_follow_active:
+            owner._runout_follow_active = False
+            owner._runout_filament_ref = None
+            owner._respond("Runout-follow cancelled (filament re-inserted)")
+        will_auto_grip = (owner._state == STATE_IDLE
+                          and not owner._bang_bang_suspended
+                          and not owner._auto_off_by_user
+                          and not owner._halt_requested
+                          and owner._entrance_was_empty)
+        owner._entrance_was_empty = False
+        if owner._state == STATE_RUNOUT:
+            owner._set_state(STATE_IDLE)
+            owner._runout_recovery_pending = True
+            owner._respond("Reinsert during RUNOUT — cleared. Call "
+                          "RESUME to continue (grip + fill runs "
+                          "automatically), or BUFFER_AUTO_OFF + "
+                          "FORCE_BUFFER_FILL for manual refill first.")
+            return
+        if owner._bang_bang_suspended:
+            owner._respond("Reinsert during paused print — auto-grip suppressed. "
+                          "Use FORCE_BUFFER_FILL to trigger manually after RESUME.")
+            return
+        if owner._auto_off_by_user:
+            owner._respond("Reinsert while AUTO is off (operator-disabled) — "
+                          "auto-grip suppressed. Use FORCE_BUFFER_FILL to trigger.")
+            return
+        if will_auto_grip:
+            owner._start_initial_grip(eventtime)
+        else:
+            owner._respond("Entrance already had filament at boot — "
+                          "no auto-grip. Use FORCE_BUFFER_FILL to "
+                          "fill the buffer manually.")
+
+    def on_entrance_runout(self, eventtime):
+        owner = self.owner
+        owner._entrance_was_empty = True
+        if owner._state in (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2, STATE_LOAD_PHASE_3,
+                            STATE_UNLOAD_PHASE_3, STATE_MANUAL_FEED,
+                            STATE_MANUAL_RETRACT):
+            return
+
+        if not owner._print_running:
+            owner._respond("Entrance runout outside print — stepper off")
+            owner._continuous_feed = False
+            owner._halt_motion()
+            owner._set_state(STATE_IDLE)
+            return
+
+        if owner.runout_pause:
+            owner._respond("Runout during print — PAUSE (runout_pause=1)")
+            owner._continuous_feed = False
+            owner._halt_motion()
+            owner._schedule_stepper_disable()
+            owner._set_state(STATE_RUNOUT)
+            owner._gcode_run_script("PAUSE")
+        else:
+            owner._respond("Runout — external sensor mode, %dmm follow"
+                           % int(owner.runout_follow_mm))
+            try:
+                ps = owner.printer.lookup_object('print_stats')
+                owner._runout_filament_ref = ps.get_status(eventtime).get('filament_used', 0.0)
+            except Exception:
+                owner._runout_filament_ref = 0.0
+            owner._runout_follow_active = True
+
+    def on_button_change(self, button_name, pressed, eventtime):
+        if pressed:
+            self._button_held[button_name] = True
+            self.on_button_press(button_name, eventtime)
+        else:
+            was_held = self._button_held[button_name]
+            self._button_held[button_name] = False
+            if was_held:
+                self.on_button_release(button_name, eventtime)
+
+    def ensure_click_settle_timer(self, button_name):
+        if self._click_settle_timer[button_name] is None:
+            cb = lambda et, b=button_name: self.click_settle_fire(b, et)
+            self._click_settle_timer[button_name] = self.reactor.register_timer(cb)
+
+    def set_pending_click_msg(self, button_name, msg):
+        self._pending_click_msg[button_name] = msg
+        self.ensure_click_settle_timer(button_name)
+        fire_time = self.reactor.monotonic() + self.owner.triple_click_window
+        self.reactor.update_timer(self._click_settle_timer[button_name], fire_time)
+
+    def click_settle_fire(self, button_name, eventtime):
+        del eventtime
+        msg = self._pending_click_msg[button_name]
+        self._pending_click_msg[button_name] = None
+        if msg is not None:
+            self.owner._respond(msg)
+        return self.reactor.NEVER
+
+    def on_button_press(self, button_name, eventtime):
+        owner = self.owner
+        retract_overflow_override = (
+            button_name == BUTTON_RETRACT
+            and (owner._state == STATE_OVERFLOW or owner.hall_overflow)
+            and owner._state != STATE_JAM
+        )
+
+        block_states = (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2, STATE_LOAD_PHASE_3,
+                        STATE_UNLOAD_PHASE_3, STATE_OVERFLOW, STATE_JAM,
+                        STATE_INITIAL_GRIP)
+        if owner._state in block_states and not retract_overflow_override:
+            hint = ""
+            if owner._state == STATE_JAM:
+                hint = " — fix the cause, then BUFFER_CLEAR_JAM"
+            elif owner._state == STATE_OVERFLOW:
+                hint = " — clear HALL1 (lockout releases automatically); retract button is allowed"
+            elif owner._state in (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2,
+                                  STATE_LOAD_PHASE_3, STATE_UNLOAD_PHASE_3):
+                hint = " — wait for LOAD/UNLOAD to finish, or BUFFER_HALT"
+            elif owner._state == STATE_INITIAL_GRIP:
+                hint = " — wait for grip to finish, or STOP_BUFFER_FILL"
+            self.set_pending_click_msg(
+                button_name,
+                "Button ignored — state=%s%s" % (owner._state, hint))
+            return
+        if owner.hall_overflow and not retract_overflow_override:
+            self.set_pending_click_msg(
+                button_name,
+                "Button ignored — HALL1 overflow physically active "
+                "(retract button still works to recover)")
+            return
+
+        if button_name == BUTTON_FEED and owner._measure_load_active:
+            if owner._measure_feeding:
+                owner._measure_feeding = False
+                owner._continuous_feed = False
+                owner._halt_motion()
+                owner._measure_report()
+                owner._measure_load_active = False
+                owner._set_state(STATE_IDLE)
+            else:
+                owner._measure_feeding = True
+                owner._measure_load_distance = 0.0
+                owner._submit_move(owner.max_feed_distance, owner.manual_speed)
+                owner._set_state(STATE_MANUAL_FEED)
+                owner._respond("MEASURE_LOAD: feeder running — click again to stop")
+            return
+
+        now = eventtime
+        if (now - self._last_click_time[button_name]) > owner.triple_click_window:
+            self._click_count[button_name] = 1
+        else:
+            self._click_count[button_name] += 1
+        self._last_click_time[button_name] = now
+
+        cnt = self._click_count[button_name]
+        if cnt == CLICK_SINGLE:
+            owner._action_manual_start(button_name)
+        elif cnt == CLICK_DOUBLE:
+            owner._continuous_feed = False
+            owner._halt_motion()
+            owner._action_manual_pulse(button_name)
+        elif cnt >= CLICK_TRIPLE:
+            self._click_count[button_name] = 0
+            owner._continuous_feed = False
+            owner._halt_motion()
+            if button_name == BUTTON_FEED and not owner.feed_burst_enabled:
+                owner._action_manual_start(button_name)
+            else:
+                owner._action_burst(button_name)
+
+    def on_button_release(self, button_name, eventtime):
+        del eventtime
+        owner = self.owner
+        if owner._continuous_feed:
+            desired_dir = +1 if button_name == BUTTON_FEED else -1
+            if (owner._continuous_feed_direction == desired_dir
+                    and not owner._measure_load_active):
+                owner._continuous_feed = False
+                owner._halt_motion()
+                if owner._state in (STATE_MANUAL_FEED, STATE_MANUAL_RETRACT):
+                    owner._start_cooldown()
+
+
+class SyncCoordinator:
+    def __init__(self, owner):
+        self.owner = owner
+        self.printer = owner.printer
+        self.reactor = owner.reactor
+        self.motion_queuing = None
+        self.trapq = None
+        self.trapq_append = None
+        self._stepper_synced_to = None
+
+    def setup_trapq(self, config):
+        self.motion_queuing = self.printer.load_object(config, 'motion_queuing')
+        self.trapq = self.motion_queuing.allocate_trapq()
+        self.trapq_append = self.motion_queuing.lookup_trapq_append()
+
+    def anchor_step(self):
+        owner = self.owner
+        owner._enable_stepper()
+        anchor_dir = -1.0 if owner.hall_overflow else 1.0
+        owner._submit_move(anchor_dir * 0.05, 10.0)
+        owner._wait_for_move_done(direction=int(anchor_dir))
+        owner._respond("Stepcompress anchor primed (boot %s 0.05mm)"
+                      % ("retract" if anchor_dir < 0 else "feed"))
+
+    def sync_to_extruder(self, extruder_name):
+        owner = self.owner
+        extruder = owner.printer.lookup_object(extruder_name)
+        if not hasattr(extruder, 'get_trapq'):
+            raise owner._cmd_error(
+                "Object '%s' is not an extruder (no get_trapq method)"
+                % extruder_name)
+        toolhead = owner.printer.lookup_object('toolhead')
+        toolhead.flush_step_generation()
+        owner.stepper.set_position((0., 0., 0.))
+        owner.stepper.set_trapq(extruder.get_trapq())
+        self.motion_queuing.check_step_generation_scan_windows()
+        self._stepper_synced_to = extruder_name
+        owner._stepcompress_primed = True
+        owner._enable_stepper()
+        owner._respond("Buffer-Feeder synced to '%s' — follows extruder moves"
+                      % extruder_name)
+
+    def unsync_if_synced(self):
+        if self._stepper_synced_to is None:
+            return False
+        owner = self.owner
+        toolhead = owner.printer.lookup_object('toolhead')
+        toolhead.flush_step_generation()
+        owner.stepper.set_position((0., 0., 0.))
+        owner.stepper.set_trapq(self.trapq)
+        self.motion_queuing.check_step_generation_scan_windows()
+        self._stepper_synced_to = None
+        owner._commanded_pos = 0.0
+        mcu = owner.stepper.get_mcu()
+        now_pt = mcu.estimated_print_time(owner.reactor.monotonic())
+        owner._last_move_end_time = max(owner._last_move_end_time,
+                                        now_pt + owner.lead_time)
+        return True
+
+
+class FaultManager:
+    def __init__(self, owner):
+        self.owner = owner
+        self.printer = owner.printer
+        self.reactor = owner.reactor
+        self._overflow_interrupted_follow = False
+        self._overflow_resume_mm = 0.0
+        self._overflow_resume_dir = 0
+        self._overflow_resume_spd = 0.0
+        self._overflow_interrupted_state = None
+        self._jam_active = False
+        self._hall2_start_time = None
+        self._hall2_start_extruder_pos = 0.0
+        self._hall3_start_time = None
+
+    def is_hall1_active(self, context):
+        owner = self.owner
+        if not owner.hall_overflow:
+            return False
+
+        phase3_overflow_ok = (owner._state == STATE_LOAD_PHASE_3
+                              and owner._load_phase3_overflow_ok)
+        if context == 'sensor_callback':
+            if phase3_overflow_ok:
+                return False
+            if owner._state in (STATE_UNLOAD_PHASE_3, STATE_MANUAL_RETRACT):
+                return False
+            if owner._stepper_synced_to is not None:
+                return False
+            return True
+        if context == 'main_tick':
+            if owner._state in (STATE_OVERFLOW, STATE_MANUAL_RETRACT,
+                                STATE_UNLOAD_PHASE_3):
+                return False
+            if phase3_overflow_ok:
+                return False
+            if owner._stepper_synced_to is not None:
+                return False
+            return True
+        if context == 'submit_move':
+            return not phase3_overflow_ok
+        if context in ('auto_on', 'phase3_entry'):
+            return True
+        raise ValueError("Unknown HALL1 context: %s" % (context,))
+
+    def clear_recovery_flags(self):
+        self._jam_active = False
+        self._hall2_start_time = None
+        self._hall3_start_time = None
+
+    def resume_after_overflow(self):
+        owner = self.owner
+        interrupted = self._overflow_interrupted_state
+        self._overflow_interrupted_state = None
+
+        if (interrupted == STATE_INITIAL_GRIP
+                and self._overflow_interrupted_follow):
+            self._overflow_interrupted_follow = False
+            if self._overflow_resume_mm > 0:
+                owner._grip_follow_active = True
+                owner._enable_stepper()
+                owner._set_state(STATE_INITIAL_GRIP)
+                owner._submit_move(
+                    self._overflow_resume_dir * self._overflow_resume_mm,
+                    self._overflow_resume_spd)
+                self._overflow_resume_mm = 0.0
+                return
+            self._overflow_resume_mm = 0.0
+            if owner.auto_load_after_follow:
+                if owner._hotend_warm():
+                    owner._schedule_gcode_script("LOAD_FILAMENT")
+                else:
+                    owner._respond(
+                        "Auto-Load übersprungen: Hotend zu kalt"
+                        " (%.0f/%.0f °C)" % (
+                            owner._hotend_temp(), owner.min_temp))
+            return
+
+        if interrupted == STATE_LOAD_PHASE_1 and self._overflow_resume_mm > 0:
+            owner._enable_stepper()
+            owner._set_state(STATE_LOAD_PHASE_1)
+            owner._pending_remaining_mm = self._overflow_resume_mm
+            owner._pending_direction = self._overflow_resume_dir
+            owner._pending_speed = self._overflow_resume_spd
+            self._overflow_resume_mm = 0.0
+            return
+
+        self._overflow_resume_mm = 0.0
+        if (owner.entrance_detected
+                and not owner._auto_off_by_user
+                and not owner._bang_bang_suspended
+                and not owner._halt_requested):
+            owner._enable_stepper()
+            owner._set_state(STATE_AUTO)
+
+    def check_auto_ready(self, allow_jam=False):
+        owner = self.owner
+        if self.is_hall1_active('auto_on') or owner._state == STATE_OVERFLOW:
+            return "HALL1 overflow active"
+        if not allow_jam and (owner._state == STATE_JAM or self._jam_active):
+            return ("JAM active — inspect and call BUFFER_CLEAR_JAM, "
+                    "or BUFFER_AUTO_OFF first.")
+        if owner._state in BUSY_PHASE_STATES:
+            return ("LOAD/UNLOAD in progress (state=%s) — call "
+                    "STOP_BUFFER_FILL to abort first." % owner._state)
+        if owner._bang_bang_suspended:
+            return ("print is paused (bang-bang suspended). RESUME the "
+                    "print — bang-bang re-engages automatically. If the "
+                    "print is already finished, use BUFFER_AUTO_OFF first.")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # BufferFeeder
 # ---------------------------------------------------------------------------
 
@@ -109,12 +639,6 @@ class BufferFeeder:
     #   P7-35: LOAD_PHASE_1/2/3 zu LOAD-Substate kollabieren
     #
     # Bis zur vollstaendigen Migration ist use_fault_overlay=1 ein No-Op.
-    # ----------------------------------------------------------------------
-    # TODO(P7-29): Extract HallSensorMonitor / SyncCoordinator /
-    # FaultManager once there is broader coverage for the current
-    # overflow/runout/jam cross-links. With only smoke coverage,
-    # a zero-behaviour-change split is still too risky.
-
     def __init__(self, config):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
@@ -188,9 +712,11 @@ class BufferFeeder:
         self.use_fault_overlay      = config.getboolean('use_fault_overlay', False)
 
         # ----- Stepper + trapq -----
-        self.motion_queuing = self.printer.load_object(config, 'motion_queuing')
-        self.trapq = self.motion_queuing.allocate_trapq()
-        self.trapq_append = self.motion_queuing.lookup_trapq_append()
+        self.sync = SyncCoordinator(self)
+        self._setup_trapq(config)
+        self.motion_queuing = self.sync.motion_queuing
+        self.trapq = self.sync.trapq
+        self.trapq_append = self.sync.trapq_append
 
         self.stepper = stepper.PrinterStepper(config, units_in_radians=False)
         self.stepper.setup_itersolve('cartesian_stepper_alloc', b'x')
@@ -239,99 +765,20 @@ class BufferFeeder:
         # Stepper enable handle (resolved at connect)
         self._stepper_enable = None
 
-        # ----- Sensor pin state -----
-        #
-        # Polarity convention (matches the old [gcode_button]-based config):
-        #
-        # The Mellow LLL Plus uses a single arm that swings through tilt
-        # positions based on buffer fill level. Each HALL is a photo-
-        # interrupter that is BLOCKED by the arm in its associated tilt
-        # position:
-        #   HALL3 blocked → buffer empty
-        #   HALL2 blocked → buffer full
-        #   HALL1 blocked → overflow
-        #
-        # Electrical: arm-blocked → phototransistor OFF → pullup holds
-        # pin HIGH. Klipper config uses `^!` (pullup + invert), so the
-        # Klipper button callback delivers state=False when pin is HIGH.
-        #   → arm blocked (threshold active)  ⇔  state=False
-        #   → arm not blocking (threshold idle) ⇔  state=True
-        #
-        # The extension then inverts ONCE more below (polarity_flip=True)
-        # so `hall_empty`/`hall_full`/`hall_overflow` return True when
-        # the corresponding threshold is active. This is NOT a double
-        # invert bug — the config `!` handles the PHYSICAL polarity,
-        # the Python flip handles the "button-language vs threshold-
-        # language" semantic shift.
-        #
-        # Entrance switch uses `^!` with state=True = filament present
-        # (standard filament_switch_sensor wiring).
-        # Buttons use `^!` with state=True = pressed.
-        self._pin_raw_state     = {}   # name -> bool (callback state)
-        self._pin_change_time   = {}   # name -> eventtime of last raw change
-        self._pin_stable_state  = {}   # name -> debounced callback state
-        self._pin_polarity_flip = {    # if True: semantic = not state
-            'hall_empty':    True,   # HALL3 arm-blocked → state=False → semantic True
-            'hall_full':     True,   # HALL2 arm-blocked → state=False → semantic True
-            'hall_overflow': True,   # HALL1 arm-blocked → state=False → semantic True
-            'entrance':      False,  # state=True already = filament present
-            'feed_button':   False,  # state=True already = pressed
-            'retract_button': False, # state=True already = pressed
-        }
-        # Initial stable-state defaults — SAFETY-FIRST assumption:
-        # Klipper's buttons.register_buttons only fires initial callbacks
-        # for pins whose logical state != 0 at boot (last_button starts
-        # at 0, changed = new XOR 0). For pins that are in their "idle"
-        # logical state at boot, NO callback is delivered until the
-        # state actually changes.
-        #
-        # Consequence: if we defaulted to "inactive" and a HALL sensor
-        # was already physically active (e.g. HALL2 blocked because the
-        # buffer is already full at Klipper restart), we would never hear
-        # about it — and bang-bang would happily keep filling until
-        # overflow / safety-timeout.
-        #
-        # Fix: default HALLs to "active" (stable=False → semantic=True),
-        # triggering OVERFLOW lockout at boot. As soon as Klipper
-        # delivers an initial callback for pins that are actually idle
-        # (the common case for HALL1), we transition out of lockout.
-        # Entrance and buttons default to "not present / not pressed"
-        # — that is the actual idle state for those switches, and
-        # initial-insert events are further suppressed by the
-        # _startup_grace_done gate below.
-        for name, flip in self._pin_polarity_flip.items():
-            if flip:
-                # HALL sensors: start "active" (raw=False → semantic=True)
-                idle_raw = False
-            else:
-                # Entrance / buttons: start "not active" (raw=False → semantic=False)
-                idle_raw = False
-            self._pin_raw_state[name] = idle_raw
-            self._pin_change_time[name] = 0.0
-            self._pin_stable_state[name] = idle_raw
-
-        # ----- Register pins via buttons module -----
-        buttons = self.printer.load_object(config, 'buttons')
-        self._register_pin(buttons, config, 'hall_empty_pin',      'hall_empty')
-        self._register_pin(buttons, config, 'hall_full_pin',       'hall_full')
-        self._register_pin(buttons, config, 'hall_overflow_pin',   'hall_overflow')
-        self._register_pin(buttons, config, 'entrance_pin',        'entrance')
-        self._register_pin(buttons, config, 'feed_button_pin',     'feed_button')
-        self._register_pin(buttons, config, 'retract_button_pin',  'retract_button')
-
-        # ----- Click detection state -----
-        self._click_count = {BUTTON_FEED: 0, BUTTON_RETRACT: 0}
-        self._last_click_time = {BUTTON_FEED: 0.0, BUTTON_RETRACT: 0.0}
-        self._button_held = {BUTTON_FEED: False, BUTTON_RETRACT: False}
-        # Deferred click summary: ein einziger _respond pro Click-Window,
-        # statt einer Meldung pro Tastendruck. Aktionen feuern weiterhin
-        # sofort (responsives UX), aber die Summary kommt erst nach dem
-        # triple_click_window-Settling — so sieht der User bei einem
-        # Triple-Klick "Triple-Burst" statt "Dauerlauf / Puls / Burst".
-        self._pending_click_msg = {BUTTON_FEED: None, BUTTON_RETRACT: None}
-        self._click_settle_timer = {BUTTON_FEED: None, BUTTON_RETRACT: None}
+        # ----- Sensors + buttons -----
+        self.sensors = HallSensorMonitor(self, config)
+        self._pin_raw_state = self.sensors._pin_raw_state
+        self._pin_change_time = self.sensors._pin_change_time
+        self._pin_stable_state = self.sensors._pin_stable_state
+        self._pin_polarity_flip = self.sensors._pin_polarity_flip
+        self._click_count = self.sensors._click_count
+        self._last_click_time = self.sensors._last_click_time
+        self._button_held = self.sensors._button_held
+        self._pending_click_msg = self.sensors._pending_click_msg
+        self._click_settle_timer = self.sensors._click_settle_timer
 
         # ----- Operation flags -----
+        self.fault = FaultManager(self)
         self._state = STATE_INIT
         # Bang-bang is paused while the printer is in a paused/ended
         # print context (idle_timeout != printing). The flag is armed
@@ -557,12 +1004,7 @@ class BufferFeeder:
 
     def _register_pin(self, buttons, config, config_key, logical_name):
         """Read pin from config and register a raw-state callback."""
-        pin = config.get(config_key)
-
-        def _callback(eventtime, raw_state, _ln=logical_name):
-            self._on_pin_raw_change(eventtime, _ln, bool(raw_state))
-
-        buttons.register_buttons([pin], _callback)
+        return self.sensors.register_pin(buttons, config, config_key, logical_name)
 
     # -----------------------------------------------------------------------
     # Lifecycle
@@ -647,12 +1089,7 @@ class BufferFeeder:
         # Erwartung "Buffer fettet kurz an". Bei HALL1-Boot retract,
         # weil _submit_move forward-rejects bei aktivem hall_overflow.
         try:
-            self._enable_stepper()
-            anchor_dir = -1.0 if self.hall_overflow else 1.0
-            self._submit_move(anchor_dir * 0.05, 10.0)
-            self._wait_for_move_done(direction=int(anchor_dir))
-            self._respond("Stepcompress anchor primed (boot %s 0.05mm)"
-                          % ("retract" if anchor_dir < 0 else "feed"))
+            self._anchor_step()
         except Exception:
             logging.exception("buffer_feeder: boot anchor failed")
         # Drop into normal operation. If HALL1 is currently active,
@@ -804,137 +1241,127 @@ class BufferFeeder:
 
     def _on_pin_raw_change(self, eventtime, name, raw_state):
         """Callback from buttons.register_buttons. Debounce, then dispatch."""
-        if raw_state == self._pin_raw_state[name]:
-            return
-        self._pin_raw_state[name] = raw_state
-        self._pin_change_time[name] = eventtime
-        # Debounce is evaluated on next main tick.
+        return self.sensors.on_pin_raw_change(eventtime, name, raw_state)
 
     def _check_debounce(self, eventtime):
         """Promote raw->stable after hall_debounce_ms."""
-        threshold = self.hall_debounce_ms / 1000.0
-        for name, raw in self._pin_raw_state.items():
-            stable = self._pin_stable_state[name]
-            if stable == raw:
-                continue
-            if (eventtime - self._pin_change_time[name]) >= threshold:
-                self._pin_stable_state[name] = raw
-                self._on_stable_sensor_change(eventtime, name, raw)
+        return self.sensors.check_debounce(eventtime)
 
     def _semantic_state(self, name):
         """Return semantic 'active' bool from stable raw state."""
-        raw = self._pin_stable_state[name]
-        return (not raw) if self._pin_polarity_flip[name] else raw
+        return self.sensors.semantic_state(name)
 
     # Convenience accessors (always up-to-date with debounced state).
     @property
-    def hall_empty(self):    return self._semantic_state('hall_empty')
+    def hall_empty(self):
+        return self.sensors.hall_empty
+
     @property
-    def hall_full(self):     return self._semantic_state('hall_full')
+    def hall_full(self):
+        return self.sensors.hall_full
+
     @property
-    def hall_overflow(self): return self._semantic_state('hall_overflow')
+    def hall_overflow(self):
+        return self.sensors.hall_overflow
+
     @property
     def entrance_detected(self):
-        return self._semantic_state('entrance')
+        return self.sensors.entrance_detected
+
     @property
     def feed_button_pressed(self):
-        return self._semantic_state('feed_button')
+        return self.sensors.feed_button_pressed
+
     @property
     def retract_button_pressed(self):
-        return self._semantic_state('retract_button')
+        return self.sensors.retract_button_pressed
+
+    @property
+    def _stepper_synced_to(self):
+        return self.sync._stepper_synced_to
+
+    @_stepper_synced_to.setter
+    def _stepper_synced_to(self, value):
+        self.sync._stepper_synced_to = value
+
+    @property
+    def _jam_active(self):
+        return self.fault._jam_active
+
+    @_jam_active.setter
+    def _jam_active(self, value):
+        self.fault._jam_active = value
+
+    @property
+    def _hall2_start_time(self):
+        return self.fault._hall2_start_time
+
+    @_hall2_start_time.setter
+    def _hall2_start_time(self, value):
+        self.fault._hall2_start_time = value
+
+    @property
+    def _hall2_start_extruder_pos(self):
+        return self.fault._hall2_start_extruder_pos
+
+    @_hall2_start_extruder_pos.setter
+    def _hall2_start_extruder_pos(self, value):
+        self.fault._hall2_start_extruder_pos = value
+
+    @property
+    def _hall3_start_time(self):
+        return self.fault._hall3_start_time
+
+    @_hall3_start_time.setter
+    def _hall3_start_time(self, value):
+        self.fault._hall3_start_time = value
+
+    @property
+    def _overflow_interrupted_follow(self):
+        return self.fault._overflow_interrupted_follow
+
+    @_overflow_interrupted_follow.setter
+    def _overflow_interrupted_follow(self, value):
+        self.fault._overflow_interrupted_follow = value
+
+    @property
+    def _overflow_resume_mm(self):
+        return self.fault._overflow_resume_mm
+
+    @_overflow_resume_mm.setter
+    def _overflow_resume_mm(self, value):
+        self.fault._overflow_resume_mm = value
+
+    @property
+    def _overflow_resume_dir(self):
+        return self.fault._overflow_resume_dir
+
+    @_overflow_resume_dir.setter
+    def _overflow_resume_dir(self, value):
+        self.fault._overflow_resume_dir = value
+
+    @property
+    def _overflow_resume_spd(self):
+        return self.fault._overflow_resume_spd
+
+    @_overflow_resume_spd.setter
+    def _overflow_resume_spd(self, value):
+        self.fault._overflow_resume_spd = value
+
+    @property
+    def _overflow_interrupted_state(self):
+        return self.fault._overflow_interrupted_state
+
+    @_overflow_interrupted_state.setter
+    def _overflow_interrupted_state(self, value):
+        self.fault._overflow_interrupted_state = value
 
     def _is_hall1_active(self, context):
-        """Central HALL1 policy helper for lockout call sites.
-
-        Returns True wenn der Aufrufer die HALL1-Lockout-Logik ausloesen
-        soll (Reject, _enter_overflow, raise). False wenn ein erlaubter
-        Bypass greift oder HALL1 inaktiv ist.
-
-        Erlaubte context-Werte:
-          'sensor_callback' — _on_stable_sensor_change HALL1-Edge.
-              Bypass: phase3_overflow_ok | UNLOAD_PHASE_3/MANUAL_RETRACT
-              | sync_active.
-          'main_tick'       — _main_tick Auto-OVERFLOW-Transition.
-              Bypass: state in (OVERFLOW/MANUAL_RETRACT/UNLOAD_PHASE_3)
-              | phase3_overflow_ok | sync_active.
-          'submit_move'     — _submit_move Forward-Reject.
-              Bypass: phase3_overflow_ok (Stable-Tracking laeuft selbst).
-          'auto_on'         — _check_auto_ready, _end_startup_grace,
-              _on_idle_printing, cooldown-end. Kein Bypass — HALL1
-              blockiert AUTO immer.
-          'phase3_entry'    — cmd_BUFFER_LOAD_PHASE3 ohne OVERFLOW_OK.
-              Kein Bypass.
-
-        ValueError fuer alle anderen context-Werte (Caller-Bug-Detect).
-        """
-        if not self.hall_overflow:
-            return False
-
-        phase3_overflow_ok = (self._state == STATE_LOAD_PHASE_3
-                              and self._load_phase3_overflow_ok)
-        if context == 'sensor_callback':
-            if phase3_overflow_ok:
-                return False
-            if self._state in (STATE_UNLOAD_PHASE_3, STATE_MANUAL_RETRACT):
-                return False
-            if self._stepper_synced_to is not None:
-                return False
-            return True
-        if context == 'main_tick':
-            if self._state in (STATE_OVERFLOW, STATE_MANUAL_RETRACT,
-                               STATE_UNLOAD_PHASE_3):
-                return False
-            if phase3_overflow_ok:
-                return False
-            if self._stepper_synced_to is not None:
-                return False
-            return True
-        if context == 'submit_move':
-            return not phase3_overflow_ok
-        if context in ('auto_on', 'phase3_entry'):
-            return True
-        raise ValueError("Unknown HALL1 context: %s" % (context,))
+        return self.fault.is_hall1_active(context)
 
     def _on_stable_sensor_change(self, eventtime, name, raw_state):
         """Dispatch stable sensor change to the right handler."""
-        if not self._startup_grace_done:
-            # During startup grace: state was already updated by
-            # _check_debounce; swallow the event so we don't fire
-            # insert / overflow / etc. handlers based on initial
-            # sensor readouts. After grace, main_tick and regular
-            # event paths handle the settled state normally.
-            return
-        if name == 'hall_overflow':
-            if self._is_hall1_active('sensor_callback'):
-                # P7-11: in LOAD_PHASE_3 mit OVERFLOW_OK macht
-                # _load_phase3_tick das HALL1-Stable-Tracking selbst.
-                # Ohne diesen Bypass wuerde der direkte Sensor-Callback-
-                # Pfad _enter_overflow rufen und damit die Stable-Logik
-                # umgehen (state wechselt zu OVERFLOW, Phase 3 bricht ab).
-                # P7-16: UNLOAD-Phasen sind Recovery-Pfade — _main_tick
-                # behandelt UNLOAD_PHASE_X schon als safe-from-overflow
-                # via not-in-Liste; der direkte Sensor-Callback-Pfad
-                # muss konsistent sein, sonst kollidiert ein HALL1-Spike
-                # waehrend Tip-Forming mit dem laufenden UNLOAD-Macro.
-                # _is_hall1_active('sensor_callback') kapselt diese
-                # caller-spezifischen Bypasses.
-                self._enter_overflow()
-            else:
-                self._exit_overflow()
-        elif name == 'hall_full':
-            # Bang-bang reacts in main tick, nothing to do here.
-            pass
-        elif name == 'hall_empty':
-            pass
-        elif name == 'entrance':
-            if self.entrance_detected:
-                self._on_entrance_insert(eventtime)
-            else:
-                self._on_entrance_runout(eventtime)
-        elif name == 'feed_button':
-            self._on_button_change(BUTTON_FEED, self.feed_button_pressed, eventtime)
-        elif name == 'retract_button':
-            self._on_button_change(BUTTON_RETRACT, self.retract_button_pressed, eventtime)
+        return self.sensors.on_stable_sensor_change(eventtime, name, raw_state)
 
     # -----------------------------------------------------------------------
     # Overflow (HALL1) — hard priority
@@ -960,64 +1387,11 @@ class BufferFeeder:
 
     def _clear_recovery_flags(self):
         """Clear jam-related recovery flags reused by cleanup paths."""
-        self._jam_active = False
-        self._hall2_start_time = None
-        self._hall3_start_time = None
+        return self.fault.clear_recovery_flags()
 
     def _resume_after_overflow(self):
         """Restore the pre-overflow workflow if it is still resumable."""
-        interrupted = self._overflow_interrupted_state
-        self._overflow_interrupted_state = None
-
-        # --- Resume follow-feed interrupted by overflow ---
-        if (interrupted == STATE_INITIAL_GRIP
-                and self._overflow_interrupted_follow):
-            self._overflow_interrupted_follow = False
-            if self._overflow_resume_mm > 0:
-                # Re-arm INITIAL_GRIP so the normal follow-completion code
-                # picks up and triggers auto-load when done.
-                self._grip_follow_active = True
-                self._enable_stepper()
-                self._set_state(STATE_INITIAL_GRIP)
-                self._submit_move(
-                    self._overflow_resume_dir * self._overflow_resume_mm,
-                    self._overflow_resume_spd)
-                self._overflow_resume_mm = 0.0
-                return
-            # pending was 0 at overflow time — follow was effectively done.
-            self._overflow_resume_mm = 0.0
-            if self.auto_load_after_follow:
-                if self._hotend_warm():
-                    self._schedule_gcode_script("LOAD_FILAMENT")
-                else:
-                    self._respond(
-                        "Auto-Load übersprungen: Hotend zu kalt"
-                        " (%.0f/%.0f °C)" % (
-                            self._hotend_temp(), self.min_temp))
-            return
-
-        # --- Resume LOAD_PHASE_1 interrupted by overflow ---
-        if interrupted == STATE_LOAD_PHASE_1 and self._overflow_resume_mm > 0:
-            # Restore pending so _wait_for_move_done_resume_on_overflow
-            # (still blocking in the gcode greenlet) resumes naturally,
-            # and _main_tick streams the remaining chunks.
-            self._enable_stepper()
-            self._set_state(STATE_LOAD_PHASE_1)
-            self._pending_remaining_mm = self._overflow_resume_mm
-            self._pending_direction = self._overflow_resume_dir
-            self._pending_speed = self._overflow_resume_spd
-            self._overflow_resume_mm = 0.0
-            return
-
-        # --- Normal overflow recovery: no move to resume ---
-        self._overflow_resume_mm = 0.0
-        # Re-arm bang-bang ONLY if filament present and no operator lockout.
-        if (self.entrance_detected
-                and not self._auto_off_by_user
-                and not self._bang_bang_suspended
-                and not self._halt_requested):
-            self._enable_stepper()
-            self._set_state(STATE_AUTO)
+        return self.fault.resume_after_overflow()
 
     def _exit_overflow(self):
         if self._state != STATE_OVERFLOW:
@@ -1032,246 +1406,32 @@ class BufferFeeder:
     # -----------------------------------------------------------------------
 
     def _on_entrance_insert(self, eventtime):
-        self._respond("Filament at entrance detected")
-        # If we were mid-runout-follow (externer Sensor-Modus), abbrechen.
-        if self._runout_follow_active:
-            self._runout_follow_active = False
-            self._runout_filament_ref = None
-            self._respond("Runout-follow cancelled (filament re-inserted)")
-        # Edge-triggered auto-grip: only proceed with the default
-        # IDLE→INITIAL_GRIP path if we've observed the entrance being
-        # EMPTY at some point since boot. Boot with filament already
-        # at the entrance → _entrance_was_empty stays False → no
-        # silent auto-grip. User can still trigger manually via
-        # FORCE_BUFFER_FILL. Explicit runout / user-pull events
-        # flip the flag so the next real re-insert auto-grips.
-        # RUNOUT/suspend/auto_off/halt path guards below still apply.
-        will_auto_grip = (self._state == STATE_IDLE
-                          and not self._bang_bang_suspended
-                          and not self._auto_off_by_user
-                          and not self._halt_requested
-                          and self._entrance_was_empty)
-        # Reset the flag now — we've consumed the edge.
-        self._entrance_was_empty = False
-        # RUNOUT (runout_pause=1): the print has been PAUSE'd. Spec §5
-        # says a reinsert clears RUNOUT but does NOT auto-grip —
-        # grip during a paused print would queue unexpected motion.
-        # Arm _runout_recovery_pending so that the next RESUME
-        # (_on_idle_printing) specifically triggers grip+fill for
-        # THIS reinsert, not for any unrelated IDLE-state entering
-        # printing. Operators who want a manual fill before RESUME
-        # can call BUFFER_AUTO_OFF + FORCE_BUFFER_FILL.
-        if self._state == STATE_RUNOUT:
-            self._set_state(STATE_IDLE)
-            self._runout_recovery_pending = True
-            self._respond("Reinsert during RUNOUT — cleared. Call "
-                          "RESUME to continue (grip + fill runs "
-                          "automatically), or BUFFER_AUTO_OFF + "
-                          "FORCE_BUFFER_FILL for manual refill first.")
-            return
-        # Suppress auto-grip while bang-bang is suspended (print-PAUSE).
-        if self._bang_bang_suspended:
-            self._respond("Reinsert during paused print — auto-grip suppressed. "
-                          "Use FORCE_BUFFER_FILL to trigger manually after RESUME.")
-            return
-        # Respect explicit operator decision to keep AUTO off.
-        # Reinsert after BUFFER_AUTO_OFF should NOT auto-grip —
-        # the user specifically disabled the feeder.
-        if self._auto_off_by_user:
-            self._respond("Reinsert while AUTO is off (operator-disabled) — "
-                          "auto-grip suppressed. Use FORCE_BUFFER_FILL to trigger.")
-            return
-        # Normal idle-state reinsert: kick off initial grip, but
-        # only if we've actually seen an empty→present transition
-        # (edge flag above). Boot with filament already present does
-        # NOT trigger grip — operator runs FORCE_BUFFER_FILL if they
-        # want a fresh fill.
-        if will_auto_grip:
-            self._start_initial_grip(eventtime)
-        else:
-            self._respond("Entrance already had filament at boot — "
-                          "no auto-grip. Use FORCE_BUFFER_FILL to "
-                          "fill the buffer manually.")
+        return self.sensors.on_entrance_insert(eventtime)
 
     def _on_entrance_runout(self, eventtime):
-        # Arm the edge-detect flag: we've now seen the entrance go
-        # empty. The NEXT entrance-True callback (re-insert) will be
-        # treated as a genuine operator insert event and will
-        # auto-grip (subject to the usual lockout / AUTO_OFF checks).
-        self._entrance_was_empty = True
-        # Planned filament exit: suppress during LOAD/UNLOAD/MANUAL.
-        if self._state in (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2, STATE_LOAD_PHASE_3,
-                           STATE_UNLOAD_PHASE_3, STATE_MANUAL_FEED,
-                           STATE_MANUAL_RETRACT):
-            return
-
-        if not self._print_running:
-            # Not printing: just stop feeder, return to IDLE.
-            self._respond("Entrance runout outside print — stepper off")
-            self._continuous_feed = False
-            self._halt_motion()
-            self._set_state(STATE_IDLE)     # calls _schedule_stepper_disable
-            return
-
-        # Printing: branch on runout_pause policy.
-        if self.runout_pause:
-            self._respond("Runout during print — PAUSE (runout_pause=1)")
-            self._continuous_feed = False
-            self._halt_motion()
-            self._schedule_stepper_disable()
-            self._set_state(STATE_RUNOUT)
-            self._gcode_run_script("PAUSE")
-        else:
-            # runout_pause=0: externer Sensor übernimmt PAUSE. Wir lassen
-            # Bang-Bang in AUTO weiterlaufen (Feeder fördert noch den
-            # Rest-Weg hinterher), aber zählen die Extruder-Distanz
-            # mit. Nach runout_follow_mm Extrusion → Stepper aus.
-            # State bleibt wie er ist (typisch AUTO); _runout_follow_active
-            # Flag steuert die Distanz-Überwachung in _main_tick.
-            self._respond("Runout — external sensor mode, %dmm follow" % int(self.runout_follow_mm))
-            try:
-                ps = self.printer.lookup_object('print_stats')
-                self._runout_filament_ref = ps.get_status(eventtime).get('filament_used', 0.0)
-            except Exception:
-                self._runout_filament_ref = 0.0
-            self._runout_follow_active = True
+        return self.sensors.on_entrance_runout(eventtime)
 
     # -----------------------------------------------------------------------
     # Button events
     # -----------------------------------------------------------------------
 
     def _on_button_change(self, button_name, pressed, eventtime):
-        if pressed:
-            self._button_held[button_name] = True
-            self._on_button_press(button_name, eventtime)
-        else:
-            was_held = self._button_held[button_name]
-            self._button_held[button_name] = False
-            if was_held:
-                self._on_button_release(button_name, eventtime)
+        return self.sensors.on_button_change(button_name, pressed, eventtime)
 
     def _ensure_click_settle_timer(self, button_name):
-        if self._click_settle_timer[button_name] is None:
-            cb = lambda et, b=button_name: self._click_settle_fire(b, et)
-            self._click_settle_timer[button_name] = self.reactor.register_timer(cb)
+        return self.sensors.ensure_click_settle_timer(button_name)
 
     def _set_pending_click_msg(self, button_name, msg):
-        """Speichert die Click-Summary-Meldung; wird nach
-        triple_click_window via Reactor-Timer ausgegeben. Spätere Aufrufe
-        im selben Fenster überschreiben die frühere Meldung — bei Triple-
-        Klick erscheint also nur "Triple-Burst" und nicht zusätzlich die
-        Single-/Double-Zwischenstufen."""
-        self._pending_click_msg[button_name] = msg
-        self._ensure_click_settle_timer(button_name)
-        fire_time = self.reactor.monotonic() + self.triple_click_window
-        self.reactor.update_timer(self._click_settle_timer[button_name], fire_time)
+        return self.sensors.set_pending_click_msg(button_name, msg)
 
     def _click_settle_fire(self, button_name, eventtime):
-        msg = self._pending_click_msg[button_name]
-        self._pending_click_msg[button_name] = None
-        if msg is not None:
-            self._respond(msg)
-        return self.reactor.NEVER
+        return self.sensors.click_settle_fire(button_name, eventtime)
 
     def _on_button_press(self, button_name, eventtime):
-        # Retract während OVERFLOW darf durch — entladen ist die einzige
-        # sinnvolle Recovery, wenn der Buffer überfüllt ist. Feed bleibt
-        # blockiert (würde Overflow nur verschlimmern). Forward-Submits
-        # werden zusätzlich in _submit_move per Direction-Check rejected.
-        retract_overflow_override = (
-            button_name == BUTTON_RETRACT
-            and (self._state == STATE_OVERFLOW or self.hall_overflow)
-            and self._state != STATE_JAM
-        )
-
-        # Block manual buttons during LOAD/UNLOAD/OVERFLOW/JAM.
-        # Also block if HALL1 is physically active — covers the race
-        # where AUTO_OFF/STOP_BUFFER_FILL reset state to IDLE before
-        # the next main_tick re-asserts OVERFLOW.
-        block_states = (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2, STATE_LOAD_PHASE_3,
-                        STATE_UNLOAD_PHASE_3, STATE_OVERFLOW, STATE_JAM,
-                        STATE_INITIAL_GRIP)
-        if self._state in block_states and not retract_overflow_override:
-            hint = ""
-            if self._state == STATE_JAM:
-                hint = " — fix the cause, then BUFFER_CLEAR_JAM"
-            elif self._state == STATE_OVERFLOW:
-                hint = " — clear HALL1 (lockout releases automatically); retract button is allowed"
-            elif self._state in (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2,
-                                 STATE_LOAD_PHASE_3, STATE_UNLOAD_PHASE_3):
-                hint = " — wait for LOAD/UNLOAD to finish, or BUFFER_HALT"
-            elif self._state == STATE_INITIAL_GRIP:
-                hint = " — wait for grip to finish, or STOP_BUFFER_FILL"
-            # Deferred: nur EINE "Button ignored"-Meldung pro Click-Window.
-            self._set_pending_click_msg(button_name,
-                "Button ignored — state=%s%s" % (self._state, hint))
-            return
-        if self.hall_overflow and not retract_overflow_override:
-            self._set_pending_click_msg(button_name,
-                "Button ignored — HALL1 overflow physically active "
-                "(retract button still works to recover)")
-            return
-
-        # MEASURE_LOAD toggle-mode overrides normal click logic on feed button.
-        # _measure_feeding drives the toggle explicitly so a prior AUTO
-        # bang-bang state does not pre-bias the first click.
-        if button_name == BUTTON_FEED and self._measure_load_active:
-            if self._measure_feeding:
-                # 2nd click — stop.
-                self._measure_feeding = False
-                self._continuous_feed = False
-                self._halt_motion()
-                self._measure_report()
-                self._measure_load_active = False
-                self._set_state(STATE_IDLE)
-            else:
-                # 1st click — start.
-                # Use _submit_move (pending-streaming) instead of
-                # _start_continuous_motion so chunks are queued back-to-back
-                # without the lead_time gap that continuous chunking introduces.
-                # The gap (0.3 s per 10 mm chunk) made the feeder appear to
-                # stop between chunks, causing operators to press stop early.
-                self._measure_feeding = True
-                self._measure_load_distance = 0.0
-                self._submit_move(self.max_feed_distance, self.manual_speed)
-                self._set_state(STATE_MANUAL_FEED)
-                self._respond("MEASURE_LOAD: feeder running — click again to stop")
-            return
-
-        now = eventtime
-        if (now - self._last_click_time[button_name]) > self.triple_click_window:
-            self._click_count[button_name] = 1
-        else:
-            self._click_count[button_name] += 1
-        self._last_click_time[button_name] = now
-
-        cnt = self._click_count[button_name]
-        if cnt == CLICK_SINGLE:
-            self._action_manual_start(button_name)
-        elif cnt == CLICK_DOUBLE:
-            # Stop any ongoing manual, do a pulse.
-            self._continuous_feed = False
-            self._halt_motion()
-            self._action_manual_pulse(button_name)
-        elif cnt >= CLICK_TRIPLE:
-            self._click_count[button_name] = 0
-            self._continuous_feed = False
-            self._halt_motion()
-            if button_name == BUTTON_FEED and not self.feed_burst_enabled:
-                # Feed burst disabled: restart manual run.
-                self._action_manual_start(button_name)
-            else:
-                self._action_burst(button_name)
+        return self.sensors.on_button_press(button_name, eventtime)
 
     def _on_button_release(self, button_name, eventtime):
-        # Any release stops continuous motion (was started on single-click).
-        if self._continuous_feed:
-            desired_dir = +1 if button_name == BUTTON_FEED else -1
-            if self._continuous_feed_direction == desired_dir and not self._measure_load_active:
-                self._continuous_feed = False
-                self._halt_motion()
-                if self._state in (STATE_MANUAL_FEED, STATE_MANUAL_RETRACT):
-                    self._start_cooldown()
+        return self.sensors.on_button_release(button_name, eventtime)
 
     def _action_manual_start(self, button_name):
         direction = +1 if button_name == BUTTON_FEED else -1
@@ -2226,23 +2386,7 @@ class BufferFeeder:
         BUFFER_CLEAR_JAM genutzt, das den JAM-Lockout selbst bereits
         aufloest und nur die anderen Guards weiter abfragen will.
         """
-        if self._is_hall1_active('auto_on') or self._state == STATE_OVERFLOW:
-            return "HALL1 overflow active"
-        if not allow_jam and (self._state == STATE_JAM or self._jam_active):
-            return ("JAM active — inspect and call BUFFER_CLEAR_JAM, "
-                    "or BUFFER_AUTO_OFF first.")
-        if self._state in BUSY_PHASE_STATES:
-            return ("LOAD/UNLOAD in progress (state=%s) — call "
-                    "STOP_BUFFER_FILL to abort first." % self._state)
-        # Print-PAUSE suspension is owned by idle_timeout; user must
-        # RESUME the print before bang-bang can re-engage. Allowing
-        # AUTO to clear this flag would defeat the documented
-        # pause-until-RESUME semantic (spec §5).
-        if self._bang_bang_suspended:
-            return ("print is paused (bang-bang suspended). RESUME the "
-                    "print — bang-bang re-engages automatically. If the "
-                    "print is already finished, use BUFFER_AUTO_OFF first.")
-        return None
+        return self.fault.check_auto_ready(allow_jam=allow_jam)
 
     cmd_BUFFER_AUTO_ON_help = "Enable bang-bang auto mode"
     def cmd_BUFFER_AUTO_ON(self, gcmd):
@@ -2659,6 +2803,15 @@ class BufferFeeder:
         # konsistent mit den anderen vier Recovery-Pfaden.)
         self._clear_recovery_flags()
 
+    def _setup_trapq(self, config):
+        return self.sync.setup_trapq(config)
+
+    def _anchor_step(self):
+        return self.sync.anchor_step()
+
+    def _sync_to_extruder(self, extruder_name):
+        return self.sync.sync_to_extruder(extruder_name)
+
     cmd_BUFFER_SYNC_TO_EXTRUDER_help = ("Sync buffer-feeder stepper to the named "
                                          "extruder's trapq for parallel motion. "
                                          "Optional: EXTRUDER=<name> (default: extruder)")
@@ -2675,23 +2828,7 @@ class BufferFeeder:
         # Stepcompress-Cursor-Etablierung: solange der gemeinsame Trapq
         # aktiv ist, ist der Buffer-Stepper-last_step_clock immer frisch.
         extruder_name = gcmd.get('EXTRUDER', 'extruder')
-        extruder = self.printer.lookup_object(extruder_name)
-        if not hasattr(extruder, 'get_trapq'):
-            raise self._cmd_error(
-                "Object '%s' is not an extruder (no get_trapq method)"
-                % extruder_name)
-        toolhead = self.printer.lookup_object('toolhead')
-        toolhead.flush_step_generation()
-        # set_position vor set_trapq, mainline-parity (extruder.py:989-991).
-        self.stepper.set_position((0., 0., 0.))
-        self.stepper.set_trapq(extruder.get_trapq())
-        self.motion_queuing.check_step_generation_scan_windows()
-        self._stepper_synced_to = extruder_name
-        # Stepcompress ist jetzt durch echte Extruder-Aktivitaet primed.
-        self._stepcompress_primed = True
-        self._enable_stepper()
-        self._respond("Buffer-Feeder synced to '%s' — follows extruder moves"
-                      % extruder_name)
+        self._sync_to_extruder(extruder_name)
 
     def _unsync_if_synced(self):
         """Idempotent unsync helper. Cleanup-Pfade (BUFFER_HALT,
@@ -2699,22 +2836,7 @@ class BufferFeeder:
         zwischen SYNC_TO_EXTRUDER und UNSYNC abgebrochenes Macro nicht
         den Stepper am Extruder-Trapq zurueck laesst (P7-24).
         """
-        if self._stepper_synced_to is None:
-            return False
-        toolhead = self.printer.lookup_object('toolhead')
-        toolhead.flush_step_generation()
-        self.stepper.set_position((0., 0., 0.))
-        self.stepper.set_trapq(self.trapq)
-        self.motion_queuing.check_step_generation_scan_windows()
-        self._stepper_synced_to = None
-        self._commanded_pos = 0.0
-        # _last_move_end_time auf jetzt+lead_time clampen, damit naechster
-        # eigener Submit nicht in der Vergangenheit landet (boot-fix-style).
-        mcu = self.stepper.get_mcu()
-        now_pt = mcu.estimated_print_time(self.reactor.monotonic())
-        self._last_move_end_time = max(self._last_move_end_time,
-                                       now_pt + self.lead_time)
-        return True
+        return self.sync.unsync_if_synced()
 
     cmd_BUFFER_UNSYNC_help = "Unsync buffer-feeder stepper back to its own trapq"
     def cmd_BUFFER_UNSYNC(self, gcmd):
