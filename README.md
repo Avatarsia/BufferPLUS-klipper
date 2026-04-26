@@ -132,42 +132,138 @@ Alle Parameter leben im `[buffer_feeder mellow]`-Block in `lll.cfg`.
 Sinnvolle Defaults sind gesetzt — Pflicht-Kalibrierwerte sind mit **!!**
 markiert.
 
-| Gruppe | Parameter | Default | Bedeutung |
-|---|---|---|---|
-| **Stepper** | `rotation_distance` **!!** | 18.86 | 1:1-kalibriert, siehe [Kalibrierung](#kalibrierung) |
-| **Speeds** | `feed_speed` | 30 mm/s | Bang-Bang Auto-Refill |
-| | `manual_speed` | 15 mm/s | Taster Dauerlauf |
-| | `burst_speed` | 50 mm/s | Triple-Click Burst |
-| | `load_fast_speed` | 50 mm/s | LOAD Phase 1+3 |
-| | `load_slow_speed` | 5 mm/s | LOAD Phase 3 (Extruder-Push ins Hotend) |
-| | `grip_speed` | 55 mm/s | Initial-Grip |
-| | `accel` | 1000 mm/s² | Feeder-Beschleunigung |
-| **Distanzen** | `manual_chunk_distance` | 10 mm | 2-Klick-Puls-Distanz |
-| | `burst_distance` | 1300 mm | Triple-Click Retract-Burst |
-| | `grip_duration` | 10 s | Initial-Grip-Dauer |
-| | `load_fast_distance` **!!** | 1000 mm | Kalibriert via MEASURE_LOAD_START |
-| | `load_slow_distance` **!!** | 100 mm | Heatbreak-Push + Nozzle-Purge |
-| | `load_buffer_max` | 2000 mm | LOAD Phase 3 Timeout |
-| | `unload_sync_distance` **!!** | 250 mm | Muss ≥ load_slow_distance; Extruder-Anlauf zum sicheren Heatbreak-Austritt |
-| | `unload_fast_max` | 2510 mm | UNLOAD Phase 3 Polling-Timeout |
-| **Safety** | `max_feed_time` | 60 s | Max Dauerfeed ohne HALL2 |
-| | `max_feed_distance` | 3000 mm | Alternative Grenze |
-| | `hall_debounce_ms` | 50 | Sensor-Debounce |
-| | `lead_time` | 0.3 s | Move-Scheduling-Lead |
-| **Jam** | `jam_detection_enabled` | 1 | 0 deaktiviert komplett |
-| | `jam_clog_dwell_time` | 60 s | HALL2-Dauer für Clog-Detektion |
-| | `jam_clog_extrude_min` | 30 mm | Mindest-Extrusion in der Zeit |
-| | `jam_supply_dwell_time` | 120 s | HALL3-Dauer für Supply-Jam |
-| | `jam_action` | PAUSE | Action bei Jam |
-| **Runout** | `runout_pause` | 0 | 0=externer Sensor, 1=intern PAUSE |
-| | `runout_follow_mm` | 100 mm | Nachlauf bei runout_pause=0 |
-| **Button/UI** | `triple_click_window` | 1.5 s | Max Zeit zwischen 3 Klicks |
-| | `feed_burst_enabled` | 0 | 1 = Feed-Taster 3x = Burst |
-| | `reenable_cooldown` | 1.0 s | Nach Manual-Op bis AUTO |
-| | `reenable_cooldown_fast` | 0.5 s | Nach Burst |
-| | `display_status_enabled` | 1 | M117 an/aus |
-| **Initial-Fill** | `auto_load_after_follow` | 0 | 1 = nach Grip LOAD falls heiß |
-| | `min_temp` | 180 °C | LOAD/UNLOAD Hotend-Check |
+### Pflicht-Pins
+
+```ini
+[buffer_feeder mellow]
+hall_empty_pin:       ^!buttons:HALL_EMPTY        # HALL3 (Buffer leer)
+hall_full_pin:        ^!buttons:HALL_FULL         # HALL2 (Buffer voll)
+hall_overflow_pin:    ^!buttons:HALL_OVERFLOW     # HALL1 (Hardware-Lockout)
+entrance_pin:         ^!buttons:BUFFER_ENTRANCE   # Filament-Eingang
+feed_button_pin:      ^!buttons:BTN_FEED          # Operator-Taster
+retract_button_pin:   ^!buttons:BTN_RETRACT       # Operator-Taster
+```
+
+Pin-Format ist Klipper-Standard (`^!` = Pull-Up + invertiert für `buttons`-Modul).
+
+### Stepper
+
+| Parameter | Default | Bedeutung |
+|---|---|---|
+| `rotation_distance` **!!** | 18.86 | 1:1-kalibriert, siehe [Kalibrierung](#kalibrierung) |
+
+### Geschwindigkeiten [mm/s]
+
+| Parameter | Default | Bedeutung |
+|---|---|---|
+| `feed_speed` | 30 | Bang-Bang Auto-Refill |
+| `manual_speed` | 15 | Taster Dauerlauf |
+| `burst_speed` | 50 | Triple-Click Burst |
+| `load_fast_speed` | 50 | LOAD Phase 1 (Feeder allein) |
+| `load_slow_speed` | 5 | LOAD Phase 3 (Extruder-Push ins Hotend) |
+| `unload_fast_speed` | 50 | UNLOAD Final-Retract |
+| `grip_speed` | 55 | Initial-Grip Burst |
+| `accel` | 1000 | Feeder-Beschleunigung [mm/s²] |
+| `grip_follow_speed` | 30 | Speed des Auto-Follow nach Grip |
+
+### Distanzen [mm] / Dauern [s]
+
+| Parameter | Default | Bedeutung |
+|---|---|---|
+| `manual_chunk_distance` | 10 | 2-Klick-Puls-Distanz |
+| `burst_distance` | 1300 | Triple-Click Retract-Burst |
+| `grip_duration` | 10 s | Initial-Grip-Dauer |
+| `grip_follow_distance` | 0 | Optional: Auto-Follow nach Grip (0 = aus) |
+| `load_fast_distance` **!!** | 1000 | Kalibriert via MEASURE_LOAD_START |
+| `load_slow_distance` **!!** | 180 | Heatbreak-Push + Nozzle-Purge |
+| `load_buffer_max` | 2000 | LOAD Phase 3 Timeout |
+| `unload_sync_distance` **!!** | 180 | Muss ≥ load_slow_distance; Extruder-Anlauf zum sicheren Heatbreak-Austritt |
+| `unload_fast_max` | 2510 | UNLOAD Phase 3 Polling-Timeout |
+
+### Safety / Move-Scheduling
+
+| Parameter | Default | Bedeutung |
+|---|---|---|
+| `max_feed_time` | 60 s | Watchdog Phase 3 → JAM |
+| `max_feed_distance` | 3000 mm | Watchdog Forward-Feed → JAM |
+| `hall_debounce_ms` | 50 | Sensor-Debounce |
+| `lead_time` | 0.3 s | Move-Scheduling-Lead |
+| `max_move_chunk_mm` | 50 mm | Chunk-Cap für Abort-Latency (große Moves werden gechunked) |
+| `min_temp` | 180 °C | LOAD/UNLOAD Hotend-Check |
+
+### Jam-Detection
+
+| Parameter | Default | Bedeutung |
+|---|---|---|
+| `jam_detection_enabled` | True | Master-Schalter |
+| `jam_clog_dwell_time` | 60 s | HALL2-Dauer für Clog-Detektion |
+| `jam_clog_extrude_min` | 30 mm | Mindest-Extrusion in der Zeit |
+| `jam_supply_dwell_time` | 120 s | HALL3-Dauer für Supply-Jam |
+| `jam_action` | PAUSE | `PAUSE` / `CANCEL` / `NONE` |
+
+### Runout / Auto-Verhalten
+
+| Parameter | Default | Bedeutung |
+|---|---|---|
+| `runout_pause` | False | 0=externer Sensor, 1=intern PAUSE |
+| `runout_follow_mm` | 100 mm | Nachlauf bei runout_pause=0 |
+| `auto_load_after_follow` | False | Auto-LOAD nach Grip falls heiß |
+| `auto_engage_on_print_start` | True | Bang-bang bei Print-Start aktivieren |
+| `auto_engage_on_boot` | True | Bang-bang bei Klipper-Boot aktivieren wenn Filament am Eingang |
+
+### Buttons / Cooldown
+
+| Parameter | Default | Bedeutung |
+|---|---|---|
+| `triple_click_window` | 1.5 s | Max Zeit zwischen 3 Klicks |
+| `feed_burst_enabled` | False | 1 = Feed-Taster 3x = Burst statt manual_start |
+| `reenable_cooldown` | 1.0 s | Nach Manual-Op bis AUTO |
+| `reenable_cooldown_fast` | 0.5 s | Nach Burst |
+
+### Architektur-Flags
+
+| Parameter | Default | Bedeutung |
+|---|---|---|
+| `use_python_unload` | 0 | UNLOAD via Python (try/finally Cleanup garantiert) statt Macro. Empfohlen: 1. |
+| `use_fault_overlay` | False | Fault-Overlay-Migration (aktuell nur LOAD_PHASE_3 aktiv, Scaffold für künftige Migration). Nicht in Produktion umstellen. |
+
+### Macro-Variablen
+
+In `lll.cfg` definiert, via Mainsail oder SAVE_VARIABLES überschreibbar:
+
+```ini
+[gcode_macro LOAD_FILAMENT]
+variable_auto_heat_target: 250    # Auto-Heat-Target wenn Hotend < min_temp
+
+[gcode_macro UNLOAD_FILAMENT_LEGACY]
+variable_tip_cycles:        4     # Push/Pull-Zyklen beim Tip-Forming
+variable_tip_push:          8     # mm vorwärts pro Zyklus
+variable_tip_pull:         10     # mm rückwärts pro Zyklus
+variable_tip_speed:        20     # mm/s während Tip-Forming
+variable_tip_final_retract: 25    # Final-Retract Distanz
+variable_tip_final_speed:  50     # Final-Retract Speed
+variable_auto_heat_target: 250    # wie oben
+```
+
+> Hinweis: Der **Python-Pfad** (`use_python_unload=1`) liest die `variable_*`-Slots
+> nicht — er nimmt seine Defaults direkt aus dem Code (`tip_cycles=4`,
+> `tip_push=8.0`, ..., `auto_heat_target=250`). Wenn du SAVE_VARIABLES-Overrides
+> nutzt, gib sie direkt als Argument mit (siehe nächster Abschnitt) oder bleib
+> beim Legacy-Macro.
+
+### Runtime-Override beim UNLOAD
+
+Beide Branches (`UNLOAD_FILAMENT` mit `use_python_unload=0` und
+`BUFFER_UNLOAD_FILAMENT BUFFER=mellow` direkt) akzeptieren diese Parameter:
+
+```
+UNLOAD_FILAMENT TIP_CYCLES=2 TIP_PUSH=6 TIP_PULL=12 \
+                TIP_SPEED=15 TIP_FINAL_RETRACT=30 TIP_FINAL_SPEED=40 \
+                SYNC_DIST=200 FAST_SPD=40 MAX_DISTANCE=2000 \
+                AUTO_HEAT_TARGET=240 EXTRUDER=extruder
+```
+
+Alle Parameter optional — Defaults aus Config-/Macro-Variablen.
 
 ---
 
