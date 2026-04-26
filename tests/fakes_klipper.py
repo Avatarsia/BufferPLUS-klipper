@@ -1,21 +1,31 @@
 class FakeReactor:
+    NOW = 0.0
     NEVER = float("inf")
+    MONOTONIC_STEP = 0.001
 
     def __init__(self):
         self.now = 0.0
         self.timers = []
+        self.callback_registrations = []
 
     def register_timer(self, callback, when=None):
         timer = {"callback": callback, "when": when}
         self.timers.append(timer)
         return timer
 
+    def register_callback(self, callback, when=None):
+        registration = {"callback": callback, "when": when}
+        self.callback_registrations.append(registration)
+        return registration
+
     def unregister_timer(self, timer):
         if timer in self.timers:
             self.timers.remove(timer)
 
     def monotonic(self):
-        return self.now
+        current = self.now
+        self.now = round(self.now + self.MONOTONIC_STEP, 6)
+        return current
 
     def pause(self, when):
         self.now = max(self.now, when)
@@ -26,7 +36,8 @@ class FakeGCode:
     def __init__(self):
         self.commands = {}
         self.info_messages = []
-        self.scripts = []
+        self.script_invocations = []
+        self.scripts = self.script_invocations
 
     def register_command(self, name, handler, desc=None):
         self.commands[name] = {
@@ -38,10 +49,10 @@ class FakeGCode:
         self.info_messages.append(message)
 
     def run_script(self, script):
-        self.scripts.append(("run_script", script))
+        self.script_invocations.append(("run_script", script))
 
     def run_script_from_command(self, script):
-        self.scripts.append(("run_script_from_command", script))
+        self.script_invocations.append(("run_script_from_command", script))
 
     def error(self, message):
         return RuntimeError(message)
@@ -50,9 +61,25 @@ class FakeGCode:
 class FakeButtons:
     def __init__(self):
         self.registrations = []
+        self.callbacks_by_pin = {}
+        self.trigger_calls = []
+        self._next_eventtime = 0.0
 
     def register_buttons(self, pins, callback):
         self.registrations.append((tuple(pins), callback))
+        for pin in pins:
+            self.callbacks_by_pin.setdefault(pin, []).append(callback)
+
+    def trigger_pin(self, pin_name, raw_state):
+        callbacks = self.callbacks_by_pin.get(pin_name)
+        if not callbacks:
+            raise KeyError(pin_name)
+        eventtime = self._next_eventtime
+        self._next_eventtime = round(self._next_eventtime + 0.001, 6)
+        self.trigger_calls.append((pin_name, raw_state, eventtime))
+        for callback in callbacks:
+            callback(eventtime, raw_state)
+        return eventtime
 
 
 class FakeMotionQueuing:
@@ -60,7 +87,8 @@ class FakeMotionQueuing:
         self.trapqs = []
         self.append_calls = []
         self.scan_window_checks = 0
-        self.activity = []
+        self.note_mcu_movequeue_activity_calls = []
+        self.activity = self.note_mcu_movequeue_activity_calls
 
     def allocate_trapq(self):
         trapq = object()
@@ -76,7 +104,7 @@ class FakeMotionQueuing:
         self.scan_window_checks += 1
 
     def note_mcu_movequeue_activity(self, end_time):
-        self.activity.append(end_time)
+        self.note_mcu_movequeue_activity_calls.append(end_time)
 
 
 class FakeMCU:
@@ -158,6 +186,7 @@ class FakePrinterStepper:
         self.units_in_radians = units_in_radians
         self.name = config.get_name()
         self.trapq = None
+        self.trapq_sets = []
         self.position = (0.0, 0.0, 0.0)
         self.itersolve = None
         self.mcu = FakeMCU()
@@ -167,6 +196,13 @@ class FakePrinterStepper:
 
     def set_trapq(self, trapq):
         self.trapq = trapq
+        self.trapq_sets.append(trapq)
+
+    @property
+    def last_trapq_set(self):
+        if not self.trapq_sets:
+            return None
+        return self.trapq_sets[-1]
 
     def set_position(self, position):
         self.position = position
