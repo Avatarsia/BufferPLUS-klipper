@@ -409,13 +409,16 @@ Deaktivieren mit `jam_detection_enabled: 0` in der Config.
 Phase 1: BUFFER_LOAD_PHASE1 BUFFER=mellow
          Feeder allein schnell (load_fast_speed) load_fast_distance mm
          bis kurz vor den Toolhead.
-Phase 2: BUFFER_LOAD_PHASE3 BUFFER=mellow
-         Feeder füllt den Buffer bis HALL2 auslöst (oder load_buffer_max).
-         HALL2 = Sensor-Bestätigung dass das Filament gestaged ist
-         und der Pfad bis zum Toolhead frei.
-Phase 3: G1 E{load_slow_distance} F{load_slow_speed*60}, M400
-         Extruder schiebt das Filament durchs Heatbreak ins Hotend.
-         Der eigentliche Lade-Schritt am Druckkopf — Feeder steht.
+Phase 2: BUFFER_LOAD_PHASE3 BUFFER=mellow STABLE_TIMEOUT=10 OVERFLOW_OK=1
+         Feeder füllt den Buffer bis HALL2 (oder HALL1 bei Wiederhol-LOAD)
+         10s stable auslöst. HALL2 = Sensor-Bestätigung dass das
+         Filament gestaged ist und der Pfad bis zum Toolhead frei.
+Phase 3: BUFFER_SYNC_TO_EXTRUDER → G1 E{load_slow_distance} → BUFFER_UNSYNC
+         Buffer-Stepper folgt Extruder-Trapq 1:1. Extruder schiebt das
+         Filament durchs Heatbreak ins Hotend, Buffer-Stepper pumpt
+         synchron Filament vom Spool nach (kein Sliding durch den Buffer
+         möglich, mechanisch garantierte Mitarbeit). Symmetrisch zum
+         UNLOAD-Tip-Forming.
 ```
 
 `BUFFER_LOAD_PHASE2` (parallel feeder+extruder) bleibt als G-Code-
