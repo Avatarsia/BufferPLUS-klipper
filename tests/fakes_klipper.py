@@ -40,6 +40,7 @@ class FakeReactor:
 class FakeGCode:
     def __init__(self):
         self.commands = {}
+        self.mux_commands = {}
         self.info_messages = []
         self.script_invocations = []
         self.scripts = self.script_invocations
@@ -49,6 +50,22 @@ class FakeGCode:
             "handler": handler,
             "desc": desc,
         }
+
+    def register_mux_command(self, name, mux_key, mux_value, handler, desc=None):
+        # Klipper-Mainline-Pattern: gleicher command-Name ueber mehrere
+        # Instanzen, dispatcher waehlt via mux_value. Tests, die das
+        # Mux-Routing inspizieren wollen, finden in mux_commands die
+        # vollstaendige Registrierungs-Liste.
+        self.commands[name] = {
+            "handler": handler,
+            "desc": desc,
+        }
+        self.mux_commands.setdefault(name, []).append({
+            "mux_key": mux_key,
+            "mux_value": mux_value,
+            "handler": handler,
+            "desc": desc,
+        })
 
     def respond_info(self, message):
         self.info_messages.append(message)
