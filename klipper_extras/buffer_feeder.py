@@ -159,6 +159,7 @@ class BufferFeeder:
         # falls der Buffer beim Boot trotz Filament im IDLE bleiben soll.
         self.auto_engage_on_boot = config.getboolean('auto_engage_on_boot', True)
         self.min_temp               = config.getfloat('min_temp', 180., minval=0.)
+        self.use_python_unload      = config.getint('use_python_unload', 0)
 
         # ----- Stepper + trapq -----
         self.motion_queuing = self.printer.load_object(config, 'motion_queuing')
@@ -466,6 +467,9 @@ class BufferFeeder:
         gcode.register_command('BUFFER_LOAD_PHASE3',
                                self.cmd_BUFFER_LOAD_PHASE3,
                                desc=self.cmd_BUFFER_LOAD_PHASE3_help)
+        gcode.register_command('BUFFER_UNLOAD_FILAMENT',
+                               self.cmd_BUFFER_UNLOAD_FILAMENT,
+                               desc=self.cmd_BUFFER_UNLOAD_FILAMENT_help)
         gcode.register_command('BUFFER_UNLOAD_PHASE3',
                                self.cmd_BUFFER_UNLOAD_PHASE3,
                                desc=self.cmd_BUFFER_UNLOAD_PHASE3_help)
@@ -2044,6 +2048,14 @@ class BufferFeeder:
         except Exception:
             logging.exception("buffer_feeder: gcode run_script failed (%s)", script)
 
+    def _gcode_run_script_checked(self, script, from_command=False):
+        """Run a gcode script and propagate failures to the caller."""
+        gc = self.printer.lookup_object('gcode')
+        if from_command:
+            gc.run_script_from_command(script)
+        else:
+            gc.run_script(script)
+
     def _respond(self, message):
         # Log + console echo. M117 wird hier bewusst NICHT emittiert:
         # _respond wird sowohl aus reactor-event handlers als auch
@@ -2462,6 +2474,72 @@ class BufferFeeder:
     # P7-20 hat das UNLOAD_FILAMENT-Macro auf SYNC_TO_EXTRUDER umgestellt —
     # Tip-Forming und parallele sync-distance laufen jetzt im Macro selbst
     # via G1 E waehrend BUFFER_SYNC_TO_EXTRUDER aktiv ist.
+
+    cmd_BUFFER_UNLOAD_FILAMENT_help = "UNLOAD_FILAMENT als Python-Workflow mit garantiertem Cleanup"
+    def cmd_BUFFER_UNLOAD_FILAMENT(self, gcmd):
+        tip_cycles = gcmd.get_int('TIP_CYCLES', 4, minval=0)
+        tip_push = gcmd.get_float('TIP_PUSH', 8.0, above=0.)
+        tip_pull = gcmd.get_float('TIP_PULL', 10.0, above=0.)
+        tip_speed = gcmd.get_float('TIP_SPEED', 20.0, above=0.)
+        tip_final_retract = gcmd.get_float('TIP_FINAL_RETRACT', 25.0, above=0.)
+        tip_final_speed = gcmd.get_float('TIP_FINAL_SPEED', 50.0, above=0.)
+        sync_dist = gcmd.get_float('SYNC_DIST', self.unload_sync_distance, above=0.)
+        fast_spd = gcmd.get_float('FAST_SPD', self.unload_fast_speed, above=0.)
+        max_distance = gcmd.get_float('MAX_DISTANCE', self.unload_fast_max, above=0.)
+        heat_to = gcmd.get_float('AUTO_HEAT_TARGET', 250.0, above=0.)
+        extruder_name = gcmd.get('EXTRUDER', 'extruder')
+
+        temp = self._hotend_temp()
+        if temp < self.min_temp:
+            self._gcode_run_script_checked(
+                "M118 Hotend zu kalt (%d/%d C) - heize automatisch auf %d C\n"
+                "M109 S%d"
+                % (int(temp), int(self.min_temp), int(heat_to), int(heat_to)),
+                from_command=True)
+
+        sync_active = False
+        state_saved = False
+        try:
+            self._gcode_run_script_checked(
+                "SAVE_GCODE_STATE NAME=buffer_feeder_op",
+                from_command=True)
+            self._macro_state_saved = True
+            state_saved = True
+            self._gcode_run_script_checked("M83", from_command=True)
+
+            try:
+                self._gcode_run_script_checked(
+                    "BUFFER_SYNC_TO_EXTRUDER EXTRUDER=%s" % extruder_name,
+                    from_command=True)
+                sync_active = True
+
+                tip_speed_f = int(tip_speed * 60)
+                fast_spd_f = int(fast_spd * 60)
+                moves = []
+                for _ in range(tip_cycles):
+                    moves.append("G1 E%g F%d" % (tip_push, tip_speed_f))
+                    moves.append("G1 E-%g F%d" % (tip_pull, tip_speed_f))
+                moves.append("G1 E-%g F%d" % (tip_final_retract,
+                                             int(tip_final_speed * 60)))
+                moves.append("G1 E-%g F%d" % (sync_dist, fast_spd_f))
+                moves.append("M400")
+                self._gcode_run_script_checked("\n".join(moves), from_command=True)
+            finally:
+                if sync_active:
+                    self._unsync_if_synced()
+
+            self._gcode_run_script_checked(
+                "BUFFER_UNLOAD_PHASE3 MAX_DISTANCE=%g SPEED=%g"
+                % (max_distance, fast_spd),
+                from_command=True)
+        finally:
+            if state_saved and self._macro_state_saved:
+                self._gcode_run_script_checked(
+                    "RESTORE_GCODE_STATE NAME=buffer_feeder_op MOVE=0",
+                    from_command=True)
+                self._macro_state_saved = False
+
+        self._respond("UNLOAD abgeschlossen (Python workflow)")
 
     cmd_BUFFER_UNLOAD_PHASE3_help = "UNLOAD Phase 3 — chunked retract until entrance free"
     def cmd_BUFFER_UNLOAD_PHASE3(self, gcmd):
@@ -2915,6 +2993,7 @@ class BufferFeeder:
             'unload_sync_distance':     self.unload_sync_distance,
             'unload_fast_max':          self.unload_fast_max,
             'min_temp':                 self.min_temp,
+            'use_python_unload':        self.use_python_unload,
             'accel':                    self.accel,
         }
 
