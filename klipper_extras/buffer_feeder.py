@@ -844,7 +844,29 @@ class BufferFeeder:
         return self._semantic_state('retract_button')
 
     def _is_hall1_active(self, context):
-        """Central HALL1 policy helper for lockout call sites."""
+        """Central HALL1 policy helper for lockout call sites.
+
+        Returns True wenn der Aufrufer die HALL1-Lockout-Logik ausloesen
+        soll (Reject, _enter_overflow, raise). False wenn ein erlaubter
+        Bypass greift oder HALL1 inaktiv ist.
+
+        Erlaubte context-Werte:
+          'sensor_callback' — _on_stable_sensor_change HALL1-Edge.
+              Bypass: phase3_overflow_ok | UNLOAD_PHASE_3/MANUAL_RETRACT
+              | sync_active.
+          'main_tick'       — _main_tick Auto-OVERFLOW-Transition.
+              Bypass: state in (OVERFLOW/MANUAL_RETRACT/UNLOAD_PHASE_3)
+              | phase3_overflow_ok | sync_active.
+          'submit_move'     — _submit_move Forward-Reject.
+              Bypass: phase3_overflow_ok (Stable-Tracking laeuft selbst).
+          'auto_on'         — _check_auto_ready, _end_startup_grace,
+              _on_idle_printing, cooldown-end. Kein Bypass — HALL1
+              blockiert AUTO immer.
+          'phase3_entry'    — cmd_BUFFER_LOAD_PHASE3 ohne OVERFLOW_OK.
+              Kein Bypass.
+
+        ValueError fuer alle anderen context-Werte (Caller-Bug-Detect).
+        """
         if not self.hall_overflow:
             return False
 
@@ -2530,7 +2552,6 @@ class BufferFeeder:
                 % (int(temp), int(self.min_temp), int(heat_to), int(heat_to)),
                 from_command=True)
 
-        sync_active = False
         state_saved = False
         try:
             self._gcode_run_script_checked(
@@ -2541,10 +2562,16 @@ class BufferFeeder:
             self._gcode_run_script_checked("M83", from_command=True)
 
             try:
+                # P7-32: kein sync_active-Flag mehr. _unsync_if_synced
+                # ist idempotent (early-return wenn _stepper_synced_to
+                # is None). Damit greift der Cleanup auch wenn die
+                # Exception INNERHALB des sync-Aufrufs raised — vorher
+                # haette sync_active=False den finally-Cleanup
+                # uebersprungen, obwohl das Sync-Command schon teilweise
+                # mutiert hatte.
                 self._gcode_run_script_checked(
                     "BUFFER_SYNC_TO_EXTRUDER EXTRUDER=%s" % extruder_name,
                     from_command=True)
-                sync_active = True
 
                 tip_speed_f = int(tip_speed * 60)
                 fast_spd_f = int(fast_spd * 60)
@@ -2558,8 +2585,7 @@ class BufferFeeder:
                 moves.append("M400")
                 self._gcode_run_script_checked("\n".join(moves), from_command=True)
             finally:
-                if sync_active:
-                    self._unsync_if_synced()
+                self._unsync_if_synced()
 
             self._gcode_run_script_checked(
                 "BUFFER_UNLOAD_PHASE3 MAX_DISTANCE=%g SPEED=%g"
