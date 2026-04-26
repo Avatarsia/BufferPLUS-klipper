@@ -536,6 +536,12 @@ class FaultManager:
                 return False
             if owner._stepper_synced_to is not None:
                 return False
+            # P7-35 fault-overlay: skip re-trigger while overlay flag is
+            # set (state stays LOAD_PHASE_3 in overlay mode, but the
+            # main_tick poll would otherwise re-enter _enter_overflow on
+            # every cycle).
+            if owner.use_fault_overlay and owner._fault_overflow:
+                return False
             return True
         if context == 'submit_move':
             return not phase3_overflow_ok
@@ -1383,6 +1389,14 @@ class BufferFeeder:
             self._overflow_interrupted_follow = True
             self._grip_follow_active = False
             self._initial_grip_end_time = None
+        # P7-35 fault-overlay: in overlay mode for LOAD_PHASE_3, keep
+        # _state=LOAD_PHASE_3 and only set the overlay flag. The phase3
+        # cmd loop terminates via fault_overflow check, postcheck raises
+        # like the legacy STATE_OVERFLOW path.
+        self._fault_overflow = True
+        self._fault_pre_overflow_state = self._state
+        if self.use_fault_overlay and self._state == STATE_LOAD_PHASE_3:
+            return
         self._set_state(STATE_OVERFLOW)
 
     def _clear_recovery_flags(self):
@@ -1394,11 +1408,24 @@ class BufferFeeder:
         return self.fault.resume_after_overflow()
 
     def _exit_overflow(self):
+        # P7-35 fault-overlay: clear overlay flag without state change
+        # when overlay path is active. _resume_after_overflow handles
+        # restarting the interrupted phase3 move via _overflow_resume_*.
+        if (self.use_fault_overlay
+                and self._fault_overflow
+                and self._state == STATE_LOAD_PHASE_3):
+            self._fault_overflow = False
+            self._fault_pre_overflow_state = None
+            self._respond("HALL1 cleared — overflow lockout released (overlay)")
+            self._resume_after_overflow()
+            return
         if self._state != STATE_OVERFLOW:
             return
         self._respond("HALL1 cleared — overflow lockout released")
         # Go to IDLE (the _set_state hook calls _halt_motion + stepper-disable).
         self._set_state(STATE_IDLE)
+        self._fault_overflow = False
+        self._fault_pre_overflow_state = None
         self._resume_after_overflow()
 
     # -----------------------------------------------------------------------
@@ -1847,6 +1874,11 @@ class BufferFeeder:
                 % int(self._load_phase3_max_distance))
             return
         if not self._move_in_flight():
+            # P7-35 fault-overlay: pause move submission while overlay
+            # flag is set. _enter_overflow already halted current motion;
+            # re-submitting here would immediately re-saturate HALL1.
+            if self.use_fault_overlay and self._fault_overflow:
+                return
             # Clip chunk so the per-call MAX_DISTANCE is a hard cap.
             remaining = self._load_phase3_max_distance - self._load_phase3_distance
             chunk = min(self._load_phase3_chunk_distance, remaining)
@@ -2658,7 +2690,12 @@ class BufferFeeder:
         self._set_state(STATE_LOAD_PHASE_3)
         self._start_continuous_motion(+1, speed, self.max_feed_time)
         # Block until the tick-driven state machine exits STATE_LOAD_PHASE_3.
-        while self._state == STATE_LOAD_PHASE_3:
+        # P7-35 fault-overlay: in overlay mode HALL1 sets _fault_overflow
+        # without state change, so the overlay flag is an additional exit
+        # condition. _exit_overflow clears it; postcheck below raises if
+        # HALL1 is still asserted.
+        while (self._state == STATE_LOAD_PHASE_3
+               and not (self.use_fault_overlay and self._fault_overflow)):
             self.reactor.pause(self.reactor.monotonic() + 0.1)
         # Postcheck: JAM bleibt absolut. Bei overflow_ok haben wir den
         # HALL1-Stable-Exit selbst gemacht — sonst alte Lockout-Logik.
