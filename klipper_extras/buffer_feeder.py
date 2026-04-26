@@ -85,6 +85,28 @@ BUTTON_RETRACT = "retract"
 # ---------------------------------------------------------------------------
 
 class BufferFeeder:
+    # Aktuell sind OVERFLOW, RUNOUT und JAM exklusive _state-Werte. Das ist
+    # eine flache State-Maschine mit Fault-States. Industriestandard fuer
+    # Fault-Handling ist HSM mit Fault-Overlay-Flags: der "normale" State
+    # bleibt erhalten (FILLING/FEEDING/IDLE), Faults sind orthogonale
+    # Overlay-Flags (_fault_overflow, _fault_runout, _fault_jam) plus
+    # Guard-Bedingungen.
+    #
+    # Vorteil: ein Resume-Pfad statt drei separate Mechanismen.
+    #
+    # Migration ist mehrere Tage Arbeit pro State und braucht parallele
+    # Test-Coverage (Phase 0 erweitert). Daher schrittweise:
+    #
+    #   P7-30 (this commit): Flag use_fault_overlay + Overlay-Felder
+    #                        eingefuehrt, aber Logik noch unmigriert.
+    #   P7-31: cmd_BUFFER_LOAD_PHASE3 OVERFLOW-Behandlung migrieren
+    #   P7-32: _enter_overflow / _exit_overflow auf Overlay umstellen
+    #   P7-33: _trigger_jam / BUFFER_CLEAR_JAM auf Overlay umstellen
+    #   P7-34: RUNOUT-Pfade migrieren
+    #   P7-35: LOAD_PHASE_1/2/3 zu LOAD-Substate kollabieren
+    #
+    # Bis zur vollstaendigen Migration ist use_fault_overlay=1 ein No-Op.
+    # ----------------------------------------------------------------------
     # TODO(P7-29): Extract HallSensorMonitor / SyncCoordinator /
     # FaultManager once there is broader coverage for the current
     # overflow/runout/jam cross-links. With only smoke coverage,
@@ -160,6 +182,7 @@ class BufferFeeder:
         self.auto_engage_on_boot = config.getboolean('auto_engage_on_boot', True)
         self.min_temp               = config.getfloat('min_temp', 180., minval=0.)
         self.use_python_unload      = config.getint('use_python_unload', 0)
+        self.use_fault_overlay      = config.getboolean('use_fault_overlay', False)
 
         # ----- Stepper + trapq -----
         self.motion_queuing = self.printer.load_object(config, 'motion_queuing')
@@ -370,6 +393,13 @@ class BufferFeeder:
         self._measure_feeding = False
         self._print_running = False
         self._jam_active = False
+        # TODO(P7-30): Fault-overlay migration is scaffold-only here.
+        # use_fault_overlay=1 remains a no-op until the existing
+        # OVERFLOW/RUNOUT/JAM paths are migrated to overlay flags.
+        self._fault_overflow = False
+        self._fault_runout = False
+        self._fault_jam = False
+        self._fault_pre_overflow_state = None
 
         # ----- Jam detection state -----
         self._hall2_start_time = None
@@ -2773,6 +2803,9 @@ class BufferFeeder:
             "cooldown_deadline  = %s" % (self._cooldown_deadline,),
             "halt_requested     = %s" % self._halt_requested,
             "jam_active         = %s" % self._jam_active,
+            "overlay flags     = overflow=%s runout=%s jam=%s (use=%s)" % (
+                self._fault_overflow, self._fault_runout,
+                self._fault_jam, self.use_fault_overlay),
             "runout_follow      = %s ref=%s" % (self._runout_follow_active,
                                                 self._runout_filament_ref),
             "runout_recov_pending= %s (RESUME will grip+fill if armed)" % self._runout_recovery_pending,
@@ -2972,6 +3005,9 @@ class BufferFeeder:
             'commanded_pos_mm':         self._commanded_pos,
             'print_running':            self._print_running,
             'jam_active':               self._jam_active,
+            'fault_overflow':           self._fault_overflow,
+            'fault_runout':             self._fault_runout,
+            'fault_jam':                self._fault_jam,
             'bang_bang_suspended':      self._bang_bang_suspended,
             'halt_requested':           self._halt_requested,
             'runout_follow_active':     self._runout_follow_active,
@@ -2994,6 +3030,7 @@ class BufferFeeder:
             'unload_fast_max':          self.unload_fast_max,
             'min_temp':                 self.min_temp,
             'use_python_unload':        self.use_python_unload,
+            'use_fault_overlay':        self.use_fault_overlay,
             'accel':                    self.accel,
         }
 
