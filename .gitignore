@@ -5,3 +5,11 @@ Nicht bestätigt*.crdownload
 # Referenz-Downloads (Klipper-Source, PDFs) — nicht committen
 vergleich/
 __pycache__/
+
+# Codex/Tools-Artefakte
+.tmp_pytest_shim/
+.claude/
+.pytest_cache/
+
+# Logs (per-tool, nicht committen)
+klippy.log
