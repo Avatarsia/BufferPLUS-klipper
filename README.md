@@ -204,9 +204,10 @@ in der Konsole oder aus Macros aufgerufen werden.
 | `BUFFER_LOAD_PHASE1 BUFFER=mellow DISTANCE=<mm>` | Feeder allein schnell zum Toolhead (blocking). |
 | `BUFFER_LOAD_PHASE2 BUFFER=mellow DISTANCE=<mm> SPEED=<mm/s>` | Feeder parallel (non-blocking). |
 | `BUFFER_LOAD_PHASE3 BUFFER=mellow` | Feed bis HALL2 aktiv (blocking). |
-| `BUFFER_UNLOAD_PHASE1 BUFFER=mellow` | Feeder sauber anhalten, State → `UNLOAD_PHASE_1` für Tip-Forming (blocking). |
-| `BUFFER_UNLOAD_PHASE2 BUFFER=mellow DISTANCE=<mm> SPEED=<mm/s>` | Feeder retract parallel (non-blocking). |
 | `BUFFER_UNLOAD_PHASE3 BUFFER=mellow` | Chunked retract bis entrance frei (blocking). |
+| `BUFFER_UNLOAD_FILAMENT BUFFER=mellow` | Kompletter UNLOAD-Workflow in Python (try/finally Cleanup). |
+| `BUFFER_SYNC_TO_EXTRUDER BUFFER=mellow EXTRUDER=extruder` | Buffer-Stepper an Extruder-Trapq koppeln (für Tip-Forming). |
+| `BUFFER_UNSYNC BUFFER=mellow` | Buffer-Stepper vom Extruder lösen. |
 
 Diese Primitive werden von den Macros `LOAD_FILAMENT` / `UNLOAD_FILAMENT`
 orchestriert. Direkter Aufruf nur für Debug.
@@ -327,21 +328,25 @@ aber nicht mehr genutzt.
 
 ### UNLOAD_FILAMENT
 
+Mit `use_python_unload=1` (Default) läuft der gesamte Workflow als
+Python-Befehl `BUFFER_UNLOAD_FILAMENT` — try/finally garantiert dass
+`BUFFER_SYNC_TO_EXTRUDER` immer wieder entkoppelt wird, auch bei
+Klipper-error oder M112 mid-sync.
+
 ```
-Phase 1: Tip-Forming — Extruder macht Push/Pull-Zyklen ALLEIN.
-         BUFFER_UNLOAD_PHASE1 BUFFER=mellow setzt den State auf
-         UNLOAD_PHASE_1, hält alle Moves auf dem Feeder an und
-         wartet bis die letzte Chunk-Bewegung ausgelaufen ist.
-         In diesem State sind Operator-Buttons und
-         FORCE_BUFFER_FILL blockiert — keine Kollision mit
-         Tip-Forming.
-         Abweichung zur alten Config: früher lief der Feeder mit;
-         jetzt bleibt er still (die kleinen Moves im Hotend
-         werden vom Buffer absorbiert).
-Phase 2: BUFFER_UNLOAD_PHASE2 BUFFER=mellow DISTANCE=180 + G1 E-180 parallel.
-Phase 3: BUFFER_UNLOAD_PHASE3 BUFFER=mellow — chunked 50mm-Retracts bis
-         buffer_entrance frei meldet (max unload_fast_max).
+Phase 1: BUFFER_SYNC_TO_EXTRUDER — Buffer-Stepper an Extruder-Trapq
+         koppeln. Ab jetzt folgt der Feeder den Extruder-Moves.
+Phase 2: Tip-Forming — Push/Pull-Zyklen via G1 E im sync-Modus.
+         Der Feeder läuft mit, der Bowden bleibt entlastet.
+Phase 3: Final-Retract via G1 E — pulled das Filament aus dem Hotend.
+Phase 4: BUFFER_UNSYNC (im finally-Block) — Stepper-Decoupling.
+Phase 5: BUFFER_UNLOAD_PHASE3 BUFFER=mellow — chunked 50mm-Retracts
+         bis buffer_entrance frei meldet (max unload_fast_max).
 ```
+
+Mit `use_python_unload=0` läuft `UNLOAD_FILAMENT_LEGACY` als reines
+Jinja-Macro (keine try/finally-Garantie bei mid-sync error — nur
+Fallback für Debugging).
 
 ---
 

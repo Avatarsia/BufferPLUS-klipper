@@ -35,7 +35,7 @@ def test_buffer_unload_filament_smoke():
     assert [mode for mode, _ in scripts] == ["run_script_from_command"] * 6
     assert scripts[0][1] == "SAVE_GCODE_STATE NAME=buffer_feeder_op"
     assert scripts[1][1] == "M83"
-    assert scripts[2][1] == "BUFFER_SYNC_TO_EXTRUDER EXTRUDER=extruder"
+    assert scripts[2][1] == "BUFFER_SYNC_TO_EXTRUDER BUFFER=mellow EXTRUDER=extruder"
     assert scripts[3][1] == "\n".join([
         "G1 E8 F1200",
         "G1 E-10 F1200",
@@ -49,7 +49,7 @@ def test_buffer_unload_filament_smoke():
         "G1 E-250 F3000",
         "M400",
     ])
-    assert scripts[4][1] == "BUFFER_UNLOAD_PHASE3 MAX_DISTANCE=2510 SPEED=50"
+    assert scripts[4][1] == "BUFFER_UNLOAD_PHASE3 BUFFER=mellow MAX_DISTANCE=2510 SPEED=50"
     assert scripts[5][1] == "RESTORE_GCODE_STATE NAME=buffer_feeder_op MOVE=0"
     assert gcode.info_messages[-1] == "BufferFeeder: UNLOAD abgeschlossen (Python workflow)"
     assert feeder._macro_state_saved is False
@@ -84,7 +84,7 @@ def test_buffer_unload_filament_unsyncs_on_error(monkeypatch):
     assert events == [
         ("script", "SAVE_GCODE_STATE NAME=buffer_feeder_op"),
         ("script", "M83"),
-        ("script", "BUFFER_SYNC_TO_EXTRUDER EXTRUDER=extruder"),
+        ("script", "BUFFER_SYNC_TO_EXTRUDER BUFFER=mellow EXTRUDER=extruder"),
         ("script", "\n".join([
             "G1 E8 F1200",
             "G1 E-10 F1200",

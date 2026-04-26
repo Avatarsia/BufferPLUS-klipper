@@ -2792,7 +2792,8 @@ class BufferFeeder:
                 # uebersprungen, obwohl das Sync-Command schon teilweise
                 # mutiert hatte.
                 self._gcode_run_script_checked(
-                    "BUFFER_SYNC_TO_EXTRUDER EXTRUDER=%s" % extruder_name,
+                    "BUFFER_SYNC_TO_EXTRUDER BUFFER=%s EXTRUDER=%s"
+                    % (self.name, extruder_name),
                     from_command=True)
 
                 tip_speed_f = int(tip_speed * 60)
@@ -2810,8 +2811,8 @@ class BufferFeeder:
                 self._unsync_if_synced()
 
             self._gcode_run_script_checked(
-                "BUFFER_UNLOAD_PHASE3 MAX_DISTANCE=%g SPEED=%g"
-                % (max_distance, fast_spd),
+                "BUFFER_UNLOAD_PHASE3 BUFFER=%s MAX_DISTANCE=%g SPEED=%g"
+                % (self.name, max_distance, fast_spd),
                 from_command=True)
         finally:
             if state_saved and self._macro_state_saved:
