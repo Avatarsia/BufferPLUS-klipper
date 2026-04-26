@@ -7,6 +7,7 @@ class FakeReactor:
         self.now = 0.0
         self.timers = []
         self.callback_registrations = []
+        self.update_timer_calls = []
 
     def register_timer(self, callback, when=None):
         timer = {"callback": callback, "when": when}
@@ -21,6 +22,10 @@ class FakeReactor:
     def unregister_timer(self, timer):
         if timer in self.timers:
             self.timers.remove(timer)
+
+    def update_timer(self, timer, when):
+        timer["when"] = when
+        self.update_timer_calls.append((timer, when))
 
     def monotonic(self):
         current = self.now
