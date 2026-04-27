@@ -804,6 +804,14 @@ class BufferFeeder:
         self.min_temp               = config.getfloat('min_temp', 180., minval=0.)
         self.use_python_unload      = config.getint('use_python_unload', 0)
         self.use_fault_overlay      = config.getboolean('use_fault_overlay', False)
+        # P7-52: Flush-driven bang-bang. When enabled, bang-bang feed
+        # decisions ride on Klipper's MCU flush cycle (motion_queuing.
+        # register_flush_callback) rather than the 50ms reactor tick.
+        # Move-submits anchor at step_gen_time + lead_time which is
+        # safe by Klipper-mainline contract — no toolhead-anker race,
+        # no cursor-decay. Default off until hardware-validated.
+        self.use_flush_callback_bang_bang = config.getboolean(
+            'use_flush_callback_bang_bang', False)
 
         # ----- Stepper + trapq -----
         self.sync = SyncCoordinator(self)
@@ -1019,6 +1027,20 @@ class BufferFeeder:
         self.printer.register_event_handler('klippy:connect',  self._handle_connect)
         self.printer.register_event_handler('klippy:ready',    self._handle_ready)
         self.printer.register_event_handler('klippy:shutdown', self._handle_shutdown)
+
+        # P7-52: Flush-driven bang-bang. Registered unconditionally so
+        # we can toggle the feature flag at runtime; the callback
+        # itself is a no-op when the flag is off, falling through to
+        # the legacy reactor-tick path. Mainline Klipper API:
+        # klippy/extras/motion_queuing.py:106 register_flush_callback
+        # fires synchronously inside the MCU flush cycle with
+        # signature (flush_time, step_gen_time). Anchoring submits at
+        # step_gen_time + lead_time bypasses the toolhead.get_last_
+        # move_time anchor that breaks reactive bang-bang during
+        # mid-toolhead-move (P7-50 lesson learned the hard way).
+        if hasattr(self.motion_queuing, 'register_flush_callback'):
+            self.motion_queuing.register_flush_callback(
+                self._on_mcu_flush, can_add_trapq=True)
 
         # ----- GCode registrations -----
         # P7-40: Migration register_command -> register_mux_command.
@@ -1877,9 +1899,18 @@ class BufferFeeder:
         return eventtime + MAIN_TICK_INTERVAL
 
     def _bang_bang_tick(self, eventtime):
-        """HALL-based bang-bang with hysteresis."""
+        """HALL-based bang-bang with hysteresis. Reactor-tick driven —
+        anchors submits via toolhead.get_last_move_time which fights
+        against active toolhead-moves (lag during manual G1 E50). The
+        flush-callback path (_on_mcu_flush, P7-52) is the preferred
+        replacement when use_flush_callback_bang_bang is enabled."""
         if self._bang_bang_suspended:
             # Print is paused — do nothing until idle_timeout:printing.
+            return
+        # P7-52: when flush-callback bang-bang is active, the
+        # reactor-tick path becomes a no-op so we don't double-submit.
+        # Stop-on-HALL2 is still needed via flush-callback path itself.
+        if self.use_flush_callback_bang_bang:
             return
         if self.hall_full:
             # Buffer voll: stop feeding.
@@ -1893,6 +1924,65 @@ class BufferFeeder:
         else:
             # Zwischen-Zone: halte letzten Zustand (Hysterese).
             # Nichts tun — _continuous_feed bleibt wie es ist.
+            pass
+
+    def _on_mcu_flush(self, flush_time, step_gen_time):
+        """P7-52: Flush-callback driven bang-bang. Klipper's motion_
+        queuing module fires this synchronously inside the MCU flush
+        cycle (klippy/extras/motion_queuing.py:155). We have two
+        timing parameters from the caller:
+
+          flush_time     — last time steps were sent to the MCU
+          step_gen_time  — last time Klipper generated steps (>= flush_time)
+
+        Anchoring our submit at step_gen_time + lead_time guarantees
+        the move lands in the very next flush iteration without
+        racing against any toolhead-anchor or stale stepcompress
+        cursor. This was the architectural fix needed to make
+        bang-bang reactive during mid-toolhead-moves (P7-50 attempted
+        the same goal via mcu_now-anchor in _submit_single_trapezoid
+        and crashed; the flush-callback path is the safe equivalent
+        because Klipper itself dictates the anchor time).
+        """
+        if not self.use_flush_callback_bang_bang:
+            return
+        if self._bang_bang_suspended:
+            return
+        if self._state != STATE_AUTO:
+            # Macros and operator commands own non-AUTO states. Bang-
+            # bang only acts in AUTO. LOAD/UNLOAD-driven SYNC paths
+            # are handled by their own macros, not by us.
+            return
+        if self._stepper_synced_to is not None:
+            # An explicit BUFFER_SYNC_TO_EXTRUDER (macro path) is in
+            # effect. Stay out of the way — submitting our own move
+            # while synced would queue trapezoids on the wrong trapq.
+            return
+
+        # Hard-safety: HALL1 forward-reject still applies. Without
+        # this, an overfilled buffer would keep getting fed.
+        if self._is_hall1_active('submit_move'):
+            return
+
+        if self.hall_full:
+            # Buffer voll: stop. Pending streamed chunks drain via
+            # _last_move_end_time naturally; clearing the streaming
+            # flag prevents new chunks from being requested.
+            if self._continuous_feed:
+                self._continuous_feed = False
+        elif self.hall_empty:
+            # Buffer leer: feed. step_gen_time + lead_time is the
+            # safe anchor — Klipper just told us the cursor is here.
+            if not self._continuous_feed:
+                anchor = step_gen_time + self.lead_time
+                self._submit_move(self.max_move_chunk_mm,
+                                   self.feed_speed,
+                                   forced_t0=anchor)
+                self._continuous_feed = True
+                self._continuous_feed_direction = 1
+                self._continuous_feed_speed = self.feed_speed
+        else:
+            # Zwischen-Zone: hysteresis.
             pass
 
     def _load_phase3_tick(self, eventtime):
@@ -2141,7 +2231,7 @@ class BufferFeeder:
         except Exception:
             logging.exception("buffer_feeder: disable_stepper failed")
 
-    def _submit_move(self, signed_distance, speed):
+    def _submit_move(self, signed_distance, speed, forced_t0=None):
         """Submit a move. Chunks long moves asynchronously.
 
         Flush-free. For distances ≤ max_move_chunk_mm this queues
@@ -2190,15 +2280,25 @@ class BufferFeeder:
         direction = 1.0 if signed_distance > 0 else -1.0
 
         first_chunk = min(distance_abs, self.max_move_chunk_mm)
-        self._submit_single_trapezoid(direction * first_chunk, speed)
+        self._submit_single_trapezoid(direction * first_chunk, speed,
+                                       forced_t0=forced_t0)
         remaining = distance_abs - first_chunk
         if remaining > 0:
             self._pending_remaining_mm = remaining
             self._pending_direction = direction
             self._pending_speed = speed
 
-    def _submit_single_trapezoid(self, signed_distance, speed):
-        """Append one trapezoid to our trapq. Low-level primitive."""
+    def _submit_single_trapezoid(self, signed_distance, speed,
+                                  forced_t0=None):
+        """Append one trapezoid to our trapq. Low-level primitive.
+
+        forced_t0 (P7-52): when not None, overrides the t0 anchor with
+        the explicit value. Used by the flush-callback bang-bang path
+        which receives step_gen_time from Klipper and can compute a
+        race-free anchor at step_gen_time + lead_time. The default
+        (None) keeps the existing toolhead-anchor logic for the
+        legacy reactor-tick path.
+        """
         # Prime/re-prime stepcompress nach Idle-Pause die laenger ist als
         # CLOCK_DIFF_MAX (Klipper: 3<<28 ticks = ~16.7s @ 48MHz). Dahinter
         # laeuft compress_bisect_add in degenerierte Sequenzen ein
@@ -2250,7 +2350,13 @@ class BufferFeeder:
         #   has no baseline for → "Invalid sequence" shutdown.
         # mcu/mcu_now sind oben fuer den Re-Prime-Gap-Check schon
         # berechnet — wiederverwenden statt neu fetchen.
-        if self._last_move_end_time > mcu_now + self.lead_time:
+        if forced_t0 is not None:
+            # P7-52 flush-callback path: caller provides a step_gen_
+            # time-based anchor that is race-free against Klipper's
+            # MCU flush cycle. Honor _last_move_end_time as the floor
+            # so streaming chunks still abut without gap.
+            t0 = max(forced_t0, self._last_move_end_time)
+        elif self._last_move_end_time > mcu_now + self.lead_time:
             # Streaming: previous chunk is still in the future — abut.
             t0 = self._last_move_end_time
         else:

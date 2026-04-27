@@ -111,6 +111,11 @@ class FakeMotionQueuing:
         self.scan_window_checks = 0
         self.note_mcu_movequeue_activity_calls = []
         self.activity = self.note_mcu_movequeue_activity_calls
+        # Klipper-Mainline klippy/extras/motion_queuing.py:106
+        # register_flush_callback(callback, can_add_trapq=False).
+        # Callbacks fire synchronously during the MCU flush cycle
+        # with signature (flush_time, step_gen_time).
+        self.flush_callbacks = []
 
     def allocate_trapq(self):
         trapq = object()
@@ -125,8 +130,18 @@ class FakeMotionQueuing:
     def check_step_generation_scan_windows(self):
         self.scan_window_checks += 1
 
-    def note_mcu_movequeue_activity(self, end_time):
+    def note_mcu_movequeue_activity(self, end_time, is_step_gen=True):
         self.note_mcu_movequeue_activity_calls.append(end_time)
+
+    def register_flush_callback(self, callback, can_add_trapq=False):
+        self.flush_callbacks.append((callback, can_add_trapq))
+
+    def trigger_flush(self, flush_time, step_gen_time):
+        """Test-helper: fire registered flush callbacks. Used to
+        characterize flush-driven bang-bang behaviour without a real
+        Klipper reactor."""
+        for callback, _can_add_trapq in self.flush_callbacks:
+            callback(flush_time, step_gen_time)
 
 
 class FakeMCU:
