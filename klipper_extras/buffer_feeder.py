@@ -1919,16 +1919,19 @@ class BufferFeeder:
                                   "buffer full" % full_dwell)
                 else:
                     self._respond("LOAD Phase 3: HALL2 reached, buffer full")
-                # Bang-bang nur weiterlaufen lassen, wenn aktuell
-                # tatsaechlich ein Druck laeuft (z.B. MMU-Filament-Wechsel
-                # mitten im Print). Beim manuellen LOAD ausserhalb eines
-                # Drucks geht der Buffer in IDLE — sonst wuerde Herausziehen
-                # am Toolhead spontan bang-bang triggern und der Buffer
-                # pumpt ohne erkennbaren Grund nach. AUTO wird beim
-                # naechsten Print-Start ohnehin automatisch engaged
-                # (auto_engage_on_print_start).
-                if (self._print_running
-                        and self.entrance_detected
+                # P7-49 (Hardware-Test 2026-04-27): AUTO ist nach
+                # einem deliberate LOAD das erwartete State —
+                # unabhaengig davon ob ein Print laeuft. Frueher hat
+                # der _print_running-Guard das auf IDLE gezwungen, mit
+                # der Begruendung "spontane Toolhead-Pulls duerfen
+                # nicht bang-bang triggern". Aber: nach einem
+                # erfolgreichen LOAD ist der naechste Schritt fast
+                # immer eine Extrusion (manuell oder Print) — und ohne
+                # AUTO bekommt das den Buffer nicht nachgefuettert.
+                # _post_load_overflow_grace haelt _main_tick davon ab,
+                # zurueck nach OVERFLOW zu kippen waehrend HALL1
+                # asserted ist; bei HALL1-fall wird der grace gecleart.
+                if (self.entrance_detected
                         and not self._auto_off_by_user
                         and not self._halt_requested):
                     self._set_state(STATE_AUTO)
@@ -1968,8 +1971,9 @@ class BufferFeeder:
                     # legitimately accepted the overfilled buffer as
                     # the LOAD-success exit. Cleared on HALL1-fall.
                     self._post_load_overflow_grace = True
-                    if (self._print_running
-                            and self.entrance_detected
+                    # P7-49: see HALL2-Exit branch above — AUTO is the
+                    # natural post-LOAD state regardless of print state.
+                    if (self.entrance_detected
                             and not self._auto_off_by_user
                             and not self._halt_requested):
                         self._set_state(STATE_AUTO)
@@ -2594,6 +2598,17 @@ class BufferFeeder:
         # This command does the runtime-check in Python, returning
         # quietly if the guard rejects, so the macro continues.
         reason = self._check_auto_ready()
+        # P7-49: Phase 3 stable-HALL1-Exit setzt _post_load_overflow_
+        # grace=True, signalisiert "HALL1 active ist legitim, gerade
+        # erfolgreich beendet". Akzeptiere AUTO-engage trotz HALL1
+        # in genau diesem Fenster — _main_tick respektiert grace
+        # separat und laesst kein _enter_overflow durch. Bei
+        # HALL1-fall (Filament durch Extruder gepullt) wird grace
+        # via sensor_callback geclearet, normales Regime resumed.
+        if (reason is not None
+                and "HALL1 overflow active" in reason
+                and self._post_load_overflow_grace):
+            reason = None
         if reason is not None:
             self._respond("AUTO not engaged: " + reason)
             return

@@ -127,7 +127,11 @@ def test_phase3_tick_exits_when_hall1_stable_timeout_reached():
     # Tick at eventtime = stable_timeout → exit triggers
     feeder._load_phase3_tick(eventtime=1.5)
 
-    assert feeder._state == buffer_feeder.STATE_IDLE, (
-        "Phase 3 should exit to IDLE after stable timeout — "
-        "got %s" % feeder._state)
+    # P7-49: Phase 3 exit goes to AUTO when entrance is detected,
+    # regardless of _print_running. This is the new "deliberate-LOAD-
+    # ends-in-AUTO" semantic so bang-bang refills the buffer for the
+    # next manual extrusion or print start.
+    assert feeder._state == buffer_feeder.STATE_AUTO, (
+        "Phase 3 should exit to AUTO after stable timeout when "
+        "entrance is detected — got %s" % feeder._state)
     assert feeder._post_load_overflow_grace is True

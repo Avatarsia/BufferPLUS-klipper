@@ -47,7 +47,14 @@ def make_feeder():
 
 def set_sensor_active(feeder, sensor_name, active):
     polarity_flip = feeder._pin_polarity_flip[sensor_name]
-    feeder._pin_stable_state[sensor_name] = (not active) if polarity_flip else active
+    raw = (not active) if polarity_flip else active
+    feeder._pin_stable_state[sensor_name] = raw
+    # P7-49: also seed _pin_raw_state to match. Otherwise check_debounce
+    # would see stable!=raw on the very next main_tick, fire
+    # on_stable_sensor_change('entrance', False) which falls into
+    # on_entrance_runout(_print_running=False) → state=IDLE — masking
+    # the actual P7-49 transition we want to test.
+    feeder._pin_raw_state[sensor_name] = raw
 
 
 def test_full_load_unload_sequence_no_invalid_sequence():
@@ -77,8 +84,12 @@ def test_full_load_unload_sequence_no_invalid_sequence():
 
     feeder._load_phase3_tick(eventtime=2.0)
 
-    assert feeder._state == buffer_feeder.STATE_IDLE, (
-        "Phase 3 must end in IDLE for operator-LOAD outside print")
+    # P7-49: Phase 3 stable-HALL1 exit transitions to AUTO when
+    # entrance is detected, irrespective of _print_running. Earlier
+    # behaviour was IDLE outside a print; the new semantic ensures
+    # bang-bang is armed to refill the buffer at the next pull.
+    assert feeder._state == buffer_feeder.STATE_AUTO, (
+        "P7-49: Phase 3 must end in AUTO when entrance is detected")
     assert feeder._post_load_overflow_grace is True, (
         "P7-46 Fix C: grace flag must be set on stable-HALL1 exit")
 
@@ -131,16 +142,21 @@ def test_full_load_unload_sequence_no_invalid_sequence():
     assert feeder._stepper_synced_to is None
 
     # ---------------- BUFFER_AUTO_ON_IF_READY: HALL1 still active ----
-    # With Fix A: silent skip, no raise, macro continues.
+    # P7-49: AUTO_ON_IF_READY now respects _post_load_overflow_grace —
+    # HALL1 active immediately after a Phase 3 stable-HALL1 exit is
+    # legitimate, AUTO must engage so bang-bang is armed for the
+    # next pull. Pre-P7-49 this test asserted the opposite (silent
+    # skip), but that semantic prevented manual extrusions outside
+    # a print from refilling the buffer.
     gcode = printer.lookup_object('gcode')
     msg_count_before = len(gcode.info_messages)
     feeder.cmd_BUFFER_AUTO_ON_IF_READY(FakeGCmd())
-    assert feeder._state != buffer_feeder.STATE_AUTO, (
-        "AUTO_ON_IF_READY engaged AUTO despite HALL1 active — "
-        "block-reason was ignored")
+    assert feeder._state == buffer_feeder.STATE_AUTO, (
+        "P7-49: AUTO_ON_IF_READY did NOT engage AUTO despite "
+        "_post_load_overflow_grace being set — Phase 3 success path "
+        "must arm bang-bang")
     new_msgs = gcode.info_messages[msg_count_before:]
-    assert any("AUTO not engaged" in m for m in new_msgs), (
-        "AUTO_ON_IF_READY did not log skip-reason")
+    assert any("AUTO engaged" in m for m in new_msgs)
 
     # ---------------- 20s idle period (operator pause) ----------------
     feeder.reactor.now = 45.0  # gap = 45 - 25 = 20s, > REPRIME_GAP
