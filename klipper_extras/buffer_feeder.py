@@ -2123,6 +2123,20 @@ class BufferFeeder:
             if not self.jam_detection_enabled or self._jam_active:
                 return eventtime + JAM_TICK_INTERVAL
 
+            # P7-53 (Hardware-Test 2026-04-27): Jam-detection is a
+            # PRINT-only safety. The CLOG detector triggers when HALL2
+            # stays active while the extruder accumulates extrusion —
+            # but during manual workflows (PA-tuning's
+            # _CLIENT_LINEAR_MOVE E=50 F=480, manual purge, BUFFER_FEED
+            # tests) HALL2 is naturally active for many seconds AND
+            # the extruder is moving. That's normal behaviour, not a
+            # clog. Only run jam-detection when idle_timeout signals
+            # an active print.
+            if not self._print_running:
+                self._hall2_start_time = None
+                self._hall3_start_time = None
+                return eventtime + JAM_TICK_INTERVAL
+
             if self._state not in JAM_WATCH_STATES:
                 # Reset trackers.
                 self._hall2_start_time = None
