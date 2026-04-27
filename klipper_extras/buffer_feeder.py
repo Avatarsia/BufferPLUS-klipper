@@ -2002,6 +2002,17 @@ class BufferFeeder:
             # re-submitting here would immediately re-saturate HALL1.
             if self.use_fault_overlay and self._fault_overflow:
                 return
+            # P7-48 (Hardware-Test 2026-04-27): if HALL1 is asserted —
+            # buffer is already full, the stable-timer is what we want
+            # to elapse, NOT more filament-push. Submitting another
+            # chunk while HALL1 is on stuffs filament against the
+            # extruder clamp via the bowden, which then bleeds through
+            # the heatbreak into the nozzle (visible as filament
+            # squirting from the nozzle pre-extrude). Hold the chunk
+            # stream while the timer counts up; HALL1-fall (drop-grace)
+            # naturally re-arms the submit path.
+            if self.hall_overflow:
+                return
             # Clip chunk so the per-call MAX_DISTANCE is a hard cap.
             remaining = self._load_phase3_max_distance - self._load_phase3_distance
             chunk = min(self._load_phase3_chunk_distance, remaining)
