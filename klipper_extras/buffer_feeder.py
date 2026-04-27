@@ -499,7 +499,17 @@ class SyncCoordinator:
         toolhead = owner.printer.lookup_object('toolhead')
         try:
             toolhead.flush_step_generation()
-            owner.stepper.set_position((0., 0., 0.))
+            # P7-47: Feeder-Startposition auf die tatsächliche commanded_pos
+            # des Extruder-Steppers setzen, nicht auf (0,0,0). Nach LOAD steht
+            # der Extruder-Stepper intern bei z.B. 180mm; set_position((0,0,0))
+            # würde den Feeder auf 0 setzen während itersolve Schritte ab 180mm
+            # berechnet → alle Schritte landen bei t=0 → {i=0,c=N} Invalid
+            # sequence. extruder.last_position ist die physikalische
+            # commanded_pos des Extruder-Steppers (unabhängig von G92-Offsets)
+            # — selbes Pattern wie Klipper's ExtruderStepper.sync_to_extruder
+            # (extruder.py:968ff) und _read_extruder_position() in dieser Datei.
+            _ext_pos = extruder.last_position
+            owner.stepper.set_position((_ext_pos, 0., 0.))
             owner.stepper.set_trapq(extruder.get_trapq())
             self.motion_queuing.check_step_generation_scan_windows()
         except Exception:
