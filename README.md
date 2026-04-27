@@ -298,7 +298,6 @@ in der Konsole oder aus Macros aufgerufen werden.
 | Command | Beschreibung |
 |---|---|
 | `BUFFER_LOAD_PHASE1 BUFFER=mellow DISTANCE=<mm>` | Feeder allein schnell zum Toolhead (blocking). |
-| `BUFFER_LOAD_PHASE2 BUFFER=mellow DISTANCE=<mm> SPEED=<mm/s>` | Feeder parallel (non-blocking). |
 | `BUFFER_LOAD_PHASE3 BUFFER=mellow` | Feed bis HALL2 aktiv (blocking). |
 | `BUFFER_UNLOAD_PHASE3 BUFFER=mellow` | Chunked retract bis entrance frei (blocking). |
 | `BUFFER_UNLOAD_FILAMENT BUFFER=mellow` | Kompletter UNLOAD-Workflow in Python (try/finally Cleanup). |
@@ -421,9 +420,10 @@ Phase 3: BUFFER_SYNC_TO_EXTRUDER → G1 E{load_slow_distance} → BUFFER_UNSYNC
          UNLOAD-Tip-Forming.
 ```
 
-`BUFFER_LOAD_PHASE2` (parallel feeder+extruder) bleibt als G-Code-
-Befehl für andere Macros verfügbar, wird vom neuen `LOAD_FILAMENT`
-aber nicht mehr genutzt.
+Das frühere `BUFFER_LOAD_PHASE2` (parallel feeder+extruder ohne sync)
+wurde mit P7-55b entfernt. Der parallele Feed ist jetzt im
+`BUFFER_SYNC_TO_EXTRUDER` + `G1 E` + `BUFFER_UNSYNC`-Pattern realisiert
+— mechanisch garantierte 1:1-Mitarbeit statt loser Parallelität.
 
 ### UNLOAD_FILAMENT
 

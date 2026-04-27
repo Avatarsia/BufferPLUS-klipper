@@ -32,7 +32,7 @@ STATE_AUTO           = "AUTO"
 STATE_MANUAL_FEED    = "MANUAL_FEED"
 STATE_MANUAL_RETRACT = "MANUAL_RETRACT"
 STATE_LOAD_PHASE_1   = "LOAD_PHASE_1"
-STATE_LOAD_PHASE_2   = "LOAD_PHASE_2"
+# STATE_LOAD_PHASE_2 = "LOAD_PHASE_2"  # P7-55b: entfernt mit cmd_BUFFER_LOAD_PHASE2
 STATE_LOAD_PHASE_3   = "LOAD_PHASE_3"
 STATE_UNLOAD_PHASE_3 = "UNLOAD_PHASE_3"
 STATE_OVERFLOW       = "OVERFLOW"
@@ -47,7 +47,7 @@ STATE_JAM            = "JAM"
 # UNLOAD_PHASE_1/_2 wurden mit P7-20 obsolet (sync-mode Macro nutzt
 # nur noch UNLOAD_PHASE_3 fuer den Buffer-allein-Retract).
 BUSY_PHASE_STATES = {STATE_INITIAL_GRIP,
-                     STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2, STATE_LOAD_PHASE_3,
+                     STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_3,
                      STATE_UNLOAD_PHASE_3}
 
 # States where the main_tick continuous-feed chunk-pump is allowed
@@ -298,7 +298,7 @@ class HallSensorMonitor:
     def on_entrance_runout(self, eventtime):
         owner = self.owner
         owner._entrance_was_empty = True
-        if owner._state in (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2, STATE_LOAD_PHASE_3,
+        if owner._state in (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_3,
                             STATE_UNLOAD_PHASE_3, STATE_MANUAL_FEED,
                             STATE_MANUAL_RETRACT):
             return
@@ -364,7 +364,7 @@ class HallSensorMonitor:
             and owner._state != STATE_JAM
         )
 
-        block_states = (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2, STATE_LOAD_PHASE_3,
+        block_states = (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_3,
                         STATE_UNLOAD_PHASE_3, STATE_OVERFLOW, STATE_JAM,
                         STATE_INITIAL_GRIP)
         if owner._state in block_states and not retract_overflow_override:
@@ -373,7 +373,7 @@ class HallSensorMonitor:
                 hint = " — fix the cause, then BUFFER_CLEAR_JAM"
             elif owner._state == STATE_OVERFLOW:
                 hint = " — clear HALL1 (lockout releases automatically); retract button is allowed"
-            elif owner._state in (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_2,
+            elif owner._state in (STATE_LOAD_PHASE_1,
                                   STATE_LOAD_PHASE_3, STATE_UNLOAD_PHASE_3):
                 hint = " — wait for LOAD/UNLOAD to finish, or BUFFER_HALT"
             elif owner._state == STATE_INITIAL_GRIP:
@@ -1091,9 +1091,8 @@ class BufferFeeder:
         gcode.register_mux_command('BUFFER_LOAD_PHASE1', 'BUFFER', self.name,
                                    self.cmd_BUFFER_LOAD_PHASE1,
                                    desc=self.cmd_BUFFER_LOAD_PHASE1_help)
-        gcode.register_mux_command('BUFFER_LOAD_PHASE2', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_LOAD_PHASE2,
-                                   desc=self.cmd_BUFFER_LOAD_PHASE2_help)
+        # P7-55b: BUFFER_LOAD_PHASE2 entfernt — durch SYNC_TO_EXTRUDER
+        # ersetzt. Siehe Kommentar bei cmd_BUFFER_LOAD_PHASE3.
         gcode.register_mux_command('BUFFER_LOAD_PHASE3', 'BUFFER', self.name,
                                    self.cmd_BUFFER_LOAD_PHASE3,
                                    desc=self.cmd_BUFFER_LOAD_PHASE3_help)
@@ -1852,18 +1851,12 @@ class BufferFeeder:
             if self._state == STATE_LOAD_PHASE_3:
                 self._load_phase3_tick(eventtime)
 
-            # Auto-return to IDLE after non-blocking phase moves end.
-            # LOAD_PHASE_1 is synchronous and transitions itself.
-            # LOAD_PHASE_2 is non-blocking: the macro calls
-            # BUFFER_WAIT_IDLE and main_tick finalizes the state here.
-            # Must wait for BOTH in-flight trapezoid AND pending-stream
-            # to drain. (UNLOAD_PHASE_2 wurde mit P7-20 obsolet — der
-            # neue sync-mode behandelt die parallele Retract-Phase im
-            # Macro selbst per G1 E waehrend SYNC_TO_EXTRUDER.)
-            if (self._state == STATE_LOAD_PHASE_2
-                    and not self._move_in_flight()
-                    and self._pending_remaining_mm <= 0):
-                self._set_state(STATE_IDLE)
+            # P7-55b: ehemaliger LOAD_PHASE_2 Auto-IDLE-Block entfernt.
+            # cmd_BUFFER_LOAD_PHASE2 ist seit P7-44 nicht mehr im
+            # LOAD_FILAMENT-Macro genutzt (durch SYNC_TO_EXTRUDER
+            # ersetzt) und wurde mit P7-55b komplett aus der API
+            # entfernt. UNLOAD_PHASE_2 wurde schon in P7-20 durch
+            # SYNC_TO_EXTRUDER abgeloest.
 
             # Continuous feed: keep chunks streaming, but only in
             # states where continuous motion is the intended behavior.
@@ -2916,20 +2909,14 @@ class BufferFeeder:
             raise
         self._set_state(STATE_IDLE)
 
-    cmd_BUFFER_LOAD_PHASE2_help = "LOAD Phase 2 — feeder parallel to extruder. Non-blocking, use BUFFER_WAIT_IDLE"
-    def cmd_BUFFER_LOAD_PHASE2(self, gcmd):
-        self._halt_requested = False
-        self._raise_if_locked_out(gcmd)
-        self._check_phase_entry('LOAD_PHASE2', {
-            STATE_IDLE, STATE_AUTO, STATE_RUNOUT, STATE_LOAD_PHASE_2,
-        })
-        distance = gcmd.get_float('DISTANCE', self.load_slow_distance, above=0.)
-        speed    = gcmd.get_float('SPEED',    self.load_slow_speed,    above=0.)
-        self._continuous_feed = False
-        self._wait_for_move_done(gcmd)
-        self._set_state(STATE_LOAD_PHASE_2)
-        self._enable_stepper()
-        self._submit_move(+distance, speed)
+    # P7-55b: cmd_BUFFER_LOAD_PHASE2 entfernt. Das parallele Feeder+
+    # Extruder-Pattern wurde durch SYNC_TO_EXTRUDER abgeloest (P7-44 in
+    # LOAD_FILAMENT Phase 3/3, P7-20 in UNLOAD-Tip-Forming). Der alte
+    # Befehl war seit dem nicht mehr in lll.cfg / tests / Macros
+    # aufgerufen, nur als Public-G-Code-Endpoint registriert. Externe
+    # Custom-Macros, die `BUFFER_LOAD_PHASE2` direkt aufgerufen haben,
+    # muessen auf `BUFFER_SYNC_TO_EXTRUDER` + `G1 E` + `BUFFER_UNSYNC`
+    # umgestellt werden.
 
     cmd_BUFFER_LOAD_PHASE3_help = ("LOAD Phase 3 — feed until HALL2 or MAX_DISTANCE. "
                                     "Optional: STABLE_TIMEOUT (s, 0=instant), "
