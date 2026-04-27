@@ -150,6 +150,10 @@ class FakeExtruder:
     def __init__(self):
         self.trapq = object()
         self.heater = FakeHeater()
+        # Klipper-Mainline klippy/kinematics/extruder.py:75 reads
+        # extruder.last_position when syncing. PR #17 (P7-47) does the
+        # same. Default 0.0 mirrors a freshly-instantiated extruder.
+        self.last_position = 0.0
 
     def get_trapq(self):
         return self.trapq
