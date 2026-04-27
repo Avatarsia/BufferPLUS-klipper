@@ -745,6 +745,15 @@ class BufferFeeder:
         self.load_fast_speed    = config.getfloat('load_fast_speed',    50., above=0.)
         self.load_slow_speed    = config.getfloat('load_slow_speed',     5., above=0.)
         self.unload_fast_speed  = config.getfloat('unload_fast_speed',  50., above=0.)
+        # unload_phase3_speed: Geschwindigkeit fuer BUFFER_UNLOAD_PHASE3 (Buffer
+        # allein zieht Filament rueckwaerts bis Eingang frei). Separat von
+        # unload_fast_speed, damit der synced G1 E-{sync_dist} Move langsam
+        # bleiben kann (Extruder-Blockierung bei hoher Geschwindigkeit) waehrend
+        # PHASE3 wieder schnell laeuft. Default = unload_fast_speed (rueckwaerts-
+        # kompatibel: wer keinen Wert setzt, behalt das bisherige Verhalten).
+        self.unload_phase3_speed = config.getfloat('unload_phase3_speed',
+                                                   self.unload_fast_speed,
+                                                   above=0.)
         self.grip_speed         = config.getfloat('grip_speed',         55., above=0.)
         self.accel              = config.getfloat('accel',            1000., above=0.)
 
@@ -3077,7 +3086,7 @@ class BufferFeeder:
 
             self._gcode_run_script_checked(
                 "BUFFER_UNLOAD_PHASE3 BUFFER=%s MAX_DISTANCE=%g SPEED=%g"
-                % (self.name, max_distance, fast_spd),
+                % (self.name, max_distance, self.unload_phase3_speed),
                 from_command=True)
         finally:
             if state_saved and self._macro_state_saved:
@@ -3098,7 +3107,7 @@ class BufferFeeder:
             STATE_OVERFLOW, STATE_JAM,
         })
         max_distance = gcmd.get_float('MAX_DISTANCE', self.unload_fast_max, above=0.)
-        speed        = gcmd.get_float('SPEED',        self.unload_fast_speed, above=0.)
+        speed        = gcmd.get_float('SPEED',        self.unload_phase3_speed, above=0.)
         nominal_chunk = 50.0
         # Clean start: cancel any inherited continuous feed and drain
         # any in-flight move so residual motion doesn't join the retract.
@@ -3520,6 +3529,7 @@ class BufferFeeder:
             'load_fast_speed':          self.load_fast_speed,
             'load_slow_speed':          self.load_slow_speed,
             'unload_fast_speed':        self.unload_fast_speed,
+            'unload_phase3_speed':      self.unload_phase3_speed,
             'load_fast_distance':       self.load_fast_distance,
             'load_slow_distance':       self.load_slow_distance,
             'load_buffer_max':          self.load_buffer_max,
