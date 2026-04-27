@@ -722,17 +722,22 @@ class BufferFeeder:
     # Vorteil: ein Resume-Pfad statt drei separate Mechanismen.
     #
     # Migration ist mehrere Tage Arbeit pro State und braucht parallele
-    # Test-Coverage (Phase 0 erweitert). Daher schrittweise:
+    # Test-Coverage. Status der schrittweisen Umsetzung:
     #
-    #   P7-30 (this commit): Flag use_fault_overlay + Overlay-Felder
-    #                        eingefuehrt, aber Logik noch unmigriert.
-    #   P7-31: cmd_BUFFER_LOAD_PHASE3 OVERFLOW-Behandlung migrieren
-    #   P7-32: _enter_overflow / _exit_overflow auf Overlay umstellen
-    #   P7-33: _trigger_jam / BUFFER_CLEAR_JAM auf Overlay umstellen
-    #   P7-34: RUNOUT-Pfade migrieren
-    #   P7-35: LOAD_PHASE_1/2/3 zu LOAD-Substate kollabieren
+    #   P7-30: ✅ Flag use_fault_overlay + Overlay-Felder eingefuehrt
+    #   P7-35: ✅ cmd_BUFFER_LOAD_PHASE3 OVERFLOW-Behandlung migriert
+    #          (_enter_overflow laesst state=LOAD_PHASE_3 statt
+    #           STATE_OVERFLOW zu kippen wenn use_fault_overlay=1)
+    #   P7-?? offen: _enter_overflow / _exit_overflow fuer alle anderen
+    #          States auf Overlay umstellen
+    #   P7-?? offen: _trigger_jam / BUFFER_CLEAR_JAM auf Overlay
+    #   P7-?? offen: RUNOUT-Pfade migrieren
+    #   P7-?? offen: LOAD_PHASE_1/2/3 zu LOAD-Substate kollabieren
     #
-    # Bis zur vollstaendigen Migration ist use_fault_overlay=1 ein No-Op.
+    # Mit use_fault_overlay=1 ist NUR der LOAD_PHASE_3-Pfad migriert.
+    # Alle anderen Fault-Pfade (OVERFLOW ausserhalb Phase 3, RUNOUT,
+    # JAM) laufen weiterhin als state-flip. Migration paused — wird
+    # bei Bedarf einzeln wieder aufgenommen.
     def __init__(self, config):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
@@ -899,12 +904,11 @@ class BufferFeeder:
         self._bang_bang_suspended = False
         self._initial_grip_end_time = None
         self._grip_follow_active = False
-        self._overflow_interrupted_follow = False
-        # Saved move state for post-overflow resume (follow + LOAD_PHASE_1).
-        self._overflow_resume_mm  = 0.0
-        self._overflow_resume_dir = 0
-        self._overflow_resume_spd = 0.0
-        self._overflow_interrupted_state = None
+        # P7-55: redundant overflow-resume init removed — FaultManager
+        # already initializes _overflow_interrupted_follow,
+        # _overflow_resume_mm/dir/spd, _overflow_interrupted_state in
+        # its own __init__ (Z. 566-570). Property setters here would
+        # have just re-set the same backing fields to the same defaults.
         self._load_phase3_distance = 0.0
         self._load_phase3_max_distance = 0.0
         self._load_phase3_speed = 0.0       # per-call feed speed in phase 3
@@ -954,9 +958,12 @@ class BufferFeeder:
         self._measure_feeding = False
         self._print_running = False
         self._jam_active = False
-        # TODO(P7-30): Fault-overlay migration is scaffold-only here.
-        # use_fault_overlay=1 remains a no-op until the existing
-        # OVERFLOW/RUNOUT/JAM paths are migrated to overlay flags.
+        # Fault-overlay migration (P7-30 roadmap, partially completed):
+        # use_fault_overlay=1 enables the LOAD_PHASE_3 overflow overlay
+        # (P7-35 — _enter_overflow leaves state=LOAD_PHASE_3 instead of
+        # flipping to STATE_OVERFLOW). RUNOUT and JAM paths remain on
+        # the legacy state-flip pattern; their overlay-fields below
+        # stay as scaffolding for a future migration step.
         self._fault_overflow = False
         self._fault_runout = False
         self._fault_jam = False
