@@ -2100,17 +2100,8 @@ class BufferFeeder:
         mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
         toolhead = self.printer.lookup_object('toolhead')
         th_now = toolhead.get_last_move_time()
-        # P7-50: Same toolhead-mid-move pessimism applies here. If the
-        # toolhead is currently executing a long G1 E (e.g. bang-bang
-        # fires during a manual extrude), th_now is the END of that
-        # move — anchoring the enable-toggle there would defer it
-        # 10s+ into the future. Use mcu_now as the floor in that case.
-        TH_AHEAD_THRESHOLD = 1.0
-        th_component = th_now + self.lead_time
-        if th_now > mcu_now + TH_AHEAD_THRESHOLD:
-            th_component = mcu_now + self.lead_time
         pt = max(mcu_now + self.lead_time,
-                 th_component,
+                 th_now + self.lead_time,
                  self._last_move_end_time + self.lead_time,
                  self._last_enable_schedule_time + self.lead_time)
         self._last_enable_schedule_time = pt
@@ -2266,28 +2257,7 @@ class BufferFeeder:
             # First chunk / gap: anchor to toolhead print_time.
             toolhead = self.printer.lookup_object('toolhead')
             th_time = toolhead.get_last_move_time()
-            # P7-50 (Hardware-Test 2026-04-27): When the toolhead is
-            # mid-move (e.g. an active G1 E50 @ 5mm/s during bang-bang
-            # feed), th_time is the END of that move — potentially
-            # 10s+ in the future. Anchoring t0 there would delay the
-            # buffer-stepper move until the toolhead finishes,
-            # breaking reactive HALL3-driven bang-bang. The user
-            # observed: "buffer zieht das filament erst nach,
-            # nachdem der extruder damit fertig ist und nicht wo
-            # hall 3 (buffer leer) betätigt wurde".
-            # Fix: if th_time is more than ~1s ahead of mcu_now, the
-            # toolhead is mid-move — anchor to mcu_now instead. The
-            # mellow-stepper has its own stepcompress cursor (separate
-            # from toolhead.extruder), so anchoring to mcu_now is
-            # safe as long as our own cursor isn't stale (covered by
-            # the flush_step_generation reprime above when gap > 5s).
-            TH_AHEAD_THRESHOLD = 1.0
-            if th_time > mcu_now + TH_AHEAD_THRESHOLD:
-                t0 = max(mcu_now + self.lead_time,
-                         self._last_move_end_time)
-            else:
-                t0 = max(th_time + self.lead_time,
-                         self._last_move_end_time)
+            t0 = max(th_time + self.lead_time, self._last_move_end_time)
 
         distance = abs(signed_distance)
         direction = 1.0 if signed_distance > 0 else -1.0
