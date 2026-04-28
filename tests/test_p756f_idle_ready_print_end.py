@@ -109,3 +109,125 @@ def test_idle_ready_print_end_halts_continuous_feed_only_on_pause():
     # natural state transitions handles motion stop.
     # If state is paused this would be cleared (separate test).
     assert feeder._continuous_feed is True
+
+
+# ---------------------------------------------------------------------------
+# P7-56f follow-up: lazy stale-suspend recovery
+# Codex review found a second stuck-state path: PAUSE → CANCEL.
+# idle_timeout:ready only fires once, so a CANCEL after PAUSE leaves
+# _bang_bang_suspended=True forever. _clear_stale_suspend_if_print_-
+# inactive heals it lazily at decision points.
+# ---------------------------------------------------------------------------
+
+def test_clear_stale_suspend_paused_keeps_lock():
+    """Genuine PAUSE state must NOT clear the suspend — RESUME is
+    legitimately expected."""
+    printer, feeder = make_feeder()
+    printer.objects['print_stats'] = FakePrintStats(state='paused')
+    feeder._bang_bang_suspended = True
+
+    cleared = feeder._clear_stale_suspend_if_print_inactive(0.0)
+
+    assert cleared is False
+    assert feeder._bang_bang_suspended is True
+
+
+def test_clear_stale_suspend_cancelled_clears_lock():
+    """PAUSE → CANCEL leaves state='cancelled' — must heal."""
+    printer, feeder = make_feeder()
+    printer.objects['print_stats'] = FakePrintStats(state='cancelled')
+    feeder._bang_bang_suspended = True
+
+    cleared = feeder._clear_stale_suspend_if_print_inactive(0.0)
+
+    assert cleared is True
+    assert feeder._bang_bang_suspended is False
+
+
+def test_clear_stale_suspend_error_clears_lock():
+    """PAUSE → ERROR leaves state='error' — must heal."""
+    printer, feeder = make_feeder()
+    printer.objects['print_stats'] = FakePrintStats(state='error')
+    feeder._bang_bang_suspended = True
+
+    cleared = feeder._clear_stale_suspend_if_print_inactive(0.0)
+
+    assert cleared is True
+    assert feeder._bang_bang_suspended is False
+
+
+def test_clear_stale_suspend_complete_clears_lock():
+    """PAUSE → finished print: also healable."""
+    printer, feeder = make_feeder()
+    printer.objects['print_stats'] = FakePrintStats(state='complete')
+    feeder._bang_bang_suspended = True
+
+    cleared = feeder._clear_stale_suspend_if_print_inactive(0.0)
+
+    assert cleared is True
+    assert feeder._bang_bang_suspended is False
+
+
+def test_clear_stale_suspend_no_lock_no_op():
+    """If suspend isn't set, do nothing (no print_stats lookup)."""
+    printer, feeder = make_feeder()
+    # Replace print_stats with one that raises if accessed
+    class TrapPrintStats:
+        def get_status(self, et):
+            raise AssertionError("should not be called")
+    printer.objects['print_stats'] = TrapPrintStats()
+    feeder._bang_bang_suspended = False
+
+    cleared = feeder._clear_stale_suspend_if_print_inactive(0.0)
+
+    assert cleared is False
+
+
+def test_clear_stale_suspend_missing_print_stats_keeps_lock():
+    """No print_stats object available — defensive: do not clear
+    (can't tell if it's a legitimate paused state). The Codex review
+    flagged this as the safer default."""
+    printer, feeder = make_feeder()
+    if 'print_stats' in printer.objects:
+        del printer.objects['print_stats']
+    feeder._bang_bang_suspended = True
+
+    cleared = feeder._clear_stale_suspend_if_print_inactive(0.0)
+
+    assert cleared is False
+    assert feeder._bang_bang_suspended is True
+
+
+def test_entrance_insert_heals_stale_suspend_after_cancel():
+    """End-to-end: PAUSE → CANCEL leaves _bang_bang_suspended=True.
+    Operator inserts new filament — entrance handler now lazily
+    clears the stale flag and proceeds to auto-grip (rather than
+    rejecting with 'Reinsert during paused print')."""
+    printer, feeder = make_feeder()
+    printer.objects['print_stats'] = FakePrintStats(state='cancelled')
+    feeder._bang_bang_suspended = True
+    feeder._state = buffer_feeder.STATE_IDLE
+    feeder._entrance_was_empty = True
+    grip_calls = []
+    feeder._start_initial_grip = lambda et: grip_calls.append(et)
+
+    feeder._on_entrance_insert(eventtime=42.0)
+
+    assert feeder._bang_bang_suspended is False
+    assert len(grip_calls) == 1, "expected auto-grip after stale-clear"
+
+
+def test_entrance_insert_during_real_pause_still_blocks():
+    """Genuine PAUSE (state='paused') still suppresses auto-grip."""
+    printer, feeder = make_feeder()
+    printer.objects['print_stats'] = FakePrintStats(state='paused')
+    feeder._bang_bang_suspended = True
+    feeder._state = buffer_feeder.STATE_IDLE
+    feeder._entrance_was_empty = True
+    grip_calls = []
+    feeder._start_initial_grip = lambda et: grip_calls.append(et)
+
+    feeder._on_entrance_insert(eventtime=42.0)
+
+    assert feeder._bang_bang_suspended is True
+    assert len(grip_calls) == 0, "must not grip during real pause"

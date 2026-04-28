@@ -275,6 +275,11 @@ class HallSensorMonitor:
             owner._runout_follow_active = False
             owner._runout_filament_ref = None
             owner._respond("Runout-follow cancelled (filament re-inserted)")
+        # P7-56f: heal sticky suspended-flag from PAUSE → CANCEL/ERROR
+        # path before we evaluate the auto-grip guards. Recompute
+        # will_auto_grip after the potential clear so this insert
+        # actually grips instead of falling into the suppressed branch.
+        owner._clear_stale_suspend_if_print_inactive(eventtime)
         will_auto_grip = (owner._state == STATE_IDLE
                           and not owner._bang_bang_suspended
                           and not owner._auto_off_by_user
@@ -709,6 +714,12 @@ class FaultManager:
         if owner._state in BUSY_PHASE_STATES:
             return ("LOAD/UNLOAD in progress (state=%s) — call "
                     "STOP_BUFFER_FILL to abort first." % owner._state)
+        if owner._bang_bang_suspended:
+            # P7-56f: heal stale suspend before rejecting. RESUME the
+            # print path doesn't fire idle_timeout:ready a second time
+            # if a PAUSE was cancelled instead.
+            owner._clear_stale_suspend_if_print_inactive(
+                owner.reactor.monotonic())
         if owner._bang_bang_suspended:
             return ("print is paused (bang-bang suspended). RESUME the "
                     "print — bang-bang re-engages automatically. If the "
@@ -1344,6 +1355,39 @@ class BufferFeeder:
             self._respond("Print start — engaging AUTO")
             self._enable_stepper()
             self._set_state(STATE_AUTO)
+
+    def _clear_stale_suspend_if_print_inactive(self, eventtime):
+        """Lazy stale-suspend recovery (P7-56f follow-up).
+
+        idle_timeout:ready only fires once per printing→ready transition.
+        The PAUSE → CANCEL pathway is therefore stuck:
+          1. PAUSE → :ready fires → _bang_bang_suspended=True
+          2. CANCEL_PRINT runs → print_stats.state='cancelled', no new
+             :ready event (we're already in ready)
+          3. _bang_bang_suspended stays True forever
+        Same trap exists for PAUSE → ERROR.
+
+        This helper polls print_stats.state at decision points (entrance
+        insert, _check_auto_ready) and clears the stale flag when the
+        print is no longer paused/running. Returns True if it cleared
+        something so the caller can re-evaluate any guard that depends
+        on the flag."""
+        if not self._bang_bang_suspended:
+            return False
+        try:
+            ps = self.printer.lookup_object('print_stats')
+            ps_state = ps.get_status(eventtime).get('state')
+        except Exception:
+            return False
+        if ps_state in ('printing', 'paused'):
+            return False
+        # Print is no longer pause-recoverable (complete / cancelled /
+        # error / standby). Clear the stale lock so next entrance-
+        # insert / AUTO_ON_IF_READY proceeds.
+        self._bang_bang_suspended = False
+        self._respond("Stale bang-bang-suspend cleared "
+                      "(print state=%s)" % ps_state)
+        return True
 
     def _on_idle_ready(self, *args):
         # idle_timeout:ready fires for BOTH a manual PAUSE during a
