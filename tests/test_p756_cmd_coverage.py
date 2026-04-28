@@ -352,6 +352,39 @@ def test_clear_jam_stays_idle_when_auto_off_by_user(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# STOP_BUFFER_FILL Phase-D regression: edge-case where _unsync_if_synced
+# triggers _resume_after_overflow which sets _grip_follow_active=True.
+# The phase-specific cleanup MUST run AFTER _full_reset_to_idle.
+# ---------------------------------------------------------------------------
+
+def test_stop_buffer_fill_clears_grip_follow_after_unsync_resume(monkeypatch):
+    """When STOP_BUFFER_FILL runs while sync is active and the state
+    is OVERFLOW with an interrupted INITIAL_GRIP follow, the
+    _unsync_if_synced path indirectly sets _grip_follow_active=True
+    via _resume_after_overflow. The phase-3 cleanup must follow the
+    helper so the flag ends up False (regression check for Sonnet's
+    Phase D finding)."""
+    _, feeder = make_feeder()
+    feeder._state = buffer_feeder.STATE_OVERFLOW
+    set_sensor_active(feeder, 'hall_overflow', False)  # HALL1 dropped already
+    feeder._fault_overflow = True
+
+    # Simulate "synced + interrupted follow" state.
+    monkeypatch.setattr(feeder, "_unsync_if_synced", lambda: (
+        setattr(feeder, "_grip_follow_active", True), False)[1])
+    monkeypatch.setattr(feeder, "_halt_motion", lambda: None)
+    monkeypatch.setattr(feeder, "_clear_recovery_flags", lambda: None)
+    monkeypatch.setattr(feeder, "_try_restore_gcode_state",
+                        lambda from_command=False: False)
+
+    feeder.cmd_STOP_BUFFER_FILL(FakeGCmd())
+
+    assert feeder._grip_follow_active is False
+    assert feeder._initial_grip_end_time is None
+    assert feeder._load_phase3_distance == 0.0
+
+
+# ---------------------------------------------------------------------------
 # _clear_recovery_flags helper (Phase D refactor target)
 # ---------------------------------------------------------------------------
 

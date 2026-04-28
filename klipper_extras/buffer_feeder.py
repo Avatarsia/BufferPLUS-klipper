@@ -469,14 +469,22 @@ class SyncCoordinator:
         self.trapq = self.motion_queuing.allocate_trapq()
         self.trapq_append = self.motion_queuing.lookup_trapq_append()
 
-    def anchor_step(self):
+    def _submit_anchor_move(self):
+        """Submit a 0.05mm anchor-step in the safe direction. Returns
+        the direction sign so the caller can format its respond message
+        (boot anchor vs. pre-sync REPRIME use different wording but the
+        underlying motion + direction-policy is identical)."""
         owner = self.owner
         owner._enable_stepper()
         anchor_dir = -1.0 if owner.hall_overflow else 1.0
         owner._submit_move(anchor_dir * 0.05, 10.0)
         owner._wait_for_move_done(direction=int(anchor_dir))
-        owner._respond("Stepcompress anchor primed (boot %s 0.05mm)"
-                      % ("retract" if anchor_dir < 0 else "feed"))
+        return anchor_dir
+
+    def anchor_step(self):
+        anchor_dir = self._submit_anchor_move()
+        self.owner._respond("Stepcompress anchor primed (boot %s 0.05mm)"
+                            % ("retract" if anchor_dir < 0 else "feed"))
 
     def sync_to_extruder(self, extruder_name):
         owner = self.owner
@@ -502,10 +510,7 @@ class SyncCoordinator:
         mcu_now = mcu.estimated_print_time(owner.reactor.monotonic())
         gap = mcu_now - owner._last_move_end_time
         if gap > REPRIME_GAP:
-            owner._enable_stepper()
-            anchor_dir = -1.0 if owner.hall_overflow else 1.0
-            owner._submit_move(anchor_dir * 0.05, 10.0)
-            owner._wait_for_move_done(direction=int(anchor_dir))
+            anchor_dir = self._submit_anchor_move()
             owner._respond("Sync prep: own-trapq cursor refreshed "
                           "(idle %.1fs, anchor %s 0.05mm)"
                           % (gap, "retract" if anchor_dir < 0 else "feed"))
@@ -663,14 +668,7 @@ class FaultManager:
                 self._overflow_resume_mm = 0.0
                 return
             self._overflow_resume_mm = 0.0
-            if owner.auto_load_after_follow:
-                if owner._hotend_warm():
-                    owner._schedule_gcode_script("LOAD_FILAMENT")
-                else:
-                    owner._respond(
-                        "Auto-Load übersprungen: Hotend zu kalt"
-                        " (%.0f/%.0f °C)" % (
-                            owner._hotend_temp(), owner.min_temp))
+            owner._maybe_auto_load()
             return
 
         if interrupted == STATE_LOAD_PHASE_1 and self._overflow_resume_mm > 0:
@@ -1804,14 +1802,7 @@ class BufferFeeder:
                     else:
                         self._set_state(STATE_IDLE)
                         self._respond("Initial grip done — IDLE")
-                        if self.auto_load_after_follow:
-                            if self._hotend_warm():
-                                self._schedule_gcode_script("LOAD_FILAMENT")
-                            else:
-                                self._respond(
-                                    "Auto-Load übersprungen: Hotend zu kalt"
-                                    " (%.0f/%.0f °C)" % (
-                                        self._hotend_temp(), self.min_temp))
+                        self._maybe_auto_load()
 
             # Follow-feed completion: grip + follow done, drop to IDLE.
             if (self._state == STATE_INITIAL_GRIP
@@ -1822,14 +1813,7 @@ class BufferFeeder:
                 self._grip_follow_active = False
                 self._set_state(STATE_IDLE)
                 self._respond("Grip follow done — IDLE")
-                if self.auto_load_after_follow:
-                    if self._hotend_warm():
-                        self._schedule_gcode_script("LOAD_FILAMENT")
-                    else:
-                        self._respond(
-                            "Auto-Load übersprungen: Hotend zu kalt"
-                            " (%.0f/%.0f °C)" % (
-                                self._hotend_temp(), self.min_temp))
+                self._maybe_auto_load()
 
             # Bang-bang nur in AUTO. (P7-16 erweiterte das auf
             # UNLOAD_PHASE_1, aber P7-20 hat den Tip-Forming-Pfad
@@ -2003,6 +1987,32 @@ class BufferFeeder:
             # Zwischen-Zone: hysteresis.
             pass
 
+    def _exit_phase3_stable(self, *, set_grace, respond_text):
+        """Common exit-sequence when HALL2 (buffer full) or HALL1 (with
+        OVERFLOW_OK=1) has been stable for the configured dwell.
+
+        Halts streaming, clears all four Phase 3 trackers, optionally
+        arms _post_load_overflow_grace (P7-46 bounce-suppression for
+        HALL1-stable exit), and chooses STATE_AUTO when entrance is
+        present + operator hasn't issued AUTO_OFF/HALT, else IDLE
+        (P7-49: AUTO is the natural post-LOAD state — bang-bang
+        re-fills on next extrusion regardless of print_running)."""
+        self._continuous_feed = False
+        self._halt_motion()
+        self._load_phase3_hall_full_since = None
+        self._load_phase3_hall_overflow_since = None
+        self._load_phase3_hall_full_drop_since = None
+        self._load_phase3_hall_overflow_drop_since = None
+        self._respond(respond_text)
+        if set_grace:
+            self._post_load_overflow_grace = True
+        if (self.entrance_detected
+                and not self._auto_off_by_user
+                and not self._halt_requested):
+            self._set_state(STATE_AUTO)
+        else:
+            self._set_state(STATE_IDLE)
+
     def _load_phase3_tick(self, eventtime):
         threshold = self._load_phase3_stable_timeout
         # HALL2 (full) Stabilitaets-Tracking mit Drop-Toleranz (P7-11):
@@ -2016,35 +2026,12 @@ class BufferFeeder:
                 self._load_phase3_hall_full_since = eventtime
             full_dwell = eventtime - self._load_phase3_hall_full_since
             if full_dwell >= threshold:
-                self._continuous_feed = False
-                self._halt_motion()
-                self._load_phase3_hall_full_since = None
-                self._load_phase3_hall_overflow_since = None
-                self._load_phase3_hall_full_drop_since = None
-                self._load_phase3_hall_overflow_drop_since = None
                 if threshold > 0:
-                    self._respond("LOAD Phase 3: HALL2 stable %.1fs, "
-                                  "buffer full" % full_dwell)
+                    msg = ("LOAD Phase 3: HALL2 stable %.1fs, buffer full"
+                           % full_dwell)
                 else:
-                    self._respond("LOAD Phase 3: HALL2 reached, buffer full")
-                # P7-49 (Hardware-Test 2026-04-27): AUTO ist nach
-                # einem deliberate LOAD das erwartete State —
-                # unabhaengig davon ob ein Print laeuft. Frueher hat
-                # der _print_running-Guard das auf IDLE gezwungen, mit
-                # der Begruendung "spontane Toolhead-Pulls duerfen
-                # nicht bang-bang triggern". Aber: nach einem
-                # erfolgreichen LOAD ist der naechste Schritt fast
-                # immer eine Extrusion (manuell oder Print) — und ohne
-                # AUTO bekommt das den Buffer nicht nachgefuettert.
-                # _post_load_overflow_grace haelt _main_tick davon ab,
-                # zurueck nach OVERFLOW zu kippen waehrend HALL1
-                # asserted ist; bei HALL1-fall wird der grace gecleart.
-                if (self.entrance_detected
-                        and not self._auto_off_by_user
-                        and not self._halt_requested):
-                    self._set_state(STATE_AUTO)
-                else:
-                    self._set_state(STATE_IDLE)
+                    msg = "LOAD Phase 3: HALL2 reached, buffer full"
+                self._exit_phase3_stable(set_grace=False, respond_text=msg)
                 return
         elif self._load_phase3_hall_full_since is not None:
             # Sensor gerade abgefallen — Grace-Window starten/checken.
@@ -2068,28 +2055,13 @@ class BufferFeeder:
                     self._load_phase3_hall_overflow_since = eventtime
                 overflow_dwell = eventtime - self._load_phase3_hall_overflow_since
                 if overflow_dwell >= threshold:
-                    self._continuous_feed = False
-                    self._halt_motion()
-                    self._load_phase3_hall_full_since = None
-                    self._load_phase3_hall_overflow_since = None
-                    self._load_phase3_hall_full_drop_since = None
-                    self._load_phase3_hall_overflow_drop_since = None
-                    self._respond("LOAD Phase 3: HALL1 stable %.1fs, "
-                                  "buffer overfilled (treating as full)"
-                                  % overflow_dwell)
-                    # P7-46 (Issue #16): suppress _main_tick from
-                    # re-triggering _enter_overflow now that we have
-                    # legitimately accepted the overfilled buffer as
-                    # the LOAD-success exit. Cleared on HALL1-fall.
-                    self._post_load_overflow_grace = True
-                    # P7-49: see HALL2-Exit branch above — AUTO is the
-                    # natural post-LOAD state regardless of print state.
-                    if (self.entrance_detected
-                            and not self._auto_off_by_user
-                            and not self._halt_requested):
-                        self._set_state(STATE_AUTO)
-                    else:
-                        self._set_state(STATE_IDLE)
+                    msg = ("LOAD Phase 3: HALL1 stable %.1fs, "
+                           "buffer overfilled (treating as full)"
+                           % overflow_dwell)
+                    # set_grace=True: P7-46 bounce-suppression — _main_tick
+                    # would otherwise re-trigger _enter_overflow on the
+                    # next cycle since HALL1 stays asserted.
+                    self._exit_phase3_stable(set_grace=True, respond_text=msg)
                     return
             elif self._load_phase3_hall_overflow_since is not None:
                 # Same drop-tolerance pattern wie bei HALL2.
@@ -2616,6 +2588,67 @@ class BufferFeeder:
     def _hotend_warm(self):
         return self._hotend_temp() >= self.min_temp
 
+    def _maybe_auto_load(self):
+        """If auto_load_after_follow=1 + hotend warm, schedule
+        LOAD_FILAMENT via deferred timer. Otherwise log skip-message
+        with actual/min temp. Called from grip/follow completion
+        and from _resume_after_overflow."""
+        if not self.auto_load_after_follow:
+            return
+        if self._hotend_warm():
+            self._schedule_gcode_script("LOAD_FILAMENT")
+        else:
+            self._respond(
+                "Auto-Load übersprungen: Hotend zu kalt"
+                " (%.0f/%.0f °C)" % (self._hotend_temp(), self.min_temp))
+
+    def _full_reset_to_idle(self, *, label,
+                            full=False,
+                            sticky_auto_off=False,
+                            preserve_lockout=False):
+        """Common cleanup pattern shared by HALT / AUTO_OFF / STOP_BUFFER_FILL.
+
+        Always done: unsync (with caller-prefixed respond), halt motion,
+        clear runout-follow + cooldown + post_load_grace, set
+        _halt_requested so any pending WAIT_IDLE in a macro propagates
+        the abort.
+
+        label: prefix for the unsync respond message ("HALT", "AUTO_OFF" ...)
+        full: AUTO_OFF/STOP-style — also clears _clear_recovery_flags,
+              measure flags, _pending_remaining_mm, _bang_bang_suspended;
+              calls _try_restore_gcode_state at end (E-mode-recovery for
+              failed LOAD/UNLOAD).
+        sticky_auto_off: sets _auto_off_by_user=True so a later auto-engage
+              hook stays blocked until the operator explicitly re-enables.
+        preserve_lockout: HALT-style — skip the STATE_IDLE transition if
+              state is OVERFLOW/JAM (safety lockout supersedes user halt).
+        """
+        if self._unsync_if_synced():
+            self._respond(label + " — also unsynced from extruder")
+        self._continuous_feed = False
+        self._halt_motion()
+        if full:
+            self._pending_remaining_mm = 0.0
+            self._clear_recovery_flags()
+        self._runout_follow_active = False
+        self._runout_filament_ref = None
+        if full:
+            self._measure_load_active = False
+            self._measure_feeding = False
+        self._cooldown_deadline = None
+        if full:
+            self._bang_bang_suspended = False
+        if sticky_auto_off:
+            self._auto_off_by_user = True
+        self._runout_recovery_pending = False
+        self._halt_requested = True
+        self._post_load_overflow_grace = False
+        if preserve_lockout and self._state in (STATE_OVERFLOW, STATE_JAM):
+            return
+        self._set_state(STATE_IDLE)
+        if full:
+            self._try_restore_gcode_state(from_command=True)
+
     def _measure_report(self):
         self._respond("MEASURE_LOAD result: %.1f mm" % self._measure_load_distance)
 
@@ -2674,33 +2707,10 @@ class BufferFeeder:
         # (which would otherwise re-submit chunks from the tick loop)
         # AND across any non-locked state so an ongoing LOAD_FILAMENT /
         # UNLOAD_FILAMENT macro aborts instead of silently continuing.
-        # P7-24: falls Sync-to-Extruder gerade aktiv ist (HALT mitten
-        # in UNLOAD_FILAMENT zwischen BUFFER_SYNC_TO_EXTRUDER und
-        # BUFFER_UNSYNC), den Stepper sofort vom Extruder-Trapq abkoppeln
-        # bevor wir den lokalen State manipulieren.
-        if self._unsync_if_synced():
-            self._respond("HALT — also unsynced from extruder")
-        self._continuous_feed = False
-        self._halt_motion()
-        # Clear runout-follow so a lingering follow timer doesn't
-        # later disable the stepper mid-operation after a new workflow
-        # has already started.
-        self._runout_follow_active = False
-        self._runout_filament_ref = None
-        # HALT supersedes a pending RUNOUT-recovery auto-grip.
-        self._runout_recovery_pending = False
-        # Wipe any cooldown timer so it can't later flip state.
-        self._cooldown_deadline = None
-        # P7-46: clear post-LOAD grace on operator HALT.
-        self._post_load_overflow_grace = False
-        # Preserve safety-lockout states (OVERFLOW / JAM); any other
-        # state drops to IDLE. Our _set_state(STATE_IDLE) hook also
-        # disables the stepper.
-        if self._state not in (STATE_OVERFLOW, STATE_JAM):
-            self._set_state(STATE_IDLE)
-        # Arm the abort flag so any pending WAIT_IDLE in a macro
-        # propagates the halt as a Klipper error.
-        self._halt_requested = True
+        # preserve_lockout=True keeps OVERFLOW/JAM intact (safety
+        # supersedes user halt), no full-reset (no recovery-flag clear,
+        # no E-mode-restore — operator may want to inspect state).
+        self._full_reset_to_idle(label="HALT", preserve_lockout=True)
         self._respond("HALT — workflow will abort at next wait")
 
     def _check_auto_ready(self, allow_jam=False):
@@ -2768,36 +2778,11 @@ class BufferFeeder:
         # everything and take control" lever. Clears recovery flags
         # AND the print-PAUSE suspension, so the user isn't stuck
         # (e.g. if the print ended uncleanly and idle_timeout never
-        # fired :printing again). _auto_off_by_user is set to sticky-
-        # block auto-grip on reinsert; re-engaging AUTO requires an
-        # explicit BUFFER_AUTO_ON.
-        # Also arms _halt_requested so any in-flight macro aborts
-        # at its next wait-point (same contract as BUFFER_HALT).
-        # P7-24: Stepper auch vom Extruder-Trapq abkoppeln falls
-        # ein Macro-Abbruch ihn dort haengen lies.
-        if self._unsync_if_synced():
-            self._respond("AUTO_OFF — also unsynced from extruder")
-        self._continuous_feed = False
-        self._halt_motion()
-        self._pending_remaining_mm = 0.0
-        self._clear_recovery_flags()
-        self._runout_follow_active = False
-        self._runout_filament_ref = None
-        self._measure_load_active = False
-        self._measure_feeding = False
-        self._cooldown_deadline = None
-        self._bang_bang_suspended = False  # operator overrides PAUSE-suspend
-        self._auto_off_by_user = True      # but reinsert auto-grip stays blocked
-        self._runout_recovery_pending = False
-        self._halt_requested = True
-        # P7-46: operator-explicit AUTO_OFF clears the post-LOAD grace
-        # so HALL1 returns to its normal lockout regime.
-        self._post_load_overflow_grace = False
-        self._set_state(STATE_IDLE)
-        # Best-effort restore of any pending LOAD/UNLOAD gcode-state
-        # (E-mode etc.) so AUTO_OFF cleanly recovers after a failed
-        # LOAD/UNLOAD that couldn't reach its _RESTORE_E_MODE.
-        self._try_restore_gcode_state(from_command=True)
+        # fired :printing again). sticky_auto_off=True blocks
+        # reinsert auto-grip until an explicit BUFFER_AUTO_ON.
+        self._full_reset_to_idle(label="AUTO_OFF",
+                                 full=True,
+                                 sticky_auto_off=True)
         self._respond("AUTO off — workflow will abort at next wait; recovery flags cleared")
 
     def _abort_signalled(self):
@@ -2838,11 +2823,7 @@ class BufferFeeder:
             self.reactor.pause(self.reactor.monotonic() + 0.05)
         if gcmd is not None:
             if allow_overflow:
-                if self._state == STATE_JAM or self._jam_active:
-                    raise self._cmd_error(
-                        "BufferFeeder: JAM active — aborting. "
-                        "Use BUFFER_CLEAR_JAM after inspection. "
-                        "(UNLOAD is allowed.)")
+                self._raise_if_jam()
             else:
                 self._raise_if_locked_out(gcmd, direction=direction)
 
@@ -2958,10 +2939,7 @@ class BufferFeeder:
         # Lockout-Check: JAM ist immer absolut. OVERFLOW nur wenn nicht
         # OVERFLOW_OK gesetzt — sonst handhabt _load_phase3_tick den
         # HALL1-Stable-Exit selbst.
-        if self._state == STATE_JAM or self._jam_active:
-            raise self._cmd_error(
-                "BufferFeeder: JAM active — aborting. "
-                "Use BUFFER_CLEAR_JAM after inspection. (UNLOAD is allowed.)")
+        self._raise_if_jam()
         if not overflow_ok:
             if (self._state == STATE_OVERFLOW
                     or self._is_hall1_active('phase3_entry')):
@@ -3022,10 +3000,7 @@ class BufferFeeder:
             self.reactor.pause(self.reactor.monotonic() + 0.1)
         # Postcheck: JAM bleibt absolut. Bei overflow_ok haben wir den
         # HALL1-Stable-Exit selbst gemacht — sonst alte Lockout-Logik.
-        if self._state == STATE_JAM or self._jam_active:
-            raise self._cmd_error(
-                "BufferFeeder: JAM active — aborting. "
-                "Use BUFFER_CLEAR_JAM after inspection. (UNLOAD is allowed.)")
+        self._raise_if_jam()
         if not overflow_ok:
             self._raise_if_locked_out(gcmd)
 
@@ -3263,39 +3238,21 @@ class BufferFeeder:
 
     cmd_STOP_BUFFER_FILL_help = "Abort any ongoing fill/grip/manual and return to IDLE"
     def cmd_STOP_BUFFER_FILL(self, gcmd):
-        # Full-reset semantic: STOP_BUFFER_FILL aborts everything and
-        # clears recovery flags so we land in a clean IDLE state.
-        # Like BUFFER_AUTO_OFF, also clears _bang_bang_suspended so
-        # the operator can re-engage AUTO without a missing RESUME.
-        # _auto_off_by_user keeps reinsert-grip blocked.
-        # Like BUFFER_HALT, arms _halt_requested so any macro waiting
-        # on BUFFER_WAIT_IDLE raises and aborts rather than silently
-        # continuing to the next phase.
-        # P7-24: Stepper auch vom Extruder-Trapq abkoppeln falls
-        # ein Macro-Abbruch ihn dort haengen lies.
-        if self._unsync_if_synced():
-            self._respond("STOP_BUFFER_FILL — also unsynced from extruder")
-        self._continuous_feed = False
-        self._halt_motion()
-        self._pending_remaining_mm = 0.0
+        # Like BUFFER_AUTO_OFF (full reset, sticky auto-off), but
+        # additionally clears phase-specific scratch state for the
+        # active grip / follow / phase3 workflow that AUTO_OFF leaves
+        # alone. STOP_BUFFER_FILL is "abort the current fill cycle".
+        self._full_reset_to_idle(label="STOP_BUFFER_FILL",
+                                 full=True,
+                                 sticky_auto_off=True)
+        # Phase-spezifische Cleanup-Flags NACH dem Helper, weil
+        # _unsync_if_synced (im Helper) ueber _exit_overflow →
+        # _resume_after_overflow im Edge-Case _grip_follow_active=True
+        # setzen kann. Inverse Reihenfolge wuerde das wieder ueber-
+        # schreiben (verifiziert von Sonnet/Codex Phase D Review).
         self._initial_grip_end_time = None
         self._grip_follow_active = False
         self._load_phase3_distance = 0.0
-        self._measure_load_active = False
-        self._measure_feeding = False
-        self._clear_recovery_flags()
-        self._runout_follow_active = False
-        self._runout_filament_ref = None
-        self._cooldown_deadline = None
-        self._bang_bang_suspended = False
-        self._auto_off_by_user = True
-        self._runout_recovery_pending = False
-        self._halt_requested = True
-        # P7-46: clear post-LOAD grace on operator stop.
-        self._post_load_overflow_grace = False
-        self._set_state(STATE_IDLE)
-        # Best-effort gcode-state restore after a failed LOAD/UNLOAD.
-        self._try_restore_gcode_state(from_command=True)
         self._respond("All feed loops stopped (workflow will abort at next wait)")
 
     cmd_BUFFER_STATE_DUMP_help = "Dump full buffer_feeder state to console"
@@ -3470,6 +3427,15 @@ class BufferFeeder:
         gc = self.printer.lookup_object('gcode')
         return gc.error(msg)
 
+    def _raise_if_jam(self):
+        """Hard JAM lockout: raise gcmd_error if state==JAM or _jam_active.
+        Used by entry-checks that allow OVERFLOW (UNLOAD-recovery,
+        LOAD_PHASE_3 with OVERFLOW_OK) but never JAM."""
+        if self._state == STATE_JAM or self._jam_active:
+            raise self._cmd_error(
+                "BufferFeeder: JAM active — aborting. "
+                "Use BUFFER_CLEAR_JAM after inspection. (UNLOAD is allowed.)")
+
     def _raise_if_locked_out(self, gcmd=None, direction=+1):
         """Abort a caller if the feeder is in a safety lockout.
 
@@ -3497,10 +3463,7 @@ class BufferFeeder:
                 raise self._cmd_error(
                     "BufferFeeder: HALL1 OVERFLOW active — aborting. "
                     "Clear overflow, then retry. (UNLOAD is allowed.)")
-            if self._state == STATE_JAM or self._jam_active:
-                raise self._cmd_error(
-                    "BufferFeeder: JAM active — aborting. "
-                    "Use BUFFER_CLEAR_JAM after inspection. (UNLOAD is allowed.)")
+            self._raise_if_jam()
 
     # -----------------------------------------------------------------------
     # Status API
