@@ -161,7 +161,8 @@ Pin-Format ist Klipper-Standard (`^!` = Pull-Up + invertiert für `buttons`-Modu
 | `burst_speed` | 50 | Triple-Click Burst |
 | `load_fast_speed` | 50 | LOAD Phase 1 (Feeder allein) |
 | `load_slow_speed` | 5 | LOAD Phase 3 (Extruder-Push ins Hotend) |
-| `unload_fast_speed` | 50 | UNLOAD Final-Retract |
+| `unload_fast_speed` | 50 | UNLOAD Sync-Retract (`G1 E-{sync_dist}` während BUFFER_SYNC_TO_EXTRUDER aktiv) |
+| `unload_phase3_speed` | 50 | UNLOAD Phase 3 (Buffer alleine zurück; Default = `unload_fast_speed`) |
 | `grip_speed` | 55 | Initial-Grip Burst |
 | `accel` | 1000 | Feeder-Beschleunigung [mm/s²] |
 | `grip_follow_speed` | 30 | Speed des Auto-Follow nach Grip |
@@ -184,7 +185,7 @@ Pin-Format ist Klipper-Standard (`^!` = Pull-Up + invertiert für `buttons`-Modu
 
 | Parameter | Default | Bedeutung |
 |---|---|---|
-| `max_feed_time` | 60 s | Watchdog Phase 3 → JAM |
+| `max_feed_time` | 60 s | Watchdog für Continuous-Feed (Bang-Bang / LOAD Phase 3 / BUFFER_FEED) → JAM |
 | `max_feed_distance` | 3000 mm | Watchdog Forward-Feed → JAM |
 | `hall_debounce_ms` | 50 | Sensor-Debounce |
 | `lead_time` | 0.3 s | Move-Scheduling-Lead |
@@ -313,7 +314,7 @@ orchestriert. Direkter Aufruf nur für Debug.
 |---|---|
 | `LOAD_FILAMENT` | Komplette Ladesequenz (3 Phasen). Hotend-Check. (Macro — kein BUFFER=-Parameter nötig) |
 | `UNLOAD_FILAMENT` | Tip-Forming + Sync-Retract + Feeder-Rückzug. (Macro — kein BUFFER=-Parameter nötig) |
-| `FORCE_BUFFER_FILL BUFFER=mellow` | Full Initial-Fill-Cycle: Grip-Phase, dann Continuous-Feed bis HALL2 aktiv (Buffer voll) → AUTO. Cleart `auto_off_by_user`, sodass die Bang-Bang-Regelung danach weiterläuft. Refused während Druck-PAUSE. |
+| `FORCE_BUFFER_FILL BUFFER=mellow` | Triggert Initial-Grip (~`grip_speed × grip_duration` mm Forward) plus optional Follow-Move bei `grip_follow_distance > 0`. State geht danach auf IDLE; AUTO + Bang-Bang-Refill werden anschließend automatisch durch die Auto-Engage-Hooks (`auto_engage_on_print_start` / Entrance-Insert) übernommen. Cleart `auto_off_by_user`, sodass diese Übergänge nicht blockiert werden. Refused während Druck-PAUSE. |
 | `STOP_BUFFER_FILL BUFFER=mellow` | Alles abbrechen, zurück in IDLE. |
 
 ### Kalibrierung
@@ -343,7 +344,7 @@ Zugriff aus Macros via `printer["buffer_feeder mellow"].<feld>`:
 
 | Feld | Typ | Bedeutung |
 |---|---|---|
-| `state` | str | INIT / IDLE / INITIAL_GRIP / AUTO / MANUAL_FEED / MANUAL_RETRACT / LOAD_PHASE_1..3 / UNLOAD_PHASE_1..3 / OVERFLOW / RUNOUT / JAM |
+| `state` | str | INIT / IDLE / INITIAL_GRIP / AUTO / MANUAL_FEED / MANUAL_RETRACT / LOAD_PHASE_1 / LOAD_PHASE_3 / UNLOAD_PHASE_3 / OVERFLOW / RUNOUT / JAM |
 | `hall_empty` | bool | HALL3 aktiv (Buffer leer) |
 | `hall_full` | bool | HALL2 aktiv (Buffer voll) |
 | `hall_overflow` | bool | HALL1 aktiv (Überlauf) |
@@ -386,7 +387,7 @@ LOAD_PHASE_3:
 - Signal: HALL2 aktiv UND Extruder extrudiert weiter (`last_position` wächst)
 - Threshold: HALL2 aktiv ≥ `jam_clog_dwell_time` (60s) UND Extruder-Progress
   ≥ `jam_clog_extrude_min` (30mm) in dieser Zeit
-- Aktion: PAUSE + M117 + M118 "Nozzle clog suspected"
+- Aktion: PAUSE + M118 "Nozzle clog suspected"
 
 **Typ 2 — Supply-Jam (Versorgung)**
 - Signal: HALL3 aktiv UND Feeder läuft vorwärts
@@ -408,9 +409,9 @@ Deaktivieren mit `jam_detection_enabled: 0` in der Config.
 Phase 1: BUFFER_LOAD_PHASE1 BUFFER=mellow
          Feeder allein schnell (load_fast_speed) load_fast_distance mm
          bis kurz vor den Toolhead.
-Phase 2: BUFFER_LOAD_PHASE3 BUFFER=mellow STABLE_TIMEOUT=10 OVERFLOW_OK=1
+Phase 2: BUFFER_LOAD_PHASE3 BUFFER=mellow STABLE_TIMEOUT=1 OVERFLOW_OK=1 CHUNK_DISTANCE=50
          Feeder füllt den Buffer bis HALL2 (oder HALL1 bei Wiederhol-LOAD)
-         10s stable auslöst. HALL2 = Sensor-Bestätigung dass das
+         1s stable auslöst. HALL2 = Sensor-Bestätigung dass das
          Filament gestaged ist und der Pfad bis zum Toolhead frei.
 Phase 3: BUFFER_SYNC_TO_EXTRUDER → G1 E{load_slow_distance} → BUFFER_UNSYNC
          Buffer-Stepper folgt Extruder-Trapq 1:1. Extruder schiebt das
@@ -427,7 +428,7 @@ wurde mit P7-55b entfernt. Der parallele Feed ist jetzt im
 
 ### UNLOAD_FILAMENT
 
-Mit `use_python_unload=1` (Default) läuft der gesamte Workflow als
+Mit `use_python_unload=1` (Default in `lll.cfg`: 0 — empfohlen `1`) läuft der gesamte Workflow als
 Python-Befehl `BUFFER_UNLOAD_FILAMENT` — try/finally garantiert dass
 `BUFFER_SYNC_TO_EXTRUDER` immer wieder entkoppelt wird, auch bei
 Klipper-error oder M112 mid-sync.
@@ -587,21 +588,31 @@ Eine **eigene trapq** (wie Klipper's `manual_stepper` sie anlegt) wird
 vom Background-Flusher separat bedient. Steps werden generiert, ohne
 die Toolhead-Queue zu konsultieren.
 
-**Zeitbasis:** die Extension nutzt `toolhead.get_last_move_time()` als
-t0-Anker (wie auch `manual_stepper` und `force_move` es tun). Diese
-Funktion flusht **ausschließlich** den Lookahead-Planner — sie drained
-**nicht** die MCU-Step-Queue (das wäre `flush_step_generation()`, was
-wir explizit vermeiden). Der Lookahead-Flush passiert im Druckbetrieb
-sowieso ständig; zusätzlicher Overhead ist minimal.
+**Zeitbasis (Reactor-Tick-Pfad, default):** die Extension nutzt
+`toolhead.get_last_move_time()` als t0-Anker (wie auch
+`manual_stepper` und `force_move` es tun). Diese Funktion flusht den
+Lookahead-Planner; sie drained nicht die MCU-Step-Queue. Der
+Lookahead-Flush passiert im Druckbetrieb sowieso ständig.
 
-Warum nicht einfach `mcu.estimated_print_time(reactor.monotonic())`?
-Weil stepcompress' interne `last_step_clock` bis zum ersten Step auf
-0 bleibt und Klippers `CLOCK_DIFF_MAX` bei ~17s liegt. Ein erster Move
-nach langem Idle würde ein Interval > uint32 erzeugen → „Invalid
-sequence" → Shutdown. `toolhead.get_last_move_time()` resynct intern
-gegen `estimated_print_time + BUFFER_TIME_START` bzw.
-`motion_queuing.calc_step_gen_restart()` — das Ergebnis liegt immer
-im Zeitraum, den die Step-Gen-Maschinerie tracken kann.
+**Zeitbasis (Flush-Callback-Pfad, `use_flush_callback_bang_bang=1`):**
+Bang-Bang submits werden im `motion_queuing.register_flush_callback`-
+Hook gemacht und nutzen `step_gen_time + lead_time` direkt von Klipper
+— race-free gegen Toolhead-Moves, weil wir im selben Flush-Cycle wie
+Klippers Step-Generation laufen.
+
+`flush_step_generation()` wird gezielt bei Trapq-Bind/Unbind
+(`BUFFER_SYNC_TO_EXTRUDER` / `BUFFER_UNSYNC`) und im REPRIME-Pfad
+(>5 s Idle) aufgerufen — beides zwingend, damit der stepcompress-
+Cursor konsistent bleibt. Im normalen Feed-Streaming wird es nicht
+gerufen.
+
+Warum nicht einfach `mcu.estimated_print_time(reactor.monotonic())`
+für den default-Pfad? Weil stepcompress' interne `last_step_clock`
+bis zum ersten Step auf 0 bleibt und Klippers `CLOCK_DIFF_MAX` bei
+~17s liegt. Ein erster Move nach langem Idle würde ein Interval >
+uint32 erzeugen → „Invalid sequence" → Shutdown. Der Toolhead-Anker
+resynct intern gegen die Step-Gen-Cursor und liegt damit immer im
+gültigen Zeitraum.
 
 Zusätzlich wird beim allerersten Move `stepper.set_position((0,0,0))`
 aufgerufen (primed itersolve + gibt stepcompress einen Clock-Baseline),
@@ -622,9 +633,12 @@ trapq_append(own_trapq, t0, accel_t, cruise_t, decel_t, ...)
 motion_queuing.note_mcu_movequeue_activity(t0 + total_time)
 ```
 
-Keine `flush_step_generation()`-Aufrufe. Background-Flusher generiert
-Steps, MCU führt sie parallel zu den Toolhead-Steps aus. Der
-Lookahead-Flush unterbricht den Toolhead-Motion-Planner nicht sichtbar —
+Im normalen Feed-Streaming keine `flush_step_generation()`-Aufrufe —
+Background-Flusher generiert Steps, MCU führt sie parallel zu den
+Toolhead-Steps aus. `flush_step_generation()` läuft nur bei Trapq-
+Bind/Unbind (SYNC_TO_EXTRUDER / UNSYNC) und im REPRIME-Pfad nach
+langer Idle. Der Lookahead-Flush via `get_last_move_time()`
+unterbricht den Toolhead-Motion-Planner nicht sichtbar —
 Retracts/PA-Moves laufen durch, als wäre der Buffer nicht da.
 
 ### Sensor-Polling
@@ -636,8 +650,9 @@ default) erfolgt im Main-Tick bei 50 Hz.
 ### State-Machine
 
 Explizite States (INIT, IDLE, INITIAL_GRIP, AUTO, MANUAL_FEED,
-MANUAL_RETRACT, LOAD_PHASE_1-3, UNLOAD_PHASE_1-3, OVERFLOW, RUNOUT,
-JAM). Transitions sind im Main-Tick oder in Event-Handlern getriggert.
+MANUAL_RETRACT, LOAD_PHASE_1, LOAD_PHASE_3, UNLOAD_PHASE_3, OVERFLOW,
+RUNOUT, JAM). Transitions sind im Main-Tick oder in Event-Handlern
+getriggert.
 HALL1-Overflow hat absolute Priorität über allem.
 
 ---
@@ -653,7 +668,7 @@ HALL1-Overflow hat absolute Priorität über allem.
 | Bug in Reactor-Logik → Endlosfeed | HALL1 Hard-Stop + `max_feed_time` / `max_feed_distance` |
 
 **Bekannte Grenzen:**
-- Tip-Forming läuft ohne Feeder-Mitlauf (Verhaltens-Änderung).
+- Tip-Forming läuft mit Feeder-Mitlauf via `BUFFER_SYNC_TO_EXTRUDER` (1:1-Lockstep mit dem Extruder; Buffer-Volumen bleibt konstant).
 - Keine persistente Kalibrierung via `save_variables`.
 - Single-Buffer only.
 - Kein Encoder-/Stallguard-Slip-Detection.

@@ -7,10 +7,19 @@
 # control (HALL-based hysteresis) + explicit GCode commands for manual,
 # LOAD, UNLOAD, and calibration flows.
 #
-# Key property: the feeder moves without ever calling
-# toolhead.flush_step_generation() during print. Time-base for moves is
-# mcu.estimated_print_time(reactor.monotonic()) + lead_time — decoupled
-# from the toolhead lookahead.
+# Time-base for normal feed submits is toolhead.get_last_move_time() +
+# lead_time (anchored against the MCU step-gen cursor — same safeguard
+# Klipper's manual_stepper uses for first-step-after-idle). The
+# flush-callback bang-bang path (use_flush_callback_bang_bang=1) uses
+# step_gen_time + lead_time directly from motion_queuing's flush
+# notification.
+# flush_step_generation() is called explicitly in three places:
+#   - sync_to_extruder / unsync_if_synced (trapq-binding swaps must
+#     drain pending generation before the swap),
+#   - REPRIME path in _submit_single_trapezoid when the feeder has been
+#     idle longer than CLOCK_DIFF_MAX (~17s) so the stepcompress cursor
+#     wouldn't overflow on the next move.
+# It is NOT called per-move during normal feed streaming.
 #
 # See docs/superpowers/specs/2026-04-23-python-ansatz-design.md for the
 # full design rationale and feature mapping.
@@ -473,7 +482,7 @@ class SyncCoordinator:
                 "Object '%s' is not an extruder (no get_trapq method)"
                 % extruder_name)
         # P7-46 (Issue #16): Gap-Reprime BEFORE the trapq-swap. The
-        # own-trapq path in _submit_single_trapezoid (~Z. 2148) has a
+        # own-trapq path in _submit_single_trapezoid has a
         # gap-reprime check, but sync_to_extruder didn't — so if no
         # buffer-stepper move ran for > CLOCK_DIFF_MAX (~16.7s), the
         # first extruder-step after the swap would land at a
@@ -507,7 +516,8 @@ class SyncCoordinator:
             # sequence. extruder.last_position ist die physikalische
             # commanded_pos des Extruder-Steppers (unabhängig von G92-Offsets)
             # — selbes Pattern wie Klipper's ExtruderStepper.sync_to_extruder
-            # (extruder.py:968ff) und _read_extruder_position() in dieser Datei.
+            # (klippy/kinematics/extruder.py: ExtruderStepper.sync_to_
+            # extruder) und _read_extruder_position() in dieser Datei.
             _ext_pos = extruder.last_position
             owner.stepper.set_position((_ext_pos, 0., 0.))
             owner.stepper.set_trapq(extruder.get_trapq())
@@ -732,7 +742,7 @@ class BufferFeeder:
     #          States auf Overlay umstellen
     #   P7-?? offen: _trigger_jam / BUFFER_CLEAR_JAM auf Overlay
     #   P7-?? offen: RUNOUT-Pfade migrieren
-    #   P7-?? offen: LOAD_PHASE_1/2/3 zu LOAD-Substate kollabieren
+    #   P7-?? offen: LOAD_PHASE_1 + LOAD_PHASE_3 zu LOAD-Substate kollabieren
     #
     # Mit use_fault_overlay=1 ist NUR der LOAD_PHASE_3-Pfad migriert.
     # Alle anderen Fault-Pfade (OVERFLOW ausserhalb Phase 3, RUNOUT,
@@ -859,11 +869,15 @@ class BufferFeeder:
         # ("stepcompress o=X i=... c=... a=...: Invalid sequence" → MCU
         # shutdown). Prime the stepper once before the first real move by
         # calling stepper.set_position — same pattern force_move.manual_move
-        # uses. Flag gates it so we do it exactly once at boot.
+        # uses. Flag gates the FIRST boot-prime; it is also reset by
+        # _submit_single_trapezoid's REPRIME path whenever the feeder
+        # has been idle longer than REPRIME_GAP (~5s), so a fresh
+        # flush+set_position runs at every long-idle wakeup.
         # P7-47 added a separate but related fix in SyncCoordinator.
         # sync_to_extruder: when binding the stepper to the extruder
         # trapq, we now seed the position with extruder.last_position
-        # (matching klippy/kinematics/extruder.py:75) instead of (0,0,0)
+        # (matching klippy/kinematics/extruder.py: ExtruderStepper.
+        # sync_to_extruder) instead of (0,0,0)
         # — otherwise itersolve sees a 180mm phase mismatch on the
         # first synced step and crashes with i=0/c=N invalid sequence.
         # The flag here is the first-move boot prime; the cursor-fresh
@@ -1057,7 +1071,7 @@ class BufferFeeder:
         # we can toggle the feature flag at runtime; the callback
         # itself is a no-op when the flag is off, falling through to
         # the legacy reactor-tick path. Mainline Klipper API:
-        # klippy/extras/motion_queuing.py:106 register_flush_callback
+        # klippy/extras/motion_queuing.py register_flush_callback
         # fires synchronously inside the MCU flush cycle with
         # signature (flush_time, step_gen_time). Anchoring submits at
         # step_gen_time + lead_time bypasses the toolhead.get_last_
@@ -1947,7 +1961,8 @@ class BufferFeeder:
     def _on_mcu_flush(self, flush_time, step_gen_time):
         """P7-52: Flush-callback driven bang-bang. Klipper's motion_
         queuing module fires this synchronously inside the MCU flush
-        cycle (klippy/extras/motion_queuing.py:155). We have two
+        cycle (klippy/extras/motion_queuing.py callback dispatch loop
+        in flush_handler). We have two
         timing parameters from the caller:
 
           flush_time     — last time steps were sent to the MCU
@@ -2056,8 +2071,11 @@ class BufferFeeder:
                 self._load_phase3_hall_full_drop_since = None
         # HALL1 (overflow) Stabilitaets-Tracking — nur wenn OVERFLOW_OK=1
         # gesetzt wurde. Sonst ist der HALL1-Pfad weiterhin via
-        # _main_tick → _enter_overflow → state=OVERFLOW abgewickelt
-        # (alter Pfad, raised im cmd_BUFFER_LOAD_PHASE3-Postcheck).
+        # _main_tick → _enter_overflow abgewickelt: legacy-Pfad
+        # state=OVERFLOW + raise im cmd_BUFFER_LOAD_PHASE3-Postcheck;
+        # use_fault_overlay=1-Pfad belaesst state=LOAD_PHASE_3 und setzt
+        # nur _fault_overflow=True, raise dann im selben Postcheck via
+        # fault_overflow-Flag.
         if self._load_phase3_overflow_ok:
             if self.hall_overflow:
                 self._load_phase3_hall_overflow_drop_since = None
@@ -3176,7 +3194,8 @@ class BufferFeeder:
         # anderen Extruder-Steppers, sodass jeder G1 E Move den Buffer-
         # Stepper synchron mitzieht. Pattern aus
         # klippy/kinematics/extruder.py:ExtruderStepper.sync_to_extruder
-        # (extruder.py:968-995).
+        # (klippy/kinematics/extruder.py: ExtruderStepper.sync_to_
+        # extruder).
         # Anwendungsfall: UNLOAD-Tip-Forming. Der Hauptextruder pusht/pullt
         # Filament durchs Hotend, der Buffer-Stepper folgt mit derselben
         # Geschwindigkeit — Filament-Strang fliesst durch den Buffer ohne
@@ -3234,11 +3253,15 @@ class BufferFeeder:
                 "Call STOP_BUFFER_FILL or BUFFER_AUTO_OFF first."
                 % self._state)
         # Operator explicitly invoked the full fill cycle. Clear the
-        # stale HALT flag AND the AUTO_OFF-by-user flag, so the
-        # initial-grip post-condition transitions to AUTO (bang-bang
-        # continues until HALL2). Without clearing _auto_off_by_user
-        # the grip would drop to IDLE and the "fill" part never runs —
-        # BUFFER_AUTO_OFF → FORCE_BUFFER_FILL only grips 10s then stops.
+        # stale HALT flag AND the AUTO_OFF-by-user flag. Initial-grip
+        # itself drops to STATE_IDLE on completion (or stays in
+        # INITIAL_GRIP for the optional follow-feed if grip_follow_
+        # distance > 0); STATE_AUTO is then engaged automatically by
+        # the auto-engage hooks (auto_engage_on_print_start /
+        # on_entrance_insert) — but ONLY if _auto_off_by_user is
+        # cleared. Without that clear, BUFFER_AUTO_OFF →
+        # FORCE_BUFFER_FILL would grip 10s and then stay IDLE
+        # forever, the "fill" part never running.
         # Also consume any pending RUNOUT-recovery: this manual fill
         # IS the recovery, no need for RESUME to re-trigger.
         self._halt_requested = False
