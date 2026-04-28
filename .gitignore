@@ -13,3 +13,4 @@ __pycache__/
 
 # Logs (per-tool, nicht committen)
 klippy.log
+klippy.log.*

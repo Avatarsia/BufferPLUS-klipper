@@ -859,7 +859,16 @@ class BufferFeeder:
         # ("stepcompress o=X i=... c=... a=...: Invalid sequence" → MCU
         # shutdown). Prime the stepper once before the first real move by
         # calling stepper.set_position — same pattern force_move.manual_move
-        # uses. Flag gates it so we do it exactly once.
+        # uses. Flag gates it so we do it exactly once at boot.
+        # P7-47 added a separate but related fix in SyncCoordinator.
+        # sync_to_extruder: when binding the stepper to the extruder
+        # trapq, we now seed the position with extruder.last_position
+        # (matching klippy/kinematics/extruder.py:75) instead of (0,0,0)
+        # — otherwise itersolve sees a 180mm phase mismatch on the
+        # first synced step and crashes with i=0/c=N invalid sequence.
+        # The flag here is the first-move boot prime; the cursor-fresh
+        # logic for ongoing operation lives in
+        # _submit_single_trapezoid's REPRIME_GAP path.
         self._stepcompress_primed = False
         # P7-20: sync-to-extruder state. Wenn != None ist der Buffer-
         # Stepper an einen externen Extruder-Trapq gebunden (folgt
@@ -1861,8 +1870,8 @@ class BufferFeeder:
             # Continuous feed: keep chunks streaming, but only in
             # states where continuous motion is the intended behavior.
             # Otherwise a stale _continuous_feed=True would leak into
-            # LOAD_PHASE_1/2 / UNLOAD_PHASE_2 single-shot moves and
-            # keep pumping extra chunks after the phase's own move.
+            # LOAD_PHASE_1 single-shot moves and keep pumping extra
+            # chunks after the phase's own move.
             if (self._continuous_feed
                     and self._state in CONTINUOUS_FEED_STATES
                     and not self._move_in_flight()):
