@@ -1081,94 +1081,64 @@ class BufferFeeder:
             self.motion_queuing.register_flush_callback(
                 self._on_mcu_flush, can_add_trapq=True)
 
-        # ----- GCode registrations -----
-        # P7-40: Migration register_command -> register_mux_command.
-        # Mux-Key 'BUFFER' folgt der Klipper-Mainline-Konvention fuer
-        # load_config_prefix-Module mit Single-Type-Identifier. User-Aufruf:
-        #   BUFFER_AUTO_ON BUFFER=mellow
-        # Mux-Value = self.name (bei aktuellem Setup "mellow", aus
-        # [buffer_feeder mellow]). Mehrere Instanzen koennen denselben
-        # Command-Namen registrieren, der Dispatcher waehlt via BUFFER=...
-        gcode = self.printer.lookup_object('gcode')
-        gcode.register_mux_command('BUFFER_FEED', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_FEED,
-                                   desc=self.cmd_BUFFER_FEED_help)
-        gcode.register_mux_command('BUFFER_RETRACT', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_RETRACT,
-                                   desc=self.cmd_BUFFER_RETRACT_help)
-        gcode.register_mux_command('BUFFER_HALT', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_HALT,
-                                   desc=self.cmd_BUFFER_HALT_help)
-        gcode.register_mux_command('BUFFER_AUTO_ON', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_AUTO_ON,
-                                   desc=self.cmd_BUFFER_AUTO_ON_help)
-        gcode.register_mux_command('BUFFER_AUTO_ON_IF_READY', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_AUTO_ON_IF_READY,
-                                   desc=self.cmd_BUFFER_AUTO_ON_IF_READY_help)
-        gcode.register_mux_command('BUFFER_AUTO_OFF', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_AUTO_OFF,
-                                   desc=self.cmd_BUFFER_AUTO_OFF_help)
-        gcode.register_mux_command('BUFFER_WAIT_IDLE', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_WAIT_IDLE,
-                                   desc=self.cmd_BUFFER_WAIT_IDLE_help)
-        gcode.register_mux_command('BUFFER_LOAD_PHASE1', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_LOAD_PHASE1,
-                                   desc=self.cmd_BUFFER_LOAD_PHASE1_help)
-        # P7-55b: BUFFER_LOAD_PHASE2 entfernt — durch SYNC_TO_EXTRUDER
-        # ersetzt. Siehe Kommentar bei cmd_BUFFER_LOAD_PHASE3.
-        gcode.register_mux_command('BUFFER_LOAD_PHASE3', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_LOAD_PHASE3,
-                                   desc=self.cmd_BUFFER_LOAD_PHASE3_help)
-        gcode.register_mux_command('BUFFER_UNLOAD_FILAMENT', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_UNLOAD_FILAMENT,
-                                   desc=self.cmd_BUFFER_UNLOAD_FILAMENT_help)
-        gcode.register_mux_command('BUFFER_UNLOAD_PHASE3', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_UNLOAD_PHASE3,
-                                   desc=self.cmd_BUFFER_UNLOAD_PHASE3_help)
-        gcode.register_mux_command('BUFFER_SYNC_TO_EXTRUDER', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_SYNC_TO_EXTRUDER,
-                                   desc=self.cmd_BUFFER_SYNC_TO_EXTRUDER_help)
-        gcode.register_mux_command('BUFFER_UNSYNC', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_UNSYNC,
-                                   desc=self.cmd_BUFFER_UNSYNC_help)
-        gcode.register_mux_command('FORCE_BUFFER_FILL', 'BUFFER', self.name,
-                                   self.cmd_FORCE_BUFFER_FILL,
-                                   desc=self.cmd_FORCE_BUFFER_FILL_help)
-        gcode.register_mux_command('STOP_BUFFER_FILL', 'BUFFER', self.name,
-                                   self.cmd_STOP_BUFFER_FILL,
-                                   desc=self.cmd_STOP_BUFFER_FILL_help)
-        gcode.register_mux_command('BUFFER_STATE_DUMP', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_STATE_DUMP,
-                                   desc=self.cmd_BUFFER_STATE_DUMP_help)
-        gcode.register_mux_command('CALIBRATE_FEEDER_SYNC', 'BUFFER', self.name,
-                                   self.cmd_CALIBRATE_FEEDER_SYNC,
-                                   desc=self.cmd_CALIBRATE_FEEDER_SYNC_help)
-        gcode.register_mux_command('MEASURE_LOAD_START', 'BUFFER', self.name,
-                                   self.cmd_MEASURE_LOAD_START,
-                                   desc=self.cmd_MEASURE_LOAD_START_help)
-        gcode.register_mux_command('MEASURE_LOAD_STOP', 'BUFFER', self.name,
-                                   self.cmd_MEASURE_LOAD_STOP,
-                                   desc=self.cmd_MEASURE_LOAD_STOP_help)
-        gcode.register_mux_command('ENABLE_RUNOUT_SENSOR', 'BUFFER', self.name,
-                                   self.cmd_ENABLE_RUNOUT_SENSOR,
-                                   desc="Set print_running=1 — enable runout PAUSE")
-        gcode.register_mux_command('DISABLE_RUNOUT_SENSOR', 'BUFFER', self.name,
-                                   self.cmd_DISABLE_RUNOUT_SENSOR,
-                                   desc="Set print_running=0 — disable runout PAUSE")
-        gcode.register_mux_command('BUFFER_CLEAR_JAM', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_CLEAR_JAM,
-                                   desc="Clear JAM state after operator intervention")
-        gcode.register_mux_command('BUFFER_RESTORE_STATE', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_RESTORE_STATE,
-                                   desc="Best-effort restore of gcode-state saved by a failed LOAD/UNLOAD")
-        gcode.register_mux_command('BUFFER_SAVE_MACRO_STATE', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_SAVE_MACRO_STATE,
-                                   desc="Internal: mark gcode-state as saved (used by _SAVE_E_MODE)")
-        gcode.register_mux_command('BUFFER_RESTORE_MACRO_STATE', 'BUFFER', self.name,
-                                   self.cmd_BUFFER_RESTORE_MACRO_STATE,
-                                   desc="Internal: restore + clear gcode-state save (used by _RESTORE_E_MODE)")
+        self._register_gcode_commands()
 
         logging.info("buffer_feeder '%s' initialised", self.name)
+
+    def _register_gcode_commands(self):
+        """Register all gcode commands as mux-commands on key 'BUFFER'.
+
+        P7-40: register_command → register_mux_command. Mux-Key 'BUFFER'
+        folgt der Klipper-Mainline-Konvention fuer load_config_prefix-
+        Module mit Single-Type-Identifier. User-Aufruf:
+          BUFFER_AUTO_ON BUFFER=mellow
+        Mux-Value = self.name (z.B. "mellow" aus [buffer_feeder mellow]).
+        Mehrere Instanzen koennen denselben Command-Namen registrieren,
+        Dispatcher waehlt via BUFFER=...
+        """
+        gcode = self.printer.lookup_object('gcode')
+        # (gcode_name, handler, help_text). help_text=None zieht den
+        # *_help-Class-Attr; sonst inline-String wenn der Befehl keinen
+        # _help hat.
+        commands = [
+            ('BUFFER_FEED',                 self.cmd_BUFFER_FEED,                 None),
+            ('BUFFER_RETRACT',              self.cmd_BUFFER_RETRACT,              None),
+            ('BUFFER_HALT',                 self.cmd_BUFFER_HALT,                 None),
+            ('BUFFER_AUTO_ON',              self.cmd_BUFFER_AUTO_ON,              None),
+            ('BUFFER_AUTO_ON_IF_READY',     self.cmd_BUFFER_AUTO_ON_IF_READY,     None),
+            ('BUFFER_AUTO_OFF',             self.cmd_BUFFER_AUTO_OFF,             None),
+            ('BUFFER_WAIT_IDLE',            self.cmd_BUFFER_WAIT_IDLE,            None),
+            ('BUFFER_LOAD_PHASE1',          self.cmd_BUFFER_LOAD_PHASE1,          None),
+            # P7-55b: BUFFER_LOAD_PHASE2 entfernt (durch SYNC_TO_EXTRUDER ersetzt)
+            ('BUFFER_LOAD_PHASE3',          self.cmd_BUFFER_LOAD_PHASE3,          None),
+            ('BUFFER_UNLOAD_FILAMENT',      self.cmd_BUFFER_UNLOAD_FILAMENT,      None),
+            ('BUFFER_UNLOAD_PHASE3',        self.cmd_BUFFER_UNLOAD_PHASE3,        None),
+            ('BUFFER_SYNC_TO_EXTRUDER',     self.cmd_BUFFER_SYNC_TO_EXTRUDER,     None),
+            ('BUFFER_UNSYNC',               self.cmd_BUFFER_UNSYNC,               None),
+            ('FORCE_BUFFER_FILL',           self.cmd_FORCE_BUFFER_FILL,           None),
+            ('STOP_BUFFER_FILL',            self.cmd_STOP_BUFFER_FILL,            None),
+            ('BUFFER_STATE_DUMP',           self.cmd_BUFFER_STATE_DUMP,           None),
+            ('CALIBRATE_FEEDER_SYNC',       self.cmd_CALIBRATE_FEEDER_SYNC,       None),
+            ('MEASURE_LOAD_START',          self.cmd_MEASURE_LOAD_START,          None),
+            ('MEASURE_LOAD_STOP',           self.cmd_MEASURE_LOAD_STOP,           None),
+            ('ENABLE_RUNOUT_SENSOR',        self.cmd_ENABLE_RUNOUT_SENSOR,
+                "Set print_running=1 — enable runout PAUSE"),
+            ('DISABLE_RUNOUT_SENSOR',       self.cmd_DISABLE_RUNOUT_SENSOR,
+                "Set print_running=0 — disable runout PAUSE"),
+            ('BUFFER_CLEAR_JAM',            self.cmd_BUFFER_CLEAR_JAM,
+                "Clear JAM state after operator intervention"),
+            ('BUFFER_RESTORE_STATE',        self.cmd_BUFFER_RESTORE_STATE,
+                "Best-effort restore of gcode-state saved by a failed LOAD/UNLOAD"),
+            ('BUFFER_SAVE_MACRO_STATE',     self.cmd_BUFFER_SAVE_MACRO_STATE,
+                "Internal: mark gcode-state as saved (used by _SAVE_E_MODE)"),
+            ('BUFFER_RESTORE_MACRO_STATE',  self.cmd_BUFFER_RESTORE_MACRO_STATE,
+                "Internal: restore + clear gcode-state save (used by _RESTORE_E_MODE)"),
+        ]
+        for name, handler, help_text in commands:
+            if help_text is None:
+                help_text = getattr(self, 'cmd_' + name + '_help', None)
+            gcode.register_mux_command(name, 'BUFFER', self.name,
+                                       handler, desc=help_text)
 
     # -----------------------------------------------------------------------
     # Pin registration helper
@@ -1696,6 +1666,10 @@ class BufferFeeder:
     # -----------------------------------------------------------------------
 
     def _main_tick(self, eventtime):
+        """Reactor-tick dispatcher. Order matters — HALL1 lockout has
+        absolute priority, then safety-timers fire jam-detection, then
+        late-disable, then state-completion handlers, then submit
+        helpers (bang-bang / phase3 / continuous / pending-chunks)."""
         try:
             self._check_debounce(eventtime)
 
@@ -1710,110 +1684,24 @@ class BufferFeeder:
             # Retract oder einer UNLOAD-Phase: dann lassen wir den
             # Operator/das Macro den Buffer entlasten. Sobald die
             # Retract-Sequenz endet, greift der Reassert wieder normal.
-            # OVERFLOW_OK=1 in Phase 3 (P7-8): unterdrueckt den Auto-
-            # Transition zu STATE_OVERFLOW, damit _load_phase3_tick das
-            # HALL1-Stable-Tracking selbst auswerten kann. Ohne diesen
-            # Skip wuerde die State-Machine den Stepper sofort beim
-            # ersten HALL1-Spike lockouten — aber wir wollen ja gerade
-            # den Spike vom dauerhaften "Buffer wirklich ueberfuellt"
-            # unterscheiden. _is_hall1_active('main_tick') kapselt
-            # diese caller-spezifischen Bypasses.
+            # OVERFLOW_OK=1 in Phase 3 (P7-8): _is_hall1_active kapselt
+            # die caller-spezifischen Bypasses (siehe FaultManager).
             if self._is_hall1_active('main_tick'):
                 self._enter_overflow()
                 return eventtime + MAIN_TICK_INTERVAL
 
-            # Hard-safety aborts route through _trigger_jam so the
-            # lockout is sticky: phase commands raise via WAIT_IDLE,
-            # and recovery requires explicit BUFFER_CLEAR_JAM /
-            # BUFFER_AUTO_OFF / STOP_BUFFER_FILL.
-            if self._feed_deadline_time is not None and eventtime >= self._feed_deadline_time:
-                self._feed_deadline_time = None
-                self._trigger_jam(
-                    "SAFETY_TIMEOUT",
-                    "max_feed_time %ds reached without HALL2 — motor stall, "
-                    "empty spool, or value too low for setup (typical 2m "
-                    "bowden+buffer fill at %dmm/s needs ~90s; bump "
-                    "max_feed_time in lll.cfg if first-fill is legit)"
-                    % (int(self.max_feed_time), int(self.feed_speed)))
+            self._tick_safety_timeouts(eventtime)
 
-            # max_feed_distance is a forward-feed safety only. Manual
-            # retract (Retract-Taster Dauerlauf, BUFFER_RETRACT without
-            # DISTANCE) legitimately accumulates large distances in the
-            # opposite direction; tripping a JAM on those is a bug.
-            if (self._continuous_feed
-                    and self._continuous_feed_direction == 1
-                    and self._feed_distance_accumulator >= self.max_feed_distance):
-                self._trigger_jam(
-                    "SAFETY_DISTANCE",
-                    "max_feed_distance %dmm reached without HALL2 — slipping "
-                    "drive gear, kinked filament, or value too low for setup "
-                    "(bowden+buffer path; bump max_feed_distance in lll.cfg "
-                    "if first-fill is legit)"
-                    % int(self.max_feed_distance))
-
-            # Deferred disable: motor_disable must not be called while steps
-            # are unprocessed in the trapq (step-gen fires motor_enable with
-            # a past time via add_active_callback → Timer too close).
+            # Deferred disable: motor_disable must not be called while
+            # steps are unprocessed in the trapq (step-gen fires
+            # motor_enable with a past time via add_active_callback →
+            # Timer too close).
             if self._pending_disable and not self._move_in_flight():
                 self._pending_disable = False
                 self._disable_stepper()
 
-            # Cooldown end: back to AUTO if entrance present AND the
-            # operator hasn't explicitly disabled AUTO.
-            if self._cooldown_deadline is not None and eventtime >= self._cooldown_deadline:
-                if self._state in (STATE_MANUAL_FEED, STATE_MANUAL_RETRACT, STATE_INITIAL_GRIP):
-                    # Guard: estimate may fire early (per-chunk gap not accounted
-                    # for). Only transition once the move is truly done.
-                    if self._move_in_flight() or self._pending_remaining_mm > 0:
-                        self._cooldown_deadline = eventtime + 0.05
-                    else:
-                        self._cooldown_deadline = None
-                        if (self.entrance_detected
-                                and not self._is_hall1_active('auto_on')
-                                and not self._auto_off_by_user
-                                and not self._bang_bang_suspended
-                                and not self._retract_burst_done):
-                            self._set_state(STATE_AUTO)
-                        else:
-                            self._retract_burst_done = False
-                            self._set_state(STATE_IDLE)
-                else:
-                    self._cooldown_deadline = None
-
-            # Initial grip done: start follow-feed (if configured) or go IDLE.
-            if self._state == STATE_INITIAL_GRIP and self._initial_grip_end_time is not None:
-                mcu = self.stepper.get_mcu()
-                now_pt = mcu.estimated_print_time(eventtime)
-                if now_pt >= self._initial_grip_end_time:
-                    self._initial_grip_end_time = None
-                    if self._auto_off_by_user or self._bang_bang_suspended:
-                        self._set_state(STATE_IDLE)
-                        self._respond("Initial grip done — staying IDLE "
-                                      "(AUTO off by operator or print paused)")
-                    elif self.grip_follow_distance > 0:
-                        self._grip_follow_active = True
-                        self._respond(
-                            "Initial grip done — follow feed: %.0f mm @ %.0f mm/s"
-                            % (self.grip_follow_distance, self.grip_follow_speed))
-                        self._submit_move(self.grip_follow_distance,
-                                          self.grip_follow_speed)
-                        # State stays STATE_INITIAL_GRIP; pending streaming
-                        # handles chunk queuing. Completion detected below.
-                    else:
-                        self._set_state(STATE_IDLE)
-                        self._respond("Initial grip done — IDLE")
-                        self._maybe_auto_load()
-
-            # Follow-feed completion: grip + follow done, drop to IDLE.
-            if (self._state == STATE_INITIAL_GRIP
-                    and self._grip_follow_active
-                    and self._initial_grip_end_time is None
-                    and not self._move_in_flight()
-                    and self._pending_remaining_mm <= 0):
-                self._grip_follow_active = False
-                self._set_state(STATE_IDLE)
-                self._respond("Grip follow done — IDLE")
-                self._maybe_auto_load()
+            self._tick_cooldown_end(eventtime)
+            self._tick_grip_completion(eventtime)
 
             # Bang-bang nur in AUTO. (P7-16 erweiterte das auf
             # UNLOAD_PHASE_1, aber P7-20 hat den Tip-Forming-Pfad
@@ -1822,39 +1710,16 @@ class BufferFeeder:
             if self._state == STATE_AUTO:
                 self._bang_bang_tick(eventtime)
 
-            # RUNOUT follow (runout_pause=0 mode): bang-bang keeps
-            # running in AUTO; we just track extruder distance here.
-            if self._runout_follow_active and self._runout_filament_ref is not None:
-                try:
-                    ps = self.printer.lookup_object('print_stats')
-                    cur = ps.get_status(eventtime).get('filament_used', 0.0)
-                    if cur - self._runout_filament_ref >= self.runout_follow_mm:
-                        self._respond("Runout-follow %dmm reached — stepper off"
-                                      % int(self.runout_follow_mm))
-                        self._continuous_feed = False
-                        self._halt_motion()
-                        self._runout_filament_ref = None
-                        self._runout_follow_active = False
-                        self._set_state(STATE_IDLE)  # calls _schedule_stepper_disable
-                except Exception:
-                    pass
+            self._tick_runout_follow(eventtime)
 
             # LOAD Phase 3 — feed until HALL2 or max distance.
             if self._state == STATE_LOAD_PHASE_3:
                 self._load_phase3_tick(eventtime)
 
-            # P7-55b: ehemaliger LOAD_PHASE_2 Auto-IDLE-Block entfernt.
-            # cmd_BUFFER_LOAD_PHASE2 ist seit P7-44 nicht mehr im
-            # LOAD_FILAMENT-Macro genutzt (durch SYNC_TO_EXTRUDER
-            # ersetzt) und wurde mit P7-55b komplett aus der API
-            # entfernt. UNLOAD_PHASE_2 wurde schon in P7-20 durch
-            # SYNC_TO_EXTRUDER abgeloest.
-
             # Continuous feed: keep chunks streaming, but only in
-            # states where continuous motion is the intended behavior.
-            # Otherwise a stale _continuous_feed=True would leak into
-            # LOAD_PHASE_1 single-shot moves and keep pumping extra
-            # chunks after the phase's own move.
+            # states where continuous motion is the intended behavior
+            # (CONTINUOUS_FEED_STATES). Otherwise stale _continuous_feed
+            # would leak into LOAD_PHASE_1 single-shot moves.
             if (self._continuous_feed
                     and self._state in CONTINUOUS_FEED_STATES
                     and not self._move_in_flight()):
@@ -1863,41 +1728,159 @@ class BufferFeeder:
                 self._submit_move(self._continuous_feed_direction * chunk_dist,
                                   self._continuous_feed_speed)
 
-            # Pending-chunk streaming for long single-shot moves.
-            # Schedule the next chunk when the current one is within
-            # half-a-chunk-duration of ending, so chunks abut with
-            # no visible gap in motion. Abort signals zero out the
-            # pending counter — draining remaining chunks happens
-            # only on the MCU for the already-queued trapezoid.
-            if self._pending_remaining_mm > 0:
-                if self._abort_signalled():
-                    self._pending_remaining_mm = 0.0
-                elif (self._pending_direction < 0
-                        and self._state == STATE_MANUAL_RETRACT
-                        and not self.entrance_detected):
-                    self._halt_motion()
-                    self._respond("Retract-Burst gestoppt — Filament am Eingang weg")
-                elif self._pending_speed > 0:
-                    chunk_duration = (self.max_move_chunk_mm
-                                      / self._pending_speed)
-                    mcu = self.stepper.get_mcu()
-                    now_pt = mcu.estimated_print_time(eventtime)
-                    gap = self._last_move_end_time - now_pt
-                    # Submit next chunk when <= half-a-chunk remains
-                    # in the currently-queued move, so next trapezoid
-                    # starts right at the prior one's end_time.
-                    if gap <= chunk_duration * 0.5:
-                        chunk = min(self._pending_remaining_mm,
-                                    self.max_move_chunk_mm)
-                        self._submit_single_trapezoid(
-                            self._pending_direction * chunk,
-                            self._pending_speed)
-                        self._pending_remaining_mm -= chunk
+            self._tick_pending_chunk(eventtime)
 
         except Exception:
             logging.exception("buffer_feeder main_tick error")
 
         return eventtime + MAIN_TICK_INTERVAL
+
+    def _tick_safety_timeouts(self, eventtime):
+        """Hard-safety aborts route through _trigger_jam: phase
+        commands raise via WAIT_IDLE, recovery requires explicit
+        BUFFER_CLEAR_JAM / BUFFER_AUTO_OFF / STOP_BUFFER_FILL."""
+        if (self._feed_deadline_time is not None
+                and eventtime >= self._feed_deadline_time):
+            self._feed_deadline_time = None
+            self._trigger_jam(
+                "SAFETY_TIMEOUT",
+                "max_feed_time %ds reached without HALL2 — motor stall, "
+                "empty spool, or value too low for setup (typical 2m "
+                "bowden+buffer fill at %dmm/s needs ~90s; bump "
+                "max_feed_time in lll.cfg if first-fill is legit)"
+                % (int(self.max_feed_time), int(self.feed_speed)))
+
+        # max_feed_distance is a forward-feed safety only. Manual
+        # retract (Retract-Taster Dauerlauf, BUFFER_RETRACT without
+        # DISTANCE) legitimately accumulates large distances in the
+        # opposite direction; tripping a JAM on those is a bug.
+        if (self._continuous_feed
+                and self._continuous_feed_direction == 1
+                and self._feed_distance_accumulator >= self.max_feed_distance):
+            self._trigger_jam(
+                "SAFETY_DISTANCE",
+                "max_feed_distance %dmm reached without HALL2 — slipping "
+                "drive gear, kinked filament, or value too low for setup "
+                "(bowden+buffer path; bump max_feed_distance in lll.cfg "
+                "if first-fill is legit)"
+                % int(self.max_feed_distance))
+
+    def _tick_cooldown_end(self, eventtime):
+        """Cooldown end: back to AUTO if entrance present AND the
+        operator hasn't explicitly disabled AUTO."""
+        if self._cooldown_deadline is None or eventtime < self._cooldown_deadline:
+            return
+        if self._state in (STATE_MANUAL_FEED, STATE_MANUAL_RETRACT,
+                           STATE_INITIAL_GRIP):
+            # Guard: estimate may fire early (per-chunk gap not
+            # accounted for). Only transition once the move is truly
+            # done.
+            if self._move_in_flight() or self._pending_remaining_mm > 0:
+                self._cooldown_deadline = eventtime + 0.05
+                return
+            self._cooldown_deadline = None
+            if (self.entrance_detected
+                    and not self._is_hall1_active('auto_on')
+                    and not self._auto_off_by_user
+                    and not self._bang_bang_suspended
+                    and not self._retract_burst_done):
+                self._set_state(STATE_AUTO)
+            else:
+                self._retract_burst_done = False
+                self._set_state(STATE_IDLE)
+        else:
+            self._cooldown_deadline = None
+
+    def _tick_grip_completion(self, eventtime):
+        """Initial grip done → follow-feed (if configured) or IDLE.
+        Follow-feed done → IDLE. Both branches optionally schedule
+        LOAD_FILAMENT via _maybe_auto_load."""
+        if (self._state == STATE_INITIAL_GRIP
+                and self._initial_grip_end_time is not None):
+            mcu = self.stepper.get_mcu()
+            now_pt = mcu.estimated_print_time(eventtime)
+            if now_pt >= self._initial_grip_end_time:
+                self._initial_grip_end_time = None
+                if self._auto_off_by_user or self._bang_bang_suspended:
+                    self._set_state(STATE_IDLE)
+                    self._respond("Initial grip done — staying IDLE "
+                                  "(AUTO off by operator or print paused)")
+                elif self.grip_follow_distance > 0:
+                    self._grip_follow_active = True
+                    self._respond(
+                        "Initial grip done — follow feed: %.0f mm @ %.0f mm/s"
+                        % (self.grip_follow_distance, self.grip_follow_speed))
+                    self._submit_move(self.grip_follow_distance,
+                                      self.grip_follow_speed)
+                    # State stays STATE_INITIAL_GRIP; pending streaming
+                    # handles chunk queuing. Completion detected below.
+                else:
+                    self._set_state(STATE_IDLE)
+                    self._respond("Initial grip done — IDLE")
+                    self._maybe_auto_load()
+
+        # Follow-feed completion: grip + follow done, drop to IDLE.
+        if (self._state == STATE_INITIAL_GRIP
+                and self._grip_follow_active
+                and self._initial_grip_end_time is None
+                and not self._move_in_flight()
+                and self._pending_remaining_mm <= 0):
+            self._grip_follow_active = False
+            self._set_state(STATE_IDLE)
+            self._respond("Grip follow done — IDLE")
+            self._maybe_auto_load()
+
+    def _tick_runout_follow(self, eventtime):
+        """RUNOUT-follow (runout_pause=0 mode): bang-bang keeps
+        running in AUTO; we just track extruder distance here."""
+        if not (self._runout_follow_active
+                and self._runout_filament_ref is not None):
+            return
+        try:
+            ps = self.printer.lookup_object('print_stats')
+            cur = ps.get_status(eventtime).get('filament_used', 0.0)
+            if cur - self._runout_filament_ref >= self.runout_follow_mm:
+                self._respond("Runout-follow %dmm reached — stepper off"
+                              % int(self.runout_follow_mm))
+                self._continuous_feed = False
+                self._halt_motion()
+                self._runout_filament_ref = None
+                self._runout_follow_active = False
+                self._set_state(STATE_IDLE)  # calls _schedule_stepper_disable
+        except Exception:
+            pass
+
+    def _tick_pending_chunk(self, eventtime):
+        """Pending-chunk streaming for long single-shot moves.
+        Schedule the next chunk when the current one is within
+        half-a-chunk-duration of ending, so chunks abut without a
+        visible gap in motion. Abort signals zero out the pending
+        counter — already-queued trapezoids drain on the MCU."""
+        if self._pending_remaining_mm <= 0:
+            return
+        if self._abort_signalled():
+            self._pending_remaining_mm = 0.0
+            return
+        if (self._pending_direction < 0
+                and self._state == STATE_MANUAL_RETRACT
+                and not self.entrance_detected):
+            self._halt_motion()
+            self._respond("Retract-Burst gestoppt — Filament am Eingang weg")
+            return
+        if self._pending_speed <= 0:
+            return
+        chunk_duration = self.max_move_chunk_mm / self._pending_speed
+        mcu = self.stepper.get_mcu()
+        now_pt = mcu.estimated_print_time(eventtime)
+        gap = self._last_move_end_time - now_pt
+        # Submit next chunk when <= half-a-chunk remains in the
+        # currently-queued move, so next trapezoid starts right at
+        # the prior one's end_time.
+        if gap <= chunk_duration * 0.5:
+            chunk = min(self._pending_remaining_mm, self.max_move_chunk_mm)
+            self._submit_single_trapezoid(
+                self._pending_direction * chunk, self._pending_speed)
+            self._pending_remaining_mm -= chunk
 
     def _bang_bang_tick(self, eventtime):
         """HALL-based bang-bang with hysteresis. Reactor-tick driven —
