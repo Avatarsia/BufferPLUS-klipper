@@ -1346,15 +1346,14 @@ class BufferFeeder:
             self._set_state(STATE_AUTO)
 
     def _on_idle_ready(self, *args):
-        # Treat any transition out of an active print (PAUSE, jam-PAUSE,
-        # print end) as bang-bang-suspension. The flag is cleared on
-        # idle_timeout:printing (next RESUME or new print). Condition
-        # is independent of current state: during a jam we're in
-        # STATE_JAM, and BUFFER_CLEAR_JAM would otherwise re-start
-        # bang-bang while the print is still paused. Manual
-        # BUFFER_AUTO_ON from an idle console never sees
-        # _print_running=True, so this does not affect user-initiated
-        # AUTO during idle.
+        # idle_timeout:ready fires for BOTH a manual PAUSE during a
+        # print (RESUME erwartet) AND for the natural end of a print
+        # job ("Done printing file" → no RESUME ever). P7-56f: read
+        # print_stats.state so we differentiate. Pre-fix the buffer
+        # would stay _bang_bang_suspended=True after a clean print
+        # end, blocking auto-grip on the next entrance-insert and
+        # forcing the operator to run BUFFER_AUTO_OFF + AUTO_ON or
+        # FORCE_BUFFER_FILL just to load fresh filament.
         #
         # Guard: Klipper fires idle_timeout:printing then :ready during
         # MCU init, which would set _print_running=True and then arm
@@ -1364,11 +1363,29 @@ class BufferFeeder:
             self._print_running = False
             return
         if self._print_running:
-            self._bang_bang_suspended = True
-            if self._continuous_feed:
-                self._continuous_feed = False
-                self._halt_motion()
-            self._respond("Print paused — bang-bang suspended until RESUME")
+            ps_state = None
+            try:
+                ps = self.printer.lookup_object('print_stats')
+                ps_state = ps.get_status(self.reactor.monotonic()).get('state')
+            except Exception:
+                pass
+            if ps_state == 'paused':
+                # Real PAUSE — RESUME is expected, suspend bang-bang
+                # so a queued G1 E in the resumed file doesn't fire
+                # an unexpected feed before the print actually resumes.
+                self._bang_bang_suspended = True
+                if self._continuous_feed:
+                    self._continuous_feed = False
+                    self._halt_motion()
+                self._respond("Print paused — bang-bang suspended until RESUME")
+            else:
+                # Print ended normally (state=complete/standby/None).
+                # Buffer stays available for manual workflow + reinsert
+                # auto-grip. _bang_bang_suspended stays whatever it
+                # was (operator may have set it explicitly via
+                # BUFFER_AUTO_OFF; we don't override).
+                self._respond("Print ended — buffer ready for next "
+                              "filament change or print")
         self._print_running = False
 
     # -----------------------------------------------------------------------
