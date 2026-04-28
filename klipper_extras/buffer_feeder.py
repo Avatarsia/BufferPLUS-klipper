@@ -884,12 +884,10 @@ class BufferFeeder:
         # logic for ongoing operation lives in
         # _submit_single_trapezoid's REPRIME_GAP path.
         self._stepcompress_primed = False
-        # P7-20: sync-to-extruder state. Wenn != None ist der Buffer-
-        # Stepper an einen externen Extruder-Trapq gebunden (folgt
-        # G1 E Moves 1:1). BUFFER_SYNC_TO_EXTRUDER setzt, BUFFER_UNSYNC
-        # cleart. Anwendungsfall: UNLOAD-Tip-Forming, Filament-Fluss
-        # durch den Buffer ohne Sensor-Trigger.
-        self._stepper_synced_to = None
+        # P7-20: sync-to-extruder state lebt im SyncCoordinator
+        # (self.sync._stepper_synced_to). BufferFeeder exponiert es als
+        # Bridge-Property weiter unten, damit interner self._stepper_-
+        # synced_to Zugriff weiterhin funktioniert.
         # Monotonic clock tracker for motor_enable/disable scheduling.
         # queue_digital_out commands on the same pin MUST be scheduled
         # with strictly non-decreasing MCU clocks: a disable at clock A
@@ -980,7 +978,8 @@ class BufferFeeder:
         # whatever _continuous_feed was doing in AUTO before.
         self._measure_feeding = False
         self._print_running = False
-        self._jam_active = False
+        # _jam_active lebt im FaultManager (FaultManager.__init__
+        # initialisiert es); Bridge-Property exponiert self._jam_active.
         # Fault-overlay migration (P7-30 roadmap, partially completed):
         # use_fault_overlay=1 enables the LOAD_PHASE_3 overflow overlay
         # (P7-35 — _enter_overflow leaves state=LOAD_PHASE_3 instead of
@@ -990,7 +989,6 @@ class BufferFeeder:
         self._fault_overflow = False
         self._fault_runout = False
         self._fault_jam = False
-        self._fault_pre_overflow_state = None
         # P7-46 (Issue #16): Post-LOAD HALL1-bounce-suppression. Set
         # when LOAD_PHASE_3 with overflow_ok=1 exits via stable HALL1
         # (treating as full). Buffer is legitimately overfilled — the
@@ -1001,9 +999,9 @@ class BufferFeeder:
         self._post_load_overflow_grace = False
 
         # ----- Jam detection state -----
-        self._hall2_start_time = None
-        self._hall2_start_extruder_pos = 0.0
-        self._hall3_start_time = None
+        # _hall2_start_time / _hall2_start_extruder_pos / _hall3_start_-
+        # time leben im FaultManager (FaultManager.__init__ setzt sie
+        # auf None/0.0). BufferFeeder hat passende Bridge-Properties.
 
         # ----- Runout follow state -----
         self._runout_filament_ref = None
@@ -1172,12 +1170,6 @@ class BufferFeeder:
 
     # -----------------------------------------------------------------------
     # Pin registration helper
-    # -----------------------------------------------------------------------
-
-    def _register_pin(self, buttons, config, config_key, logical_name):
-        """Read pin from config and register a raw-state callback."""
-        return self.sensors.register_pin(buttons, config, config_key, logical_name)
-
     # -----------------------------------------------------------------------
     # Lifecycle
     # -----------------------------------------------------------------------
@@ -1411,17 +1403,9 @@ class BufferFeeder:
     # Sensor: raw pin change + debounce
     # -----------------------------------------------------------------------
 
-    def _on_pin_raw_change(self, eventtime, name, raw_state):
-        """Callback from buttons.register_buttons. Debounce, then dispatch."""
-        return self.sensors.on_pin_raw_change(eventtime, name, raw_state)
-
     def _check_debounce(self, eventtime):
         """Promote raw->stable after hall_debounce_ms."""
         return self.sensors.check_debounce(eventtime)
-
-    def _semantic_state(self, name):
-        """Return semantic 'active' bool from stable raw state."""
-        return self.sensors.semantic_state(name)
 
     # Convenience accessors (always up-to-date with debounced state).
     @property
@@ -1560,7 +1544,6 @@ class BufferFeeder:
         # cmd loop terminates via fault_overflow check, postcheck raises
         # like the legacy STATE_OVERFLOW path.
         self._fault_overflow = True
-        self._fault_pre_overflow_state = self._state
         if self.use_fault_overlay and self._state == STATE_LOAD_PHASE_3:
             return
         self._set_state(STATE_OVERFLOW)
@@ -1593,7 +1576,6 @@ class BufferFeeder:
                 and self._fault_overflow
                 and self._state == STATE_LOAD_PHASE_3):
             self._fault_overflow = False
-            self._fault_pre_overflow_state = None
             self._respond("HALL1 cleared — overflow lockout released (overlay)")
             self._resume_after_overflow()
             return
@@ -1603,7 +1585,6 @@ class BufferFeeder:
         # Go to IDLE (the _set_state hook calls _halt_motion + stepper-disable).
         self._set_state(STATE_IDLE)
         self._fault_overflow = False
-        self._fault_pre_overflow_state = None
         self._resume_after_overflow()
 
     # -----------------------------------------------------------------------
@@ -2559,7 +2540,6 @@ class BufferFeeder:
             # while HALL1 is still asserted would otherwise leave
             # _fault_overflow=True, blocking later main_tick re-entry.
             self._fault_overflow = False
-            self._fault_pre_overflow_state = None
 
     # -----------------------------------------------------------------------
     # Helper: gcode interactions
@@ -3129,7 +3109,7 @@ class BufferFeeder:
         })
         max_distance = gcmd.get_float('MAX_DISTANCE', self.unload_fast_max, above=0.)
         speed        = gcmd.get_float('SPEED',        self.unload_phase3_speed, above=0.)
-        nominal_chunk = 50.0
+        nominal_chunk = self.max_move_chunk_mm
         # Clean start: cancel any inherited continuous feed and drain
         # any in-flight move so residual motion doesn't join the retract.
         self._continuous_feed = False

@@ -95,12 +95,10 @@ def test_set_state_idle_clears_overlay_flag():
     _, feeder = make_feeder(values={"use_fault_overlay": True})
     feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
     feeder._fault_overflow = True
-    feeder._fault_pre_overflow_state = buffer_feeder.STATE_LOAD_PHASE_3
 
     feeder._set_state(buffer_feeder.STATE_IDLE)
 
     assert feeder._fault_overflow is False
-    assert feeder._fault_pre_overflow_state is None
 
 
 def test_set_state_idle_clears_overlay_flag_legacy_mode():
@@ -109,9 +107,7 @@ def test_set_state_idle_clears_overlay_flag_legacy_mode():
     _, feeder = make_feeder(values={"use_fault_overlay": False})
     feeder._state = buffer_feeder.STATE_OVERFLOW
     feeder._fault_overflow = True
-    feeder._fault_pre_overflow_state = buffer_feeder.STATE_AUTO
 
     feeder._set_state(buffer_feeder.STATE_IDLE)
 
     assert feeder._fault_overflow is False
-    assert feeder._fault_pre_overflow_state is None
