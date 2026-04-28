@@ -325,7 +325,11 @@ class HallSensorMonitor:
             owner._halt_motion()
             owner._schedule_stepper_disable()
             owner._set_state(STATE_RUNOUT)
-            owner._gcode_run_script("PAUSE")
+            # Defer PAUSE via 1ms timer so we don't block this sensor
+            # callback for the entire macro (tool-park etc.). Direct
+            # run_script() would freeze _main_tick + bang-bang for the
+            # full PAUSE duration (P7-56b).
+            owner._schedule_gcode_script("PAUSE")
         else:
             owner._respond("Runout — external sensor mode, %dmm follow"
                            % int(owner.runout_follow_mm))
@@ -2202,7 +2206,10 @@ class BufferFeeder:
         self._halt_motion()
         self._set_state(STATE_JAM)
         if self.jam_action:
-            self._gcode_run_script(self.jam_action)
+            # Defer jam_action via 1ms timer — _trigger_jam runs from
+            # _jam_tick (reactor timer). Direct run_script() would block
+            # the reactor for the full macro duration (P7-56b).
+            self._schedule_gcode_script(self.jam_action)
 
     def _read_extruder_position(self):
         try:

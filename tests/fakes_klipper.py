@@ -36,6 +36,22 @@ class FakeReactor:
         self.now = max(self.now, when)
         return self.now
 
+    def fire_pending_timers(self, eventtime=None):
+        """Fire all timers whose 'when' is <= eventtime (default: self.now).
+        Test helper for code paths that defer work via register_timer
+        (e.g. _schedule_gcode_script). Re-fires timers if their callback
+        returns a 'when' <= eventtime; stops on NEVER."""
+        if eventtime is None:
+            eventtime = self.now
+        for timer in list(self.timers):
+            when = timer["when"]
+            if when is None or when <= eventtime:
+                next_when = timer["callback"](eventtime)
+                if next_when == self.NEVER or next_when is None:
+                    self.unregister_timer(timer)
+                else:
+                    timer["when"] = next_when
+
 
 class FakeGCode:
     def __init__(self):

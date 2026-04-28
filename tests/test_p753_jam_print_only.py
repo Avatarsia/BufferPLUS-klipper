@@ -160,3 +160,27 @@ def test_tracker_variables_reset_when_print_ends():
 
     assert feeder._hall2_start_time is None
     assert feeder._hall3_start_time is None
+
+
+# ---------------------------------------------------------------------------
+# P7-56b: jam_action runs deferred (not blocking the reactor)
+# ---------------------------------------------------------------------------
+
+def test_trigger_jam_dispatches_jam_action_via_deferred_timer():
+    """_trigger_jam runs from the reactor _jam_tick. jam_action must
+    NOT call gc.run_script() inline (that would block the reactor for
+    the entire macro). It is dispatched via _schedule_gcode_script
+    (1ms timer); after fire_pending_timers the script lands in
+    gcode.scripts."""
+    printer, feeder = make_feeder(values={"jam_action": "PAUSE"})
+    gcode = printer.lookup_object("gcode")
+    setup_clog_scenario(feeder)
+    feeder._print_running = True
+
+    feeder._jam_tick(eventtime=99.0)
+    assert feeder._jam_active is True
+    # Inline check: nothing in gcode.scripts yet — deferred via timer.
+    assert not [s for _, s in gcode.scripts if "PAUSE" in s.upper()]
+
+    feeder.reactor.fire_pending_timers()
+    assert [s for _, s in gcode.scripts if "PAUSE" in s.upper()]
