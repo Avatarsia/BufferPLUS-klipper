@@ -206,6 +206,21 @@ class FakeToolhead:
 
 
 class FakePrintStats:
+    """Stub for klippy/extras/print_stats.
+
+    NOTE for tests that set _bang_bang_suspended=True manually:
+    P7-56f added a lazy stale-suspend clear in
+    HallSensorMonitor.on_entrance_insert and FaultManager.check_auto_-
+    ready that polls print_stats.state. The default 'standby' state
+    is treated as "no print active → stale suspend → clear it".
+
+    If your test sets _bang_bang_suspended=True and then calls a
+    cmd_/handler that traverses one of those hooks (FORCE_BUFFER_FILL
+    is fine — it doesn't lazy-clear), set state='paused' explicitly
+    to keep the suspend intact:
+
+        printer.objects['print_stats'] = FakePrintStats(state='paused')
+    """
     def __init__(self, state="standby", filament_used=0.0):
         self.state = state
         self.filament_used = filament_used
