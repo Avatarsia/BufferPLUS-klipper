@@ -51,6 +51,24 @@ SUDO=""
 
 cd "${REPO_DIR}"
 
+# ---------- 0) Drucker-Modus: tests/ aus Working-Tree ausblenden ----------
+# Sparse-checkout sorgt dafuer, dass git pull tests/ gar nicht erst auf
+# die Drucker-SD legt. Idempotent: beim ersten Aufruf aktivieren, sonst
+# no-op. Zum Re-Aktivieren von Tests (Dev-Maschine):
+#   git config --unset core.sparseCheckout
+#   git read-tree -m -u HEAD
+SPARSE_FILE=".git/info/sparse-checkout"
+if [ "$(git config --get core.sparseCheckout 2>/dev/null || true)" != "true" ]; then
+    echo "[update] Aktiviere sparse-checkout (Drucker-Modus, ohne tests/)"
+    git config core.sparseCheckout true
+    mkdir -p .git/info
+    cat > "${SPARSE_FILE}" <<'EOF'
+/*
+!/tests/
+EOF
+    git read-tree -m -u HEAD
+fi
+
 # ---------- 1) git pull ----------
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 echo "[update] git fetch + pull --ff-only auf ${BRANCH}"
