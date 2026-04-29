@@ -1115,6 +1115,12 @@ class BufferFeeder:
         Mux-Value = self.name (z.B. "mellow" aus [buffer_feeder mellow]).
         Mehrere Instanzen koennen denselben Command-Namen registrieren,
         Dispatcher waehlt via BUFFER=...
+
+        P7-62: Beim Single-Instance-Setup (was die uebliche Konfiguration
+        ist) registriert _handle_ready zusaetzlich den BUFFER=None-
+        default fuer JEDEN command, sodass der User die Befehle ohne
+        BUFFER=mellow aufrufen kann (z.B. einfach "BUFFER_FEED").
+        Multi-Instance-Setups behalten den Pflicht-Mux-Key.
         """
         gcode = self.printer.lookup_object('gcode')
         # (gcode_name, handler, help_text). help_text=None zieht den
@@ -1154,11 +1160,47 @@ class BufferFeeder:
             ('BUFFER_RESTORE_MACRO_STATE',  self.cmd_BUFFER_RESTORE_MACRO_STATE,
                 "Internal: restore + clear gcode-state save (used by _RESTORE_E_MODE)"),
         ]
+        # Save the table so _handle_ready can register a default-mux
+        # fallback (BUFFER=None) when this is the only buffer_feeder
+        # instance. Resolve help_text inline so the second-pass
+        # registration uses identical descriptions.
+        self._command_table = []
         for name, handler, help_text in commands:
             if help_text is None:
                 help_text = getattr(self, 'cmd_' + name + '_help', None)
+            self._command_table.append((name, handler, help_text))
             gcode.register_mux_command(name, 'BUFFER', self.name,
                                        handler, desc=help_text)
+
+    def _register_default_mux_if_only_instance(self):
+        """P7-62: When this is the only [buffer_feeder ...] section,
+        register every command a SECOND time with BUFFER=None as the
+        default-fallback. The user can then call commands without the
+        BUFFER=mellow argument:
+            BUFFER_FEED                  (no mux)
+            BUFFER_FEED BUFFER=mellow    (explicit, also works)
+
+        Multi-instance setups keep the mandatory mux-key (calling
+        BUFFER_FEED without BUFFER= would be ambiguous).
+
+        Called from _handle_ready so all instances have already
+        registered their __init__ via Klipper's load_config_prefix.
+        """
+        instances = [obj for name, obj in self.printer.lookup_objects()
+                     if name.startswith('buffer_feeder ')]
+        if len(instances) != 1:
+            return
+        gcode = self.printer.lookup_object('gcode')
+        for name, handler, help_text in self._command_table:
+            try:
+                gcode.register_mux_command(name, 'BUFFER', None,
+                                           handler, desc=help_text)
+            except Exception:
+                # Already registered or other error — log + continue.
+                # Not fatal: explicit BUFFER=name still works.
+                logging.exception(
+                    "buffer_feeder: default-mux register failed for %s",
+                    name)
 
     # -----------------------------------------------------------------------
     # Pin registration helper
@@ -1186,6 +1228,12 @@ class BufferFeeder:
             logging.exception("buffer_feeder: could not register idle events")
 
     def _handle_ready(self):
+        # P7-62: Optional default-mux fallback so single-instance
+        # setups can use commands without BUFFER=<name>. Done here
+        # (not in __init__) because all buffer_feeder sections must
+        # have completed their __init__ before we count instances.
+        self._register_default_mux_if_only_instance()
+
         # Anchor _last_move_end_time to the toolhead's current print_time
         # rather than mcu.estimated_print_time. The two diverge after
         # long idle periods, and our submissions must live in the same

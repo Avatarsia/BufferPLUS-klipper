@@ -324,6 +324,16 @@ class FakePrinter:
             return default
         raise KeyError(name)
 
+    def lookup_objects(self, module=None):
+        """Klipper-API: returns list of (name, object) tuples. With
+        module=None returns all; with module='buffer_feeder' returns
+        only entries whose name starts with that prefix."""
+        items = list(self.objects.items())
+        if module is None:
+            return items
+        return [(name, obj) for name, obj in items
+                if name == module or name.startswith(module + ' ')]
+
     def load_object(self, config, name):
         return self.lookup_object(name)
 
