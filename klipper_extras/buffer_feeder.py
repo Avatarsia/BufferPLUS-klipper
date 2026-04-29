@@ -1784,13 +1784,24 @@ class BufferFeeder:
             # nicht mehr betreten.)
             if self._state == STATE_AUTO:
                 # P7-54: Post-OVERFLOW cursor resync. After OVERFLOW →
-                # IDLE → AUTO the stepcompress cursor is stale. Submit
-                # a tiny anchor with forced_t0=None so flush_step_
-                # generation (allowed here, reactor context) syncs the
-                # cursor before the first flush-callback fill-move.
+                # IDLE → AUTO the stepcompress cursor is stale.
+                # P7-60: when use_flush_callback_bang_bang is active,
+                # the prime-anchor MUST go through _on_mcu_flush so it
+                # gets a race-free step_gen_time anchor. The legacy
+                # forced_t0=None path here calls flush_step_generation
+                # mid-print + set_position, which rips itersolve under
+                # in-flight steps if _stepcompress_primed=False (which
+                # it is post-OVERFLOW because of deferred-disable).
+                # Hardware-Crash 2026-04-29 (klippy.log #6: c=13,
+                # gap=-0.6s) reproduced that exact path.
                 if self._needs_overflow_prime:
-                    self._needs_overflow_prime = False
-                    self._submit_move(0.05, self.feed_speed, forced_t0=None)
+                    if not self.use_flush_callback_bang_bang:
+                        self._needs_overflow_prime = False
+                        self._submit_move(0.05, self.feed_speed,
+                                          forced_t0=None)
+                    # else: leave the flag set — _on_mcu_flush picks
+                    # it up on the next flush-cycle and submits with
+                    # forced_t0=step_gen_time+lead_time.
                 self._bang_bang_tick(eventtime)
 
             self._tick_runout_follow(eventtime)
@@ -2037,10 +2048,19 @@ class BufferFeeder:
             # are handled by their own macros, not by us.
             return
         if self._needs_overflow_prime:
-            # P7-54: Post-OVERFLOW prime is pending. _main_tick will
-            # submit a safe anchor-move (forced_t0=None, reactor context)
-            # to resync the stepcompress cursor first. Submitting here
-            # on the unsynchronised cursor would cause Invalid sequence.
+            # P7-60: Post-OVERFLOW prime via flush-callback path.
+            # _main_tick skips the prime when flush-callback bang-bang
+            # is active so we own the anchor here. step_gen_time +
+            # lead_time is the race-free reference point Klipper just
+            # gave us — submitting the 0.05mm prime-move with this
+            # anchor refreshes our stepcompress cursor without ever
+            # calling flush_step_generation (which would mid-print
+            # drain the toolhead and was the original P7-54 reason
+            # to go via _main_tick). The follow-up bang-bang fills
+            # then ride on a synchronised cursor.
+            self._needs_overflow_prime = False
+            anchor = step_gen_time + self.lead_time
+            self._submit_move(0.05, self.feed_speed, forced_t0=anchor)
             return
         if self._stepper_synced_to is not None:
             # An explicit BUFFER_SYNC_TO_EXTRUDER (macro path) is in
