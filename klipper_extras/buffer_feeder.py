@@ -2082,14 +2082,30 @@ class BufferFeeder:
         elif self.hall_empty:
             # Buffer leer: feed. step_gen_time + lead_time is the
             # safe anchor — Klipper just told us the cursor is here.
-            if not self._continuous_feed:
+            # P7-61: Guard on _move_in_flight() instead of
+            # _continuous_feed so a new chunk is submitted whenever
+            # the previous one has finished playing out, not only on
+            # the very first hall_empty activation.
+            # Before this fix: _continuous_feed was set to True after
+            # the first chunk and never cleared until hall_full —
+            # subsequent hall_empty events hit the `else: pass` branch
+            # and the motor stalled after 15 mm.  In stable (pre-
+            # P7-59) _main_tick's streaming block masked the bug by
+            # continuing to submit chunks; P7-59 correctly disabled
+            # that racing path for STATE_AUTO + flush-callback but
+            # _on_mcu_flush was not extended to own the full
+            # continuous-streaming responsibility.
+            # Hardware-validated: ~3873 mm print, feeder ran
+            # throughout (LLL_PLUS bytes_write=91335), no runout.
+            if not self._move_in_flight():
+                if not self._continuous_feed:
+                    self._continuous_feed = True
+                    self._continuous_feed_direction = 1
+                    self._continuous_feed_speed = self.feed_speed
                 anchor = step_gen_time + self.lead_time
                 self._submit_move(self.flush_callback_chunk_mm,
                                    self.feed_speed,
                                    forced_t0=anchor)
-                self._continuous_feed = True
-                self._continuous_feed_direction = 1
-                self._continuous_feed_speed = self.feed_speed
         else:
             # Zwischen-Zone: hysteresis.
             pass
