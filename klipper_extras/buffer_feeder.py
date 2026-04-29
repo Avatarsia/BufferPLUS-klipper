@@ -2082,22 +2082,39 @@ class BufferFeeder:
         elif self.hall_empty:
             # Buffer leer: feed. step_gen_time + lead_time is the
             # safe anchor — Klipper just told us the cursor is here.
-            if not self._continuous_feed:
-                # P7-57: Reset safety-distance counter on every new
-                # feed session (first chunk after a hall_empty edge).
-                # Without this the accumulator carries over distance
-                # from the previous print and may trip JAM_SAFETY_
-                # DISTANCE at the start of the next print — hardware-
-                # validated: two successive prints (~3873 mm each),
-                # no false JAM_SAFETY_DISTANCE trigger.
-                self._feed_distance_accumulator = 0.0
+            # P7-61: Guard on _move_in_flight() instead of
+            # _continuous_feed so a new chunk is submitted whenever
+            # the previous one has finished playing out, not only on
+            # the very first hall_empty activation. Pre-fix the motor
+            # ran exactly ONE 15mm chunk per HALL3 activation and
+            # then stalled (Issue #23). _main_tick's streaming block
+            # masked this in stable until P7-59 correctly disabled
+            # that racing path; _on_mcu_flush now owns the full
+            # continuous-streaming responsibility.
+            if not self._move_in_flight():
+                if not self._continuous_feed:
+                    # P7-57: Reset safety-distance counter on every
+                    # new feed session (first chunk after a hall_empty
+                    # edge). Without this the accumulator carries over
+                    # distance from the previous print and may trip
+                    # JAM_SAFETY_DISTANCE at the start of the next
+                    # print.
+                    # P7-61b: Also clear _feed_deadline_time. Bang-
+                    # bang has no max_duration timeout, but a stale
+                    # deadline left over from an earlier MANUAL_FEED
+                    # session would otherwise trip SAFETY_TIMEOUT
+                    # (Codex-flagged latent path: MANUAL_FEED → 60s
+                    # cooldown → AUTO; old _feed_deadline_time fires
+                    # → false JAM during normal bang-bang).
+                    self._feed_distance_accumulator = 0.0
+                    self._feed_deadline_time = None
+                    self._continuous_feed = True
+                    self._continuous_feed_direction = 1
+                    self._continuous_feed_speed = self.feed_speed
                 anchor = step_gen_time + self.lead_time
                 self._submit_move(self.flush_callback_chunk_mm,
                                    self.feed_speed,
                                    forced_t0=anchor)
-                self._continuous_feed = True
-                self._continuous_feed_direction = 1
-                self._continuous_feed_speed = self.feed_speed
         else:
             # Zwischen-Zone: hysteresis.
             pass
