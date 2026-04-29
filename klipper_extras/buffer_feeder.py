@@ -2267,13 +2267,31 @@ class BufferFeeder:
     # -----------------------------------------------------------------------
 
     def _schedule_time_for_enable_toggle(self):
-        """Pick a safe print_time for the next motor_enable/disable."""
+        """Pick a safe print_time for the next motor_enable/disable.
+
+        P7-58: Removed the toolhead.get_last_move_time() lookup that
+        used to feed a 4th max() argument. The buffer stepper runs in
+        own_trapq — toolhead's last move time has no bearing on our
+        own enable scheduling, and the lookup synchronously runs the
+        toolhead lookahead pipeline (_process_lookahead /
+        _flush_lookahead in mainline klippy/toolhead.py) on every
+        call. _enable_stepper() runs before every chunk submit, so
+        each bang-bang feed forced the toolhead through a lookahead
+        flush → brief extruder pause (host-side planning work) →
+        visible gaps in the print.
+
+        The remaining three floors (mcu_now, _last_move_end_time,
+        _last_enable_schedule_time) are sufficient to keep the
+        Buffer-Stepper's own enable→step→disable ordering correct
+        and preserve the P7-56 'Timer too close' fix. The real
+        toolhead-anchor for the first step lives in _submit_single_-
+        trapezoid (forced_t0 / th_time path), which still uses
+        toolhead.get_last_move_time() once per chunk-stream — but
+        only in the gap/first-chunk path, not for every enable.
+        """
         mcu = self.stepper.get_mcu()
         mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
-        toolhead = self.printer.lookup_object('toolhead')
-        th_now = toolhead.get_last_move_time()
         pt = max(mcu_now + self.lead_time,
-                 th_now + self.lead_time,
                  self._last_move_end_time + self.lead_time,
                  self._last_enable_schedule_time + self.lead_time)
         self._last_enable_schedule_time = pt

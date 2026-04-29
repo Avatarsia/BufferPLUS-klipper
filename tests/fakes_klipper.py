@@ -194,11 +194,25 @@ class FakeExtruder:
 
 
 class FakeToolhead:
+    """Stub for klippy/toolhead.py.
+
+    P7-58 note: get_last_move_time() in real Klipper synchronously
+    calls flush_step_generation() before returning print_time. Tests
+    that count flush_calls can therefore detect "did this code path
+    inadvertently drain the toolhead lookahead?" — that's the bug
+    we fixed in _schedule_time_for_enable_toggle.
+    """
     def __init__(self):
         self.last_move_time = 0.0
         self.flush_calls = 0
+        self.get_last_move_time_calls = 0
 
     def get_last_move_time(self):
+        # Real Klipper toolhead.get_last_move_time() always flushes
+        # step generation before returning. Mirror that so accidental
+        # callers show up as a flush.
+        self.get_last_move_time_calls += 1
+        self.flush_step_generation()
         return self.last_move_time
 
     def flush_step_generation(self):
