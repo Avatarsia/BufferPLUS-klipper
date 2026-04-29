@@ -2083,6 +2083,14 @@ class BufferFeeder:
             # Buffer leer: feed. step_gen_time + lead_time is the
             # safe anchor — Klipper just told us the cursor is here.
             if not self._continuous_feed:
+                # P7-57: Reset safety-distance counter on every new
+                # feed session (first chunk after a hall_empty edge).
+                # Without this the accumulator carries over distance
+                # from the previous print and may trip JAM_SAFETY_
+                # DISTANCE at the start of the next print — hardware-
+                # validated: two successive prints (~3873 mm each),
+                # no false JAM_SAFETY_DISTANCE trigger.
+                self._feed_distance_accumulator = 0.0
                 anchor = step_gen_time + self.lead_time
                 self._submit_move(self.flush_callback_chunk_mm,
                                    self.feed_speed,
