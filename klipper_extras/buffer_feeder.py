@@ -1803,8 +1803,23 @@ class BufferFeeder:
             # states where continuous motion is the intended behavior
             # (CONTINUOUS_FEED_STATES). Otherwise stale _continuous_feed
             # would leak into LOAD_PHASE_1 single-shot moves.
+            #
+            # P7-59: When flush_callback_bang_bang is active and we're
+            # in STATE_AUTO, _on_mcu_flush owns chunk submission with
+            # race-free step_gen_time anchors. Streaming a parallel
+            # chunk here with forced_t0=None races against the flush-
+            # callback anchor — the result is a negative gap (last_-
+            # move_end_time > mcu_now) plus a stale _stepcompress_-
+            # primed flag, which triggers a mid-print flush_step_-
+            # generation() + set_position((0,0,0)) and rips itersolve
+            # under in-flight steps → "Invalid sequence" MCU shutdown.
+            # Hardware-Crash 2026-04-29 (klippy.log #5: c=6, gap=-0.6s).
+            # Manual + LOAD/UNLOAD phases keep using this reactor-tick
+            # streaming path because _on_mcu_flush bails on non-AUTO.
             if (self._continuous_feed
                     and self._state in CONTINUOUS_FEED_STATES
+                    and not (self.use_flush_callback_bang_bang
+                             and self._state == STATE_AUTO)
                     and not self._move_in_flight()):
                 chunk_dist = max(self.manual_chunk_distance,
                                  self._continuous_feed_speed * 0.5)
