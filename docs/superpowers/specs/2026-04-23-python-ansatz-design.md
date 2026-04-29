@@ -5,6 +5,13 @@
 **Ersetzt:** Sync-Feedback-Architektur (Variante 2) mit permanentem `SYNC_EXTRUDER_MOTION`
 **Target Klipper:** Mainline (letzter Release; `klippy/extras/motion_queuing.py` vorausgesetzt)
 
+> **Status (P7-55, 2026-04-27):** Dies ist ein historisches Design-Dokument vom
+> Initial-Plan. Die Architektur wurde seither in 50+ P7-Iterationen weiterent-
+> wickelt. Insbesondere: `BUFFER_LOAD_PHASE2` und `BUFFER_UNLOAD_PHASE1/2` aus
+> der API-Tabelle (Z. 363, 365) wurden in P7-23 / P7-44 / P7-55 entfernt und
+> durch `BUFFER_SYNC_TO_EXTRUDER` + `G1 E` + `BUFFER_UNSYNC` ersetzt. Aktuelle
+> API-Referenz: `README.md` und `klippy/extras/buffer_feeder.py` selbst.
+
 ---
 
 ## 1. Kontext + Problem

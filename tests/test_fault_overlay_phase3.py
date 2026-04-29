@@ -31,7 +31,6 @@ def test_enter_overflow_overlay_keeps_phase3_state():
 
     assert feeder._state == buffer_feeder.STATE_LOAD_PHASE_3
     assert feeder._fault_overflow is True
-    assert feeder._fault_pre_overflow_state == buffer_feeder.STATE_LOAD_PHASE_3
     assert feeder._overflow_interrupted_state == buffer_feeder.STATE_LOAD_PHASE_3
 
 
@@ -63,13 +62,11 @@ def test_exit_overflow_overlay_clears_flag():
     _, feeder = make_feeder(values={"use_fault_overlay": True})
     feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
     feeder._fault_overflow = True
-    feeder._fault_pre_overflow_state = buffer_feeder.STATE_LOAD_PHASE_3
     feeder._overflow_interrupted_state = buffer_feeder.STATE_LOAD_PHASE_3
 
     feeder._exit_overflow()
 
     assert feeder._fault_overflow is False
-    assert feeder._fault_pre_overflow_state is None
     # Overlay path doesn't change _state — caller's loop continues.
     assert feeder._state == buffer_feeder.STATE_LOAD_PHASE_3
 

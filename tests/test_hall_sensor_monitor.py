@@ -250,18 +250,20 @@ def test_entrance_runout_during_print_with_runout_pause_triggers_pause_script(mo
     )
     monkeypatch.setattr(
         feeder,
-        "_gcode_run_script",
-        lambda script, from_command=False: events.append(("script", script, from_command)),
+        "_schedule_gcode_script",
+        lambda script: events.append(("schedule_script", script)),
     )
 
     feeder._on_entrance_runout(7.0)
 
+    # P7-56b: PAUSE is deferred via _schedule_gcode_script (1ms timer)
+    # so the sensor callback returns immediately.
     assert events == [
         ("respond", "Runout during print — PAUSE (runout_pause=1)"),
         "halt_motion",
         "schedule_stepper_disable",
         ("set_state", buffer_feeder.STATE_RUNOUT),
-        ("script", "PAUSE", False),
+        ("schedule_script", "PAUSE"),
     ]
     assert feeder._continuous_feed is False
     assert feeder._entrance_was_empty is True

@@ -94,9 +94,9 @@ def test_runout_during_load_phase_does_not_pause():
     """on_entrance_runout must early-return without PAUSE when an
     active LOAD/UNLOAD/MANUAL phase is running. Vertauschung of the
     state list would silently pause the print mid-phase."""
+    # P7-55b: STATE_LOAD_PHASE_2 entfernt mit cmd_BUFFER_LOAD_PHASE2.
     suppressed_states = (
         buffer_feeder.STATE_LOAD_PHASE_1,
-        buffer_feeder.STATE_LOAD_PHASE_2,
         buffer_feeder.STATE_LOAD_PHASE_3,
         buffer_feeder.STATE_UNLOAD_PHASE_3,
         buffer_feeder.STATE_MANUAL_FEED,
@@ -126,6 +126,10 @@ def test_runout_during_auto_with_runout_pause_does_trigger_pause():
     feeder._print_running = True
 
     feeder._on_entrance_runout(eventtime=0.0)
+    # P7-56b: PAUSE is dispatched via 1ms reactor timer to avoid
+    # blocking the sensor callback. Fire pending timers so the
+    # deferred run_script is observed in gcode.scripts.
+    feeder.reactor.fire_pending_timers()
 
     pause_calls = [s for _, s in gcode.scripts if "PAUSE" in s.upper()]
     assert pause_calls, "expected PAUSE script in non-suppressed runout path"
