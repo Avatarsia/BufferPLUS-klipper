@@ -807,6 +807,10 @@ class BufferFeeder:
         # HALT / OVERFLOW can take effect within one chunk instead
         # of waiting out the full nominal move duration.
         self.max_move_chunk_mm  = config.getfloat('max_move_chunk_mm',  50.0,  above=0.)
+        # Flush-Callback-Pfad benutzt einen eigenen, kleineren Chunk damit
+        # der Feeder den HALL1-Overflow-Bereich nicht ueberschiesst.
+        # Default 15.0mm = HALL3->HALL2-Pufferweg am Mellow LLL Plus.
+        self.flush_callback_chunk_mm = config.getfloat('flush_callback_chunk_mm', 15.0, above=0.)
 
         # ----- Config: jam detection -----
         self.jam_detection_enabled = config.getboolean('jam_detection_enabled', True)
@@ -983,6 +987,11 @@ class BufferFeeder:
         self._continuous_feed_direction = 0 # +1 or -1
         self._continuous_feed_speed = 0.0
         self._pending_disable = False       # deferred stepper disable (while move in flight)
+        # P7-54: After OVERFLOW → IDLE → AUTO the stepcompress cursor
+        # is out of sync. _main_tick handles the safe resync (forced_t0=None
+        # path → flush_step_generation allowed). _on_mcu_flush skips while
+        # this flag is set to prevent submitting on an unsynced cursor.
+        self._needs_overflow_prime = False
         self._feed_deadline_time = None     # max feed deadline (reactor time)
         self._measure_load_active = False
         self._measure_load_distance = 0.0
@@ -1615,6 +1624,11 @@ class BufferFeeder:
         if self._state != STATE_OVERFLOW:
             return
         self._respond("HALL1 cleared — overflow lockout released")
+        # P7-54: Mark cursor resync pending. _main_tick will submit a
+        # 0.05mm anchor with forced_t0=None (safe reactor context) so the
+        # stepcompress cursor is synchronised before the first fill-move.
+        # _on_mcu_flush skips while this flag is set (see below).
+        self._needs_overflow_prime = True
         # Go to IDLE (the _set_state hook calls _halt_motion + stepper-disable).
         self._set_state(STATE_IDLE)
         self._fault_overflow = False
@@ -1769,6 +1783,14 @@ class BufferFeeder:
             # auf SYNC_TO_EXTRUDER umgestellt — UNLOAD_PHASE_1 wird
             # nicht mehr betreten.)
             if self._state == STATE_AUTO:
+                # P7-54: Post-OVERFLOW cursor resync. After OVERFLOW →
+                # IDLE → AUTO the stepcompress cursor is stale. Submit
+                # a tiny anchor with forced_t0=None so flush_step_
+                # generation (allowed here, reactor context) syncs the
+                # cursor before the first flush-callback fill-move.
+                if self._needs_overflow_prime:
+                    self._needs_overflow_prime = False
+                    self._submit_move(0.05, self.feed_speed, forced_t0=None)
                 self._bang_bang_tick(eventtime)
 
             self._tick_runout_follow(eventtime)
@@ -1999,6 +2021,12 @@ class BufferFeeder:
             # bang only acts in AUTO. LOAD/UNLOAD-driven SYNC paths
             # are handled by their own macros, not by us.
             return
+        if self._needs_overflow_prime:
+            # P7-54: Post-OVERFLOW prime is pending. _main_tick will
+            # submit a safe anchor-move (forced_t0=None, reactor context)
+            # to resync the stepcompress cursor first. Submitting here
+            # on the unsynchronised cursor would cause Invalid sequence.
+            return
         if self._stepper_synced_to is not None:
             # An explicit BUFFER_SYNC_TO_EXTRUDER (macro path) is in
             # effect. Stay out of the way — submitting our own move
@@ -2021,7 +2049,7 @@ class BufferFeeder:
             # safe anchor — Klipper just told us the cursor is here.
             if not self._continuous_feed:
                 anchor = step_gen_time + self.lead_time
-                self._submit_move(self.max_move_chunk_mm,
+                self._submit_move(self.flush_callback_chunk_mm,
                                    self.feed_speed,
                                    forced_t0=anchor)
                 self._continuous_feed = True
@@ -2277,6 +2305,11 @@ class BufferFeeder:
             logging.exception("buffer_feeder: enable_stepper failed")
 
     def _disable_stepper(self):
+        # Nach Disable ist der Stepcompress-Cursor nicht mehr synchron —
+        # beim naechsten Re-Enable muss set_position() aufgerufen werden
+        # (partieller Reprime ohne flush_step_generation). Flag VOR dem
+        # early-return setzen damit es auch ohne stepper_enable wirkt.
+        self._stepcompress_primed = False
         if self._stepper_enable is None:
             return
         try:
@@ -2375,15 +2408,32 @@ class BufferFeeder:
         mcu = self.stepper.get_mcu()
         mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
         gap = mcu_now - self._last_move_end_time
-        need_reprime = (not self._stepcompress_primed) or (gap > REPRIME_GAP)
+        # Reprime-Logik unterscheidet zwei Pfade:
+        #
+        # Alter Pfad (forced_t0=None, Reactor-Tick):
+        #   flush_step_generation() + set_position() bei not-primed ODER gap>5s.
+        #
+        # Flush-Callback-Pfad (forced_t0 gesetzt):
+        #   - flush_step_generation() NIEMALS aufrufen (ReactorError, weil
+        #     reactor.pause() innerhalb von assert_no_pause verboten ist).
+        #   - set_position() NUR wenn not-primed (d.h. nach Stepper-Disable,
+        #     z.B. nach OVERFLOW). Einmaliger Cursor-Reset ist sicher und
+        #     noetig. Bei primed=True: kein Aufruf (Schutz gegen rapide
+        #     SET_VELOCITY_LIMIT-Flush-Callbacks die Cursor korrumpieren).
+        #   - Gap-basierter Reprime entfaellt: step_gen_time ist der Anker.
+        if forced_t0 is None:
+            need_reprime = (not self._stepcompress_primed) or (gap > REPRIME_GAP)
+        else:
+            need_reprime = not self._stepcompress_primed
         if need_reprime:
-            try:
-                toolhead = self.printer.lookup_object('toolhead')
-                toolhead.flush_step_generation()
-                logging.info("buffer_feeder: stepcompress re-primed via "
-                             "flush_step_generation (gap=%.1fs)", gap)
-            except Exception:
-                logging.exception("buffer_feeder: flush_step_generation failed")
+            if forced_t0 is None:
+                try:
+                    toolhead = self.printer.lookup_object('toolhead')
+                    toolhead.flush_step_generation()
+                    logging.info("buffer_feeder: stepcompress re-primed via "
+                                 "flush_step_generation (gap=%.1fs)", gap)
+                except Exception:
+                    logging.exception("buffer_feeder: flush_step_generation failed")
             self.stepper.set_position((0., 0., 0.))
             self._commanded_pos = 0.0
             self._stepcompress_primed = True
@@ -2404,20 +2454,28 @@ class BufferFeeder:
         #   has no baseline for → "Invalid sequence" shutdown.
         # mcu/mcu_now sind oben fuer den Re-Prime-Gap-Check schon
         # berechnet — wiederverwenden statt neu fetchen.
+        # _enable_stepper() oben hat _last_enable_schedule_time via
+        # _schedule_time_for_enable_toggle() weiter in die Zukunft
+        # geschoben. t0 muss in ALLEN Pfaden >= diesem neuen Wert sein,
+        # damit der Motor-Enable vor dem ersten Step feuert.
+        # Ohne diesen Floor: t0 = _last_move_end_time < enable_pt →
+        # enable NACH Steps → "Invalid sequence" MCU-Shutdown (Hardware
+        # 2026-04-29, c=22 i=0).
+        en = self._last_enable_schedule_time
         if forced_t0 is not None:
             # P7-52 flush-callback path: caller provides a step_gen_
             # time-based anchor that is race-free against Klipper's
             # MCU flush cycle. Honor _last_move_end_time as the floor
             # so streaming chunks still abut without gap.
-            t0 = max(forced_t0, self._last_move_end_time)
+            t0 = max(forced_t0, self._last_move_end_time, en)
         elif self._last_move_end_time > mcu_now + self.lead_time:
             # Streaming: previous chunk is still in the future — abut.
-            t0 = self._last_move_end_time
+            t0 = max(self._last_move_end_time, en)
         else:
             # First chunk / gap: anchor to toolhead print_time.
             toolhead = self.printer.lookup_object('toolhead')
             th_time = toolhead.get_last_move_time()
-            t0 = max(th_time + self.lead_time, self._last_move_end_time)
+            t0 = max(th_time + self.lead_time, self._last_move_end_time, en)
 
         distance = abs(signed_distance)
         direction = 1.0 if signed_distance > 0 else -1.0
@@ -3559,6 +3617,8 @@ class BufferFeeder:
             'use_python_unload':        self.use_python_unload,
             'use_fault_overlay':        self.use_fault_overlay,
             'accel':                    self.accel,
+            'max_move_chunk_mm':        self.max_move_chunk_mm,
+            'flush_callback_chunk_mm':  self.flush_callback_chunk_mm,
         }
 
 
