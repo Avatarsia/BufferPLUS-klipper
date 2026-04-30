@@ -596,6 +596,7 @@ class FaultManager:
         self._hall2_start_time = None
         self._hall2_start_extruder_pos = 0.0
         self._hall3_start_time = None
+        self._hall3_drop_since = None
 
     def is_hall1_active(self, context):
         owner = self.owner
@@ -644,6 +645,7 @@ class FaultManager:
         self._jam_active = False
         self._hall2_start_time = None
         self._hall3_start_time = None
+        self._hall3_drop_since = None
 
     def resume_after_overflow(self):
         owner = self.owner
@@ -986,6 +988,7 @@ class BufferFeeder:
         self._continuous_feed = False       # True = keep submitting moves while active
         self._continuous_feed_direction = 0 # +1 or -1
         self._continuous_feed_speed = 0.0
+        self._auto_between_since = None     # sustained HALL3-leave in AUTO
         self._pending_disable = False       # deferred stepper disable (while move in flight)
         # P7-54: After OVERFLOW → IDLE → AUTO the stepcompress cursor
         # is out of sync. _main_tick handles the safe resync (forced_t0=None
@@ -1563,6 +1566,14 @@ class BufferFeeder:
         self.fault._hall3_start_time = value
 
     @property
+    def _hall3_drop_since(self):
+        return self.fault._hall3_drop_since
+
+    @_hall3_drop_since.setter
+    def _hall3_drop_since(self, value):
+        self.fault._hall3_drop_since = value
+
+    @property
     def _overflow_interrupted_follow(self):
         return self.fault._overflow_interrupted_follow
 
@@ -1911,8 +1922,20 @@ class BufferFeeder:
         # retract (Retract-Taster Dauerlauf, BUFFER_RETRACT without
         # DISTANCE) legitimately accumulates large distances in the
         # opposite direction; tripping a JAM on those is a bug.
+        #
+        # P7-63: In STATE_AUTO with use_flush_callback_bang_bang, the
+        # buffer arm can rest near the hall_empty threshold for long
+        # stretches at high print flow without ever triggering hall_full.
+        # The accumulator then grows past max_feed_distance and trips a
+        # false JAM_SAFETY_DISTANCE while the system is operating
+        # correctly (Issue #26). SUPPLY_JAM (via _jam_tick,
+        # jam_supply_dwell_time) is the correct detector for genuine
+        # mechanical jams in this mode. SAFETY_DISTANCE remains active
+        # for LOAD/MANUAL phases and for legacy AUTO without bang-bang.
         if (self._continuous_feed
                 and self._continuous_feed_direction == 1
+                and not (self.use_flush_callback_bang_bang
+                         and self._state == STATE_AUTO)
                 and self._feed_distance_accumulator >= self.max_feed_distance):
             self._trigger_jam(
                 "SAFETY_DISTANCE",
@@ -2125,8 +2148,14 @@ class BufferFeeder:
             # Buffer voll: stop. Pending streamed chunks drain via
             # _last_move_end_time naturally; clearing the streaming
             # flag prevents new chunks from being requested.
+            self._auto_between_since = None
             if self._continuous_feed:
                 self._continuous_feed = False
+                # P7-63: Reset accumulator on confirmed buffer-full.
+                # Without this, a long high-flow session with no hall_full
+                # event lets the accumulator grow past max_feed_distance
+                # and trips a false JAM_SAFETY_DISTANCE (Issue #26).
+                self._feed_distance_accumulator = 0.0
         elif self.hall_empty:
             # Buffer leer: feed. step_gen_time + lead_time is the
             # safe anchor — Klipper just told us the cursor is here.
@@ -2139,6 +2168,7 @@ class BufferFeeder:
             # masked this in stable until P7-59 correctly disabled
             # that racing path; _on_mcu_flush now owns the full
             # continuous-streaming responsibility.
+            self._auto_between_since = None
             if not self._move_in_flight():
                 if not self._continuous_feed:
                     # P7-57: Reset safety-distance counter on every
@@ -2164,8 +2194,17 @@ class BufferFeeder:
                                    self.feed_speed,
                                    forced_t0=anchor)
         else:
-            # Zwischen-Zone: hysteresis.
-            pass
+            # P7-63: Zwischen-Zone — keep short bounce flicker, but end
+            # the AUTO feed session once HALL3 has been inactive long
+            # enough. STABLE_DROP_GRACE matches the load-phase3 pattern
+            # used elsewhere in this file.
+            if self._continuous_feed and self._continuous_feed_direction == 1:
+                if self._auto_between_since is None:
+                    self._auto_between_since = flush_time
+                elif flush_time - self._auto_between_since >= STABLE_DROP_GRACE:
+                    self._continuous_feed = False
+                    self._feed_distance_accumulator = 0.0
+                    self._auto_between_since = None
 
     def _exit_phase3_stable(self, *, set_grace, respond_text):
         """Common exit-sequence when HALL2 (buffer full) or HALL1 (with
@@ -2308,12 +2347,14 @@ class BufferFeeder:
             if not self._print_running:
                 self._hall2_start_time = None
                 self._hall3_start_time = None
+                self._hall3_drop_since = None
                 return eventtime + JAM_TICK_INTERVAL
 
             if self._state not in JAM_WATCH_STATES:
                 # Reset trackers.
                 self._hall2_start_time = None
                 self._hall3_start_time = None
+                self._hall3_drop_since = None
                 return eventtime + JAM_TICK_INTERVAL
 
             # --- Jam-Typ 1: Nozzle-Clog (HALL2 stays active while extruding) ---
@@ -2332,8 +2373,16 @@ class BufferFeeder:
                 self._hall2_start_time = None
 
             # --- Jam-Typ 2: Supply-Jam (HALL3 stays active while feeder running) ---
+            # P7-63 stelle 7: HALL3-Drop-Grace. Without it, brief bouncing
+            # flicker (30-500ms HALL3 false-edges, mechanical normal at high
+            # flow) would permanently reset _hall3_start_time before
+            # jam_supply_dwell_time elapses. Same STABLE_DROP_GRACE pattern
+            # as _load_phase3_tick uses for HALL1/HALL2. Required because
+            # SUPPLY_JAM is now the sole backstop for AUTO+bang-bang
+            # (SAFETY_DISTANCE bypassed there by stelle 6).
             feeder_running_fwd = self._continuous_feed and self._continuous_feed_direction == 1
             if self.hall_empty and feeder_running_fwd:
+                self._hall3_drop_since = None
                 if self._hall3_start_time is None:
                     self._hall3_start_time = eventtime
                 else:
@@ -2343,7 +2392,13 @@ class BufferFeeder:
                             "HALL3 active %.0fs with feeder running — spool/supply jam suspected"
                             % dwell)
             else:
-                self._hall3_start_time = None
+                if self._hall3_start_time is None:
+                    self._hall3_drop_since = None
+                elif self._hall3_drop_since is None:
+                    self._hall3_drop_since = eventtime
+                elif eventtime - self._hall3_drop_since >= STABLE_DROP_GRACE:
+                    self._hall3_start_time = None
+                    self._hall3_drop_since = None
         except Exception:
             logging.exception("buffer_feeder jam_tick error")
 
@@ -2685,6 +2740,14 @@ class BufferFeeder:
         self._continuous_feed = False
         self._continuous_feed_direction = 0
         self._continuous_feed_speed = 0.0
+        # P7-63: Reset accumulator on every halt. After a halt the
+        # accumulator is stale — leaving it set would cause a false
+        # JAM_SAFETY_DISTANCE on the very first chunk of the next
+        # session if _on_mcu_flush hasn't yet reset it (it does at
+        # session start, but defense in depth covers all stop paths
+        # including JAM/RUNOUT/PAUSE/CLEAR_JAM).
+        self._feed_distance_accumulator = 0.0
+        self._auto_between_since = None
         self._pending_remaining_mm = 0.0
         self._feed_deadline_time = None
 
@@ -2736,6 +2799,7 @@ class BufferFeeder:
         if old in JAM_WATCH_STATES and new_state not in JAM_WATCH_STATES:
             self._hall2_start_time = None
             self._hall3_start_time = None
+            self._hall3_drop_since = None
         # IDLE semantic per spec/README: stopped AND disabled. Enforce.
         if new_state == STATE_IDLE:
             self._halt_motion()
