@@ -845,7 +845,6 @@ class BufferFeeder:
         # falls der Buffer beim Boot trotz Filament im IDLE bleiben soll.
         self.auto_engage_on_boot = config.getboolean('auto_engage_on_boot', True)
         self.min_temp               = config.getfloat('min_temp', 180., minval=0.)
-        self.use_python_unload      = config.getint('use_python_unload', 0)
         self.use_fault_overlay      = config.getboolean('use_fault_overlay', False)
         # P7-52: Flush-driven bang-bang. When enabled, bang-bang feed
         # decisions ride on Klipper's MCU flush cycle (motion_queuing.
@@ -3827,7 +3826,6 @@ class BufferFeeder:
             'unload_sync_distance':     self.unload_sync_distance,
             'unload_fast_max':          self.unload_fast_max,
             'min_temp':                 self.min_temp,
-            'use_python_unload':        self.use_python_unload,
             'use_fault_overlay':        self.use_fault_overlay,
             'accel':                    self.accel,
             'max_move_chunk_mm':        self.max_move_chunk_mm,

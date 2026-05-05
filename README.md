@@ -225,7 +225,6 @@ Pin-Format ist Klipper-Standard (`^!` = Pull-Up + invertiert für `buttons`-Modu
 
 | Parameter | Default | Bedeutung |
 |---|---|---|
-| `use_python_unload` | 0 | UNLOAD via Python (try/finally Cleanup garantiert) statt Macro. Empfohlen: 1. |
 | `use_fault_overlay` | False | Fault-Overlay-Migration (aktuell nur LOAD_PHASE_3 aktiv, Scaffold für künftige Migration). Nicht in Produktion umstellen. |
 
 ### Macro-Variablen
@@ -235,36 +234,30 @@ In `lll.cfg` definiert, via Mainsail oder SAVE_VARIABLES überschreibbar:
 ```ini
 [gcode_macro LOAD_FILAMENT]
 variable_auto_heat_target: 250    # Auto-Heat-Target wenn Hotend < min_temp
-
-[gcode_macro UNLOAD_FILAMENT_LEGACY]
-variable_tip_cycles:        4     # Push/Pull-Zyklen beim Tip-Forming
-variable_tip_push:          8     # mm vorwärts pro Zyklus
-variable_tip_pull:         10     # mm rückwärts pro Zyklus
-variable_tip_speed:        20     # mm/s während Tip-Forming
-variable_tip_final_retract: 25    # Final-Retract Distanz
-variable_tip_final_speed:  50     # Final-Retract Speed
-variable_auto_heat_target: 250    # wie oben
 ```
 
-> Hinweis: Der **Python-Pfad** (`use_python_unload=1`) liest die `variable_*`-Slots
-> nicht — er nimmt seine Defaults direkt aus dem Code (`tip_cycles=4`,
-> `tip_push=8.0`, ..., `auto_heat_target=250`). Wenn du SAVE_VARIABLES-Overrides
-> nutzt, gib sie direkt als Argument mit (siehe nächster Abschnitt) oder bleib
-> beim Legacy-Macro.
+UNLOAD-Defaults (`tip_cycles`, `tip_push`, `tip_pull`, `tip_speed`,
+`tip_final_retract`, `tip_final_speed`, `use_cooling_move`, `cool_temp`,
+`cool_temp_max`, `auto_heat_target`) leben im Python-Cmd
+`cmd_BUFFER_UNLOAD_FILAMENT` und werden per Argument überschrieben (siehe
+nächster Abschnitt).
 
 ### Runtime-Override beim UNLOAD
 
-Beide Branches (`UNLOAD_FILAMENT` mit `use_python_unload=0` und
-`BUFFER_UNLOAD_FILAMENT BUFFER=mellow` direkt) akzeptieren diese Parameter:
+`UNLOAD_FILAMENT` (bzw. der direkte Aufruf `BUFFER_UNLOAD_FILAMENT
+BUFFER=mellow`) akzeptiert diese Parameter:
 
 ```
 UNLOAD_FILAMENT TIP_CYCLES=2 TIP_PUSH=6 TIP_PULL=12 \
                 TIP_SPEED=15 TIP_FINAL_RETRACT=30 TIP_FINAL_SPEED=40 \
+                USE_COOLING_MOVE=1 COOL_TEMP=150 COOL_TEMP_MAX=160 \
                 SYNC_DIST=200 FAST_SPD=40 MAX_DISTANCE=2000 \
                 AUTO_HEAT_TARGET=240 EXTRUDER=extruder
 ```
 
-Alle Parameter optional — Defaults aus Config-/Macro-Variablen.
+Alle Parameter optional — Defaults werden in `cmd_BUFFER_UNLOAD_FILAMENT`
+(Python) bzw. den Buffer-Config-Werten (`unload_sync_distance`,
+`unload_fast_max`) gelesen — keine Macro-Variablen mehr.
 
 ---
 
@@ -428,25 +421,36 @@ wurde mit P7-55b entfernt. Der parallele Feed ist jetzt im
 
 ### UNLOAD_FILAMENT
 
-Mit `use_python_unload=1` (Default in `lll.cfg`: 0 — empfohlen `1`) läuft der gesamte Workflow als
-Python-Befehl `BUFFER_UNLOAD_FILAMENT` — try/finally garantiert dass
+Der UNLOAD-Workflow läuft als Python-Workflow `cmd_BUFFER_UNLOAD_FILAMENT`
+mit garantiertem Cleanup — try/finally stellt sicher, dass
 `BUFFER_SYNC_TO_EXTRUDER` immer wieder entkoppelt wird, auch bei
 Klipper-error oder M112 mid-sync.
 
 ```
-Phase 1: BUFFER_SYNC_TO_EXTRUDER — Buffer-Stepper an Extruder-Trapq
-         koppeln. Ab jetzt folgt der Feeder den Extruder-Moves.
-Phase 2: Tip-Forming — Push/Pull-Zyklen via G1 E im sync-Modus.
-         Der Feeder läuft mit, der Bowden bleibt entlastet.
-Phase 3: Final-Retract via G1 E — pulled das Filament aus dem Hotend.
-Phase 4: BUFFER_UNSYNC (im finally-Block) — Stepper-Decoupling.
-Phase 5: BUFFER_UNLOAD_PHASE3 BUFFER=mellow — chunked 50mm-Retracts
-         bis buffer_entrance frei meldet (max unload_fast_max).
+Phase 1:   Tip-Forming bei Print-Temp — BUFFER_SYNC_TO_EXTRUDER koppelt
+           den Buffer-Stepper an das Extruder-Trapq, dann Push/Pull-
+           Zyklen via G1 E. Der Feeder läuft synchron mit, der Bowden
+           bleibt entlastet.
+Phase 1.5: Cooling-Move — M104 S{cool_temp},
+           TEMPERATURE_WAIT MAXIMUM={cool_temp_max}. Filament-Spitze
+           kühlt ab und härtet, weniger sticky beim folgenden Retract.
+           Opt-out via USE_COOLING_MOVE=0.
+Phase 2:   Final-Retract + unload_sync_distance via G1 E (bei kühlerer
+           Temp) — pulled das Filament durch die Hauptextruder-Zähne
+           raus.
+Phase 3:   BUFFER_UNLOAD_PHASE3 BUFFER=mellow — chunked 50mm-Retracts
+           bis buffer_entrance frei meldet (max unload_fast_max).
+Cleanup:   BUFFER_UNSYNC + RESTORE_GCODE_STATE (im finally-Block,
+           garantiert auch bei Klipper-error oder M112 mid-sync).
 ```
 
-Mit `use_python_unload=0` läuft `UNLOAD_FILAMENT_LEGACY` als reines
-Jinja-Macro (keine try/finally-Garantie bei mid-sync error — nur
-Fallback für Debugging).
+### Migration (P7-65)
+
+Die Config-Option `use_python_unload` wurde entfernt. Das alte
+`UNLOAD_FILAMENT_LEGACY`-Macro existiert nicht mehr. Wenn deine
+`lll.cfg` noch `use_python_unload: 0` oder `: 1` enthält, entferne
+die Zeile — sonst rejected Klipper den Start mit
+`Option 'use_python_unload' is not valid in section 'buffer_feeder mellow'`.
 
 ---
 

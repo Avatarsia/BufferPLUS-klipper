@@ -17,7 +17,6 @@ def set_sensor_active(feeder, sensor_name, active):
 def test_get_status_exposes_important_flags():
     _, feeder = make_feeder(
         values={
-            "use_python_unload": 1,
             "use_fault_overlay": True,
         }
     )
@@ -44,14 +43,12 @@ def test_get_status_exposes_important_flags():
     assert status["fault_overflow"] is True
     assert status["fault_runout"] is True
     assert status["fault_jam"] is True
-    assert status["use_python_unload"] == 1
     assert status["use_fault_overlay"] is True
 
 
 def test_buffer_state_dump_reports_core_flags():
     printer, feeder = make_feeder(
         values={
-            "use_python_unload": 1,
             "use_fault_overlay": True,
         }
     )
@@ -78,5 +75,3 @@ def test_buffer_state_dump_reports_core_flags():
     assert "jam_active         = True" in dump
     assert "overlay flags     = overflow=True runout=False jam=True (use=True)" in dump
     assert "synced_to_extruder = extruder" in dump
-    # TODO: BUFFER_STATE_DUMP does not print use_python_unload yet, so
-    # that flag is asserted via get_status() only.
