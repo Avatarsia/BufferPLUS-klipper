@@ -796,8 +796,8 @@ class BufferFeeder:
         self.load_fast_distance    = config.getfloat('load_fast_distance',   1000., above=0.)
         self.load_slow_distance    = config.getfloat('load_slow_distance',    180., above=0.)
         self.load_buffer_max       = config.getfloat('load_buffer_max',      2000., above=0.)
-        self.unload_sync_distance  = config.getfloat('unload_sync_distance',  180., above=0.)
-        self.unload_fast_max       = config.getfloat('unload_fast_max',      2510., above=0.)
+        self.unload_sync_distance  = config.getfloat('unload_sync_distance',  400., above=0.)
+        self.unload_fast_max       = config.getfloat('unload_fast_max',      5000., above=0.)
 
         # ----- Config: safety limits -----
         self.max_feed_time      = config.getfloat('max_feed_time',       60.,  above=0.)
@@ -3303,12 +3303,15 @@ class BufferFeeder:
 
     cmd_BUFFER_UNLOAD_FILAMENT_help = "UNLOAD_FILAMENT als Python-Workflow mit garantiertem Cleanup"
     def cmd_BUFFER_UNLOAD_FILAMENT(self, gcmd):
-        tip_cycles = gcmd.get_int('TIP_CYCLES', 4, minval=0)
+        tip_cycles = gcmd.get_int('TIP_CYCLES', 6, minval=0)
         tip_push = gcmd.get_float('TIP_PUSH', 8.0, above=0.)
-        tip_pull = gcmd.get_float('TIP_PULL', 10.0, above=0.)
+        tip_pull = gcmd.get_float('TIP_PULL', 14.0, above=0.)
         tip_speed = gcmd.get_float('TIP_SPEED', 20.0, above=0.)
-        tip_final_retract = gcmd.get_float('TIP_FINAL_RETRACT', 25.0, above=0.)
+        tip_final_retract = gcmd.get_float('TIP_FINAL_RETRACT', 50.0, above=0.)
         tip_final_speed = gcmd.get_float('TIP_FINAL_SPEED', 50.0, above=0.)
+        use_cooling_move = gcmd.get_int('USE_COOLING_MOVE', 1, minval=0, maxval=1)
+        cool_temp = gcmd.get_float('COOL_TEMP', 150.0, above=0.)
+        cool_temp_max = gcmd.get_float('COOL_TEMP_MAX', cool_temp + 10.0, above=cool_temp)
         sync_dist = gcmd.get_float('SYNC_DIST', self.unload_sync_distance, above=0.)
         fast_spd = gcmd.get_float('FAST_SPD', self.unload_fast_speed, above=0.)
         max_distance = gcmd.get_float('MAX_DISTANCE', self.unload_fast_max, above=0.)
@@ -3347,15 +3350,35 @@ class BufferFeeder:
 
                 tip_speed_f = int(tip_speed * 60)
                 fast_spd_f = int(fast_spd * 60)
-                moves = []
+                # P7-64: Tip-Forming in zwei Phasen, dazwischen optional
+                # Cooling-Move (M104 + TEMPERATURE_WAIT). Cooling haertet
+                # die Filament-Spitze, damit sie sauber durch die Haupt-
+                # extruder-Zaehne (BMG/Sherpa/Orbiter) passt und der
+                # Buffer-Stepper das Ende anschliessend frei aus dem
+                # Bowden ziehen kann.
+                pre_cool_moves = []
                 for _ in range(tip_cycles):
-                    moves.append("G1 E%g F%d" % (tip_push, tip_speed_f))
-                    moves.append("G1 E-%g F%d" % (tip_pull, tip_speed_f))
-                moves.append("G1 E-%g F%d" % (tip_final_retract,
-                                             int(tip_final_speed * 60)))
-                moves.append("G1 E-%g F%d" % (sync_dist, fast_spd_f))
-                moves.append("M400")
-                self._gcode_run_script_checked("\n".join(moves), from_command=True)
+                    pre_cool_moves.append("G1 E%g F%d" % (tip_push, tip_speed_f))
+                    pre_cool_moves.append("G1 E-%g F%d" % (tip_pull, tip_speed_f))
+                if pre_cool_moves:
+                    self._gcode_run_script_checked("\n".join(pre_cool_moves),
+                                                    from_command=True)
+
+                if use_cooling_move:
+                    self._gcode_run_script_checked(
+                        "M118 UNLOAD Cooling-Move: heize runter auf %d C\n"
+                        "M104 S%d\n"
+                        "TEMPERATURE_WAIT SENSOR=%s MAXIMUM=%d"
+                        % (int(cool_temp), int(cool_temp), extruder_name, int(cool_temp_max)),
+                        from_command=True)
+
+                post_cool_moves = []
+                post_cool_moves.append("G1 E-%g F%d" % (tip_final_retract,
+                                                       int(tip_final_speed * 60)))
+                post_cool_moves.append("G1 E-%g F%d" % (sync_dist, fast_spd_f))
+                post_cool_moves.append("M400")
+                self._gcode_run_script_checked("\n".join(post_cool_moves),
+                                                from_command=True)
             finally:
                 self._unsync_if_synced()
 
