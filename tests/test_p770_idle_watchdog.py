@@ -152,11 +152,19 @@ def test_idle_short_gap_does_not_fire(monkeypatch):
         "Watchdog must NOT fire while gap stays under idle_anchor_gap.")
 
 
-def test_state_auto_long_gap_does_not_fire(monkeypatch):
-    """Only IDLE is watched. STATE_AUTO has bang-bang / flush-callback
-    handling its own cursor; the watchdog must keep its hands off."""
+def test_state_auto_with_active_bangbang_does_not_fire(monkeypatch):
+    """P7-75 (Issue #31) erweiterte den Watchdog auf STATE_AUTO, ABER
+    nur wenn Bang-Bang quiescent ist. Mit aktiver Bang-Bang-Session
+    (_continuous_feed=True) muss der Watchdog Hände weg lassen —
+    Bang-Bang owns the cursor management dort.
+
+    Der frühere Test 'test_state_auto_long_gap_does_not_fire' war eine
+    Aussage über das alte P7-70-Verhalten (STATE_AUTO immer tabu) und
+    wurde durch P7-75 obsolet. Die AUTO-quiescent-Variante wird in
+    test_p775_auto_watchdog.py geprüft."""
     _, feeder = make_idle_feeder()
     feeder._state = buffer_feeder.STATE_AUTO
+    feeder._continuous_feed = True  # Bang-Bang aktiv
     # Entrance must be present for AUTO to be a valid state at this
     # point of the tick, otherwise the _bang_bang_tick might shuffle
     # things around. We patch out the bang-bang tick to keep the
@@ -170,8 +178,8 @@ def test_state_auto_long_gap_does_not_fire(monkeypatch):
     feeder._main_tick(eventtime=30.0)
 
     assert calls == [], (
-        "Watchdog must NOT fire in STATE_AUTO — bang-bang owns "
-        "that path's cursor management.")
+        "Watchdog must NOT fire in STATE_AUTO while bang-bang is "
+        "actively streaming chunks (_continuous_feed=True).")
 
 
 def test_sync_active_blocks_anchor(monkeypatch):

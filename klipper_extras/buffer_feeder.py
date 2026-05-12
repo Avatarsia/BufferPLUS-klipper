@@ -1883,16 +1883,30 @@ class BufferFeeder:
             # The reactive REPRIME path in _submit_single_trapezoid runs
             # only on the NEXT submit, which never comes in IDLE.
             #
-            # Fix: in IDLE only, fire a 0.05 mm anchor (boot-anchor /
-            # SYNC-gap-anchor pattern, see SyncCoordinator._submit_anchor_-
-            # move) whenever idle_anchor_gap seconds elapsed since the
-            # last move and the last watchdog-anchor. The anchor refreshes
+            # P7-75 (Issue #31, Eifel-Joe Hardware-Test 2026-05-12):
+            # Same stale-cursor pathology hits in STATE_AUTO when the
+            # buffer sits in the bang-bang hysteresis dead-zone (neither
+            # hall_full nor hall_empty). _on_mcu_flush does nothing
+            # there; _bang_bang_tick does nothing there. last_step_clock
+            # ages from the boot anchor until the first hall_empty
+            # finally arms a submit — by then queue_step interval has
+            # blown past int32 (P7-73 clamps far-future forced_t0 but
+            # cannot heal the past-end). Extend the watchdog gate to
+            # STATE_AUTO with extra sub-gates so it never collides with
+            # an active bang-bang session.
+            #
+            # Fix: fire a 0.05 mm anchor (boot-anchor / SYNC-gap-anchor
+            # pattern, see SyncCoordinator._submit_anchor_move) whenever
+            # idle_anchor_gap seconds elapsed since the last move and
+            # the last watchdog-anchor. The anchor refreshes
             # last_step_clock and re-arms _last_move_end_time, so the
             # next background flush stays inside CLOCK_DIFF_MAX.
             #
             # Gates:
-            #   - state == IDLE: only fire here; AUTO/MANUAL/LOAD/UNLOAD
-            #     have their own move cadence + dedicated reprime paths.
+            #   - state in (IDLE, AUTO): IDLE handled by P7-70; AUTO is
+            #     the bang-bang dead-zone case from P7-75/Issue #31.
+            #     MANUAL/LOAD/UNLOAD have their own move cadence +
+            #     dedicated reprime paths and stay out.
             #   - not synced: when bound to extruder trapq, moves come
             #     from the extruder side and we must not inject our own.
             #   - not _move_in_flight / not pending: no overlap with a
@@ -1901,11 +1915,24 @@ class BufferFeeder:
             #   - _last_idle_anchor_time gating: a second tick right
             #     after firing must NOT submit another anchor — the same
             #     idle_anchor_gap window applies between anchors.
-            if (self._state == STATE_IDLE
+            #   - AUTO-specific sub-gates (P7-75) keep the watchdog out
+            #     of any active bang-bang flow:
+            #       * not _continuous_feed     — bang-bang inactive
+            #       * not hall_empty           — no open feed request
+            #       * not _needs_overflow_prime — no pending prime
+            #       * not hall_full            — buffer already full;
+            #         further forward anchors would push toward HALL1
+            #         overflow (P7-75b Codex-Verify finding: ~18mm/h
+            #         drift without this gate at default idle_anchor_gap=10s)
+            if (self._state in (STATE_IDLE, STATE_AUTO)
                     and not self._stepper_synced_to
                     and not self._pending_disable
                     and not self._move_in_flight()
-                    and self._pending_remaining_mm == 0.0):
+                    and self._pending_remaining_mm == 0.0
+                    and not self._continuous_feed
+                    and not self.hall_empty
+                    and not self.hall_full
+                    and not self._needs_overflow_prime):
                 mcu = self.stepper.get_mcu()
                 mcu_now = mcu.estimated_print_time(
                     self.reactor.monotonic())
@@ -1916,22 +1943,21 @@ class BufferFeeder:
                     try:
                         self.sync._submit_anchor_move()
                         self._last_idle_anchor_time = mcu_now
-                        # Stepper got re-enabled by the anchor move
-                        # (which calls _enable_stepper internally).
-                        # Re-defer the disable so IDLE semantics
-                        # (stopped AND disabled) are restored once
-                        # the anchor-move drains. _schedule_stepper_-
-                        # disable handles the in-flight case via
-                        # _pending_disable; out of an abundance of
-                        # caution we still go through it.
-                        self._schedule_stepper_disable()
+                        # In IDLE we re-defer the disable so IDLE
+                        # semantics (stopped AND disabled) are restored
+                        # once the anchor-move drains. In AUTO we must
+                        # NOT disable — bang-bang owns the next submit
+                        # and a disable here would race with it.
+                        if self._state == STATE_IDLE:
+                            self._schedule_stepper_disable()
                         logging.info(
-                            "buffer_feeder: idle anchor fired "
+                            "buffer_feeder: %s anchor fired "
                             "(gap=%.1fs, threshold=%.1fs)",
+                            self._state.lower(),
                             gap_moves, self.idle_anchor_gap)
                     except Exception:
                         logging.exception(
-                            "buffer_feeder: idle anchor failed")
+                            "buffer_feeder: idle/auto anchor failed")
 
             self._tick_cooldown_end(eventtime)
             self._tick_grip_completion(eventtime)
