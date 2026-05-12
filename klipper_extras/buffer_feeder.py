@@ -3020,6 +3020,36 @@ class BufferFeeder:
             # drift, queue underrun race), forced_t0=_last_move_end_-
             # time would land in the past → "Timer too close". mcu_now
             # is the safe rebase anchor for that degenerate case.
+            #
+            # P7-73 (Issue #31): defensive clamp gegen far-future
+            # forced_t0. motion_queuing.flush_all_steps() kann beim
+            # Print-Start einen `step_gen_time = need_step_gen_time`
+            # (= Toolhead-Queue-Ende, 60-100s weit in der Zukunft) an
+            # die Flush-Callbacks durchreichen. `_on_mcu_flush` baut
+            # daraus `anchor = step_gen_time + lead_time` und reicht
+            # das als forced_t0 weiter; im max() unten dominiert es
+            # _last_move_end_time/en/mcu_now. last_step_clock im
+            # Stepcompress (aus Boot-Anchor, ~7s alt) bleibt zurück,
+            # queue_step-Intervall wächst auf 60-100s und überschreitet
+            # int32 signed (44.7s @ 48 MHz signed) bzw. uint32 (89.5s)
+            # → MCU "Timer too close"-Shutdown. Hardware-Reproduktion
+            # Eifel-Joe 2026-05-12: P7-70 interval=48.76s, P7-71
+            # interval=86.8s — beides far-future-anchor-Crashes vom
+            # Print-Start mit print_time-Spitze 59-100s.
+            #
+            # Cap auf mcu_now + MAX_FORCED_T0_LOOKAHEAD: im gesunden
+            # flush-callback-Betrieb ist step_gen_time ≈ mcu_now +
+            # ~0.25s, anchor ≈ mcu_now + 0.55s — also weit unterhalb
+            # des Cap. Greift NUR im degenerate far-future Print-Start
+            # Fall. Fallback-Anker = mcu_now + lead_time entspricht
+            # dem normalen "Erst-Chunk"-Anker (else-Branch unten).
+            MAX_FORCED_T0_LOOKAHEAD = 2.0  # s
+            if forced_t0 > mcu_now + MAX_FORCED_T0_LOOKAHEAD:
+                logging.warning(
+                    "buffer_feeder: forced_t0 clamped — was %.2fs "
+                    "ahead of mcu_now (P7-73 guard, Issue #31 "
+                    "far-future flush)", forced_t0 - mcu_now)
+                forced_t0 = mcu_now + self.lead_time
             t0 = max(forced_t0, self._last_move_end_time, en, mcu_now)
         elif self._last_move_end_time > mcu_now + self.lead_time:
             # Streaming: previous chunk is still in the future — abut.

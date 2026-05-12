@@ -85,6 +85,12 @@ def test_flush_submits_when_hall3_active_and_state_auto():
     printer, feeder = make_feeder()
     motion_q = printer.lookup_object('motion_queuing')
     set_sensor_active(feeder, 'hall_empty', True)
+    # mcu_now must be consistent with step_gen_time — flush callbacks
+    # only fire with step_gen_time close to (typically a few ms ahead
+    # of) mcu_now. P7-73 (Issue #31) clamps forced_t0 to
+    # mcu_now + 2.0s, so an artificial reactor.now=0 + step_gen_time=
+    # 5.05 would now (correctly) trip the far-future clamp.
+    feeder.reactor.now = 5.0
 
     appends_before = len(motion_q.append_calls)
     motion_q.trigger_flush(flush_time=5.0, step_gen_time=5.05)
