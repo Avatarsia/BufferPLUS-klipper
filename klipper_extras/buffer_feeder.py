@@ -2979,8 +2979,36 @@ class BufferFeeder:
         # the cursor was primed on entry AND the reprime block did
         # not just rewrite it. When need_reprime=True the reprime ran
         # → en-floor is mandatory, even if was_primed=True.
+        #
+        # P7-72 (Issue #29 Eifel-Joe — defense-in-depth stale-anchor
+        # guard): the three existing guards above
+        # (`streaming` + `was_primed` + `not need_reprime`) all check
+        # state at submit-entry. They do NOT see whether
+        # `_last_move_end_time` itself is still a meaningful anchor.
+        # _enter_overflow → _halt_motion mid-flight does not touch
+        # `_last_move_end_time` — it stays parked at the in-flight
+        # chunk's end_time. If the rapid-cycle then drains that chunk
+        # without queuing a successor (HALL1 flicker, HALT, JAM
+        # recovery, etc.) and wall-clock advances past it, the next
+        # streaming-lookahead submit would carry a `_last_move_end_-
+        # time` that lies in the past relative to mcu_now. The
+        # `forced_t0`-branch below already floors against mcu_now,
+        # but the legacy `forced_t0=None + streaming + was_primed +
+        # gap <= REPRIME_GAP` corner combines a stale anchor with the
+        # dropped en-floor — t0 lands at the stale `_last_move_end_-
+        # time`, no enable-vs-step lead, MCU "Invalid sequence"
+        # shutdown (Eifel-Joe 22-cycle AUTO-Bang-Bang reproduction,
+        # follow-up to P7-71 which only covered the gap>5s reprime
+        # corner). Marker `mcu_now >= _last_move_end_time` catches
+        # exactly this dead-anchor case — when a real streaming
+        # chunk is in flight, `_last_move_end_time` is strictly in
+        # the future (chunk end_time > mcu_now) so the guard is
+        # inert. Perf-impact: zero on healthy streaming, the guard
+        # only triggers when the abuttment anchor is already dead.
+        stale_anchor = (self._last_move_end_time <= mcu_now)
         en = (0.0
-              if streaming and was_primed and not need_reprime
+              if (streaming and was_primed and not need_reprime
+                  and not stale_anchor)
               else self._last_enable_schedule_time)
         if forced_t0 is not None:
             # P7-52 flush-callback path: caller provides a step_gen_
