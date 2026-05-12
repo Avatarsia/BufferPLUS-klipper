@@ -3156,6 +3156,36 @@ class BufferFeeder:
         # chunk_mm) sizing without inheriting a stale AUTO cap.
         self._pending_submit_chunk_cap = None
         self._feed_deadline_time = None
+        # P7-74 (Issue #29 Eifel-Joe Hypothese 2026-05-12): clamp
+        # `_last_move_end_time` to mcu_now when it sits in the
+        # future. _halt_motion in the AUTO-Streaming-Cycling-Pfad
+        # is called mid-flight (HALL1 fires bei ~9mm gefahren in
+        # einem 45mm-Chunk → _enter_overflow → _halt_motion). Pre-
+        # P7-74 ließ das `_last_move_end_time` auf dem geplanten
+        # Chunk-Ende stehen (mcu_now + 0.55s), obwohl der Stepper
+        # tatsächlich nur 9mm gefahren ist. Der NÄCHSTE Streaming-
+        # Submit (nach HALL1-Bounce-Clear, _stepcompress_primed
+        # bleibt True) ankert dann via `t0 = max(forced_t0,
+        # _last_move_end_time, en, mcu_now)` auf dieser Fake-Future
+        # — stepcompress.last_step_clock ist aber auf dem echten
+        # letzten Step (innerhalb der ersten 9mm). MCU sieht
+        # last_step_clock → t0-Sprung als inkonsistent → "Invalid
+        # sequence c=29" Shutdown (Eifel-Joe Hardware-Log 21:52
+        # UTC, Issue #29 Kommentar).
+        #
+        # P7-72 stale_anchor=(_last_move_end_time <= mcu_now) fängt
+        # NUR den Past-Anchor-Fall. Hier liegt der Anker in der
+        # falschen ZUKUNFT, P7-72 würde stale_anchor=False sagen
+        # und en-Floor droppen → Fake-Future wird abuttment-Anker.
+        #
+        # Clamp ist einseitig: nur `> mcu_now` wird auf mcu_now
+        # heruntergesetzt. Damit ist die tatsächliche Halt-Position
+        # konsistent reflektiert, und P7-72 stale_anchor wird beim
+        # nächsten Submit True (weil `<=`) → en-Floor aktiv → safe.
+        mcu = self.stepper.get_mcu()
+        mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
+        if self._last_move_end_time > mcu_now:
+            self._last_move_end_time = mcu_now
 
     def _start_continuous_motion(self, direction, speed, max_duration_s):
         self._continuous_feed = True
