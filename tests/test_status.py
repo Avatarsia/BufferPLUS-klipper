@@ -1,3 +1,8 @@
+"""Status / smoke tests for BufferFeeder.
+
+Migrated from test_smoke.py + test_status_dump.py (2026-05-12).
+"""
+
 from fakes_klipper import FakeConfig, FakePrinter
 from klipper_extras import buffer_feeder
 
@@ -13,6 +18,33 @@ def set_sensor_active(feeder, sensor_name, active):
     polarity_flip = feeder._pin_polarity_flip[sensor_name]
     feeder._pin_stable_state[sensor_name] = (not active) if polarity_flip else active
 
+
+# --- Bootstrap (from test_smoke.py) ---
+
+def test_buffer_feeder_smoke(fake_config):
+    feeder = buffer_feeder.BufferFeeder(fake_config)
+    gcode = fake_config.get_printer().lookup_object("gcode")
+
+    status = feeder.get_status(0.0)
+
+    assert status["state"] == buffer_feeder.STATE_INIT
+    assert "hall_overflow" in status
+    assert "fault_overflow" in status
+    assert "fault_runout" in status
+    assert "fault_jam" in status
+    assert "use_fault_overlay" in status
+    assert status["fault_overflow"] is False
+    assert status["fault_runout"] is False
+    assert status["fault_jam"] is False
+    assert status["use_fault_overlay"] is False
+
+    gcode.commands["BUFFER_STATE_DUMP"]["handler"](None)
+
+    assert gcode.info_messages
+    assert gcode.info_messages[0] == "---- BUFFER STATE ----"
+
+
+# --- get_status / STATE_DUMP (from test_status_dump.py) ---
 
 def test_get_status_exposes_important_flags():
     _, feeder = make_feeder(

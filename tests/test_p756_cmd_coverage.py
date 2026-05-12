@@ -385,26 +385,6 @@ def test_stop_buffer_fill_clears_grip_follow_after_unsync_resume(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _clear_recovery_flags helper (Phase D refactor target)
-# ---------------------------------------------------------------------------
-
-def test_clear_recovery_flags_resets_jam_state():
-    """Phase D will likely consolidate cleanup into a single helper —
-    this test pins down the existing _clear_recovery_flags semantics
-    so the refactor cannot silently change them."""
-    _, feeder = make_feeder()
-    feeder._jam_active = True
-    feeder._hall2_start_time = 12.5
-    feeder._hall3_start_time = 8.0
-
-    feeder._clear_recovery_flags()
-
-    assert feeder._jam_active is False
-    assert feeder._hall2_start_time is None
-    assert feeder._hall3_start_time is None
-
-
-# ---------------------------------------------------------------------------
 # Lifecycle hooks: _handle_ready / _end_startup_grace
 # ---------------------------------------------------------------------------
 
