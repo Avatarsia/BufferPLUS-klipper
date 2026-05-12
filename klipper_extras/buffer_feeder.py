@@ -825,6 +825,21 @@ class BufferFeeder:
             'interrupt_chunk_mm', 9.0, above=0.)
         if self.interrupt_chunk_mm > self.max_move_chunk_mm:
             self.interrupt_chunk_mm = self.max_move_chunk_mm
+        # P7-70 (Issue #12): Interval after which an IDLE stepper gets a
+        # micro-anchor move to refresh stepcompress's last_step_clock.
+        # Background: STATE_IDLE has no periodic move activity. After
+        # UNLOAD → IDLE the stepcompress cursor freezes. Once Klipper's
+        # background flush_handler fires more than CLOCK_DIFF_MAX (~17s
+        # @48MHz) after _last_move_end_time, compress_bisect_add hits a
+        # degenerate sequence ("stepcompress o=X i=0 c=N a=0: Invalid
+        # sequence") and the MCU shuts down. This watchdog matches the
+        # well-tested boot-anchor / SYNC-gap-anchor pattern (a 0.05 mm
+        # move in the safe direction is enough to keep last_step_clock
+        # current). Set above 0 — too small wastes motor wear, too large
+        # risks crossing the 17 s threshold. Default 10 s leaves a
+        # comfortable safety margin.
+        self.idle_anchor_gap = config.getfloat(
+            'idle_anchor_gap', 10.0, above=0.)
 
         # ----- Config: jam detection -----
         self.jam_detection_enabled = config.getboolean('jam_detection_enabled', True)
@@ -1007,6 +1022,12 @@ class BufferFeeder:
         self._continuous_feed_speed = 0.0
         self._auto_between_since = None     # sustained HALL3-leave in AUTO
         self._pending_disable = False       # deferred stepper disable (while move in flight)
+        # P7-70 (Issue #12): timestamp of the last idle-watchdog anchor.
+        # Gates the watchdog so it fires at most every idle_anchor_gap
+        # seconds (not on every reactor tick once gap > threshold). Used
+        # by _main_tick. 0.0 means "never fired yet" — first valid trip
+        # happens once mcu_now - _last_move_end_time > idle_anchor_gap.
+        self._last_idle_anchor_time = 0.0
         # P7-54: After OVERFLOW → IDLE → AUTO the stepcompress cursor
         # is out of sync. _main_tick handles the safe resync (forced_t0=None
         # path → flush_step_generation allowed). _on_mcu_flush skips while
@@ -1851,6 +1872,66 @@ class BufferFeeder:
             if self._pending_disable and not self._move_in_flight():
                 self._pending_disable = False
                 self._disable_stepper()
+
+            # P7-70 (Issue #12): Idle-Watchdog.
+            # In STATE_IDLE neither the bang-bang flush-callback nor any
+            # other periodic move-submit runs. _last_move_end_time freezes
+            # at the time the last queued move ended. Once Klipper's
+            # background flush_handler fires more than CLOCK_DIFF_MAX
+            # (~17s @ 48 MHz) after that anchor, compress_bisect_add
+            # degenerates into an "Invalid sequence" → MCU shutdown.
+            # The reactive REPRIME path in _submit_single_trapezoid runs
+            # only on the NEXT submit, which never comes in IDLE.
+            #
+            # Fix: in IDLE only, fire a 0.05 mm anchor (boot-anchor /
+            # SYNC-gap-anchor pattern, see SyncCoordinator._submit_anchor_-
+            # move) whenever idle_anchor_gap seconds elapsed since the
+            # last move and the last watchdog-anchor. The anchor refreshes
+            # last_step_clock and re-arms _last_move_end_time, so the
+            # next background flush stays inside CLOCK_DIFF_MAX.
+            #
+            # Gates:
+            #   - state == IDLE: only fire here; AUTO/MANUAL/LOAD/UNLOAD
+            #     have their own move cadence + dedicated reprime paths.
+            #   - not synced: when bound to extruder trapq, moves come
+            #     from the extruder side and we must not inject our own.
+            #   - not _move_in_flight / not pending: no overlap with a
+            #     drain-in-progress (defense in depth; in IDLE these are
+            #     typically False already).
+            #   - _last_idle_anchor_time gating: a second tick right
+            #     after firing must NOT submit another anchor — the same
+            #     idle_anchor_gap window applies between anchors.
+            if (self._state == STATE_IDLE
+                    and not self._stepper_synced_to
+                    and not self._pending_disable
+                    and not self._move_in_flight()
+                    and self._pending_remaining_mm == 0.0):
+                mcu = self.stepper.get_mcu()
+                mcu_now = mcu.estimated_print_time(
+                    self.reactor.monotonic())
+                gap_moves = mcu_now - self._last_move_end_time
+                gap_anchors = mcu_now - self._last_idle_anchor_time
+                if (gap_moves > self.idle_anchor_gap
+                        and gap_anchors > self.idle_anchor_gap):
+                    try:
+                        self.sync._submit_anchor_move()
+                        self._last_idle_anchor_time = mcu_now
+                        # Stepper got re-enabled by the anchor move
+                        # (which calls _enable_stepper internally).
+                        # Re-defer the disable so IDLE semantics
+                        # (stopped AND disabled) are restored once
+                        # the anchor-move drains. _schedule_stepper_-
+                        # disable handles the in-flight case via
+                        # _pending_disable; out of an abundance of
+                        # caution we still go through it.
+                        self._schedule_stepper_disable()
+                        logging.info(
+                            "buffer_feeder: idle anchor fired "
+                            "(gap=%.1fs, threshold=%.1fs)",
+                            gap_moves, self.idle_anchor_gap)
+                    except Exception:
+                        logging.exception(
+                            "buffer_feeder: idle anchor failed")
 
             self._tick_cooldown_end(eventtime)
             self._tick_grip_completion(eventtime)
