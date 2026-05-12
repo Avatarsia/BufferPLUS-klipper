@@ -1,10 +1,9 @@
 import pytest
 
-from fakes_klipper import FakeConfig, FakePrinter
 from klipper_extras import buffer_feeder
 
 
-class FakeGCmd:
+class FakeGCmdLocal:
     def __init__(self, values=None):
         self.values = {key.upper(): value for key, value in (values or {}).items()}
 
@@ -18,23 +17,15 @@ class FakeGCmd:
         return float(self.values.get(key.upper(), default))
 
 
-def make_feeder(values=None):
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
-    return printer, feeder
-
-
 def set_sensor_active(feeder, sensor_name, active):
     polarity_flip = feeder._pin_polarity_flip[sensor_name]
     feeder._pin_stable_state[sensor_name] = (not active) if polarity_flip else active
 
 
-def test_check_debounce_dispatch_enters_overflow_when_hall1_stabilizes(monkeypatch):
+def test_check_debounce_dispatch_enters_overflow_when_hall1_stabilizes(fake_printer, feeder, monkeypatch):
     # The debounce caller promotes a stable HALL1 edge and dispatches into
     # the sensor_callback overflow path when no bypass applies.
-    printer, feeder = make_feeder()
-    buttons = printer.lookup_object("buttons")
+    buttons = fake_printer.lookup_object("buttons")
     feeder._startup_grace_done = True
     feeder._state = buffer_feeder.STATE_IDLE
     feeder._pin_raw_state["hall_overflow"] = True
@@ -51,10 +42,9 @@ def test_check_debounce_dispatch_enters_overflow_when_hall1_stabilizes(monkeypat
     assert feeder.hall_overflow is True
 
 
-def test_main_tick_enters_overflow_when_hall1_is_active(monkeypatch):
+def test_main_tick_enters_overflow_when_hall1_is_active(feeder, monkeypatch):
     # The main tick checks HALL1 before other work and immediately routes
     # through the overflow path when the active state is not bypassed.
-    _, feeder = make_feeder()
     feeder._startup_grace_done = True
     feeder._state = buffer_feeder.STATE_IDLE
     set_sensor_active(feeder, "hall_overflow", True)
@@ -73,10 +63,9 @@ def test_main_tick_enters_overflow_when_hall1_is_active(monkeypatch):
     assert events == [("check_debounce", 1.25), "enter_overflow"]
 
 
-def test_submit_move_rejects_forward_motion_when_hall1_is_active(monkeypatch):
+def test_submit_move_rejects_forward_motion_when_hall1_is_active(feeder, monkeypatch):
     # The submit_move caller site rejects positive-distance motion under
     # active HALL1 and clears pending streaming state instead of queuing.
-    _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_IDLE
     feeder._continuous_feed = True
     feeder._pending_remaining_mm = 123.0
@@ -96,10 +85,9 @@ def test_submit_move_rejects_forward_motion_when_hall1_is_active(monkeypatch):
     assert feeder._pending_remaining_mm == 0.0
 
 
-def test_check_auto_ready_returns_hall1_overflow_reason(monkeypatch):
+def test_check_auto_ready_returns_hall1_overflow_reason(feeder):
     # The auto-ready helper surfaces the HALL1 lockout reason by calling
     # the real auto_on context check.
-    _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_IDLE
     set_sensor_active(feeder, "hall_overflow", True)
 
@@ -108,10 +96,9 @@ def test_check_auto_ready_returns_hall1_overflow_reason(monkeypatch):
     assert reason == "HALL1 overflow active"
 
 
-def test_cmd_buffer_auto_on_raises_when_hall1_is_active(monkeypatch):
+def test_cmd_buffer_auto_on_raises_when_hall1_is_active(feeder, monkeypatch):
     # The AUTO_ON command aborts before enabling or changing state when
     # the underlying auto_on context sees HALL1 active.
-    _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_IDLE
     set_sensor_active(feeder, "hall_overflow", True)
     events = []
@@ -129,10 +116,9 @@ def test_cmd_buffer_auto_on_raises_when_hall1_is_active(monkeypatch):
     assert events == []
 
 
-def test_cmd_buffer_load_phase3_rejects_entry_when_hall1_is_active(monkeypatch):
+def test_cmd_buffer_load_phase3_rejects_entry_when_hall1_is_active(feeder, monkeypatch):
     # Phase 3 without OVERFLOW_OK hits the phase3_entry lockout before any
     # phase setup work runs.
-    _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_IDLE
     set_sensor_active(feeder, "hall_overflow", True)
     events = []
@@ -144,15 +130,14 @@ def test_cmd_buffer_load_phase3_rejects_entry_when_hall1_is_active(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="HALL1 OVERFLOW active"):
-        feeder.cmd_BUFFER_LOAD_PHASE3(FakeGCmd())
+        feeder.cmd_BUFFER_LOAD_PHASE3(FakeGCmdLocal())
 
     assert events == []
 
 
-def test_cmd_buffer_load_phase3_with_overflow_ok_skips_hall1_entry_lockout(monkeypatch):
+def test_cmd_buffer_load_phase3_with_overflow_ok_skips_hall1_entry_lockout(feeder, monkeypatch):
     # With OVERFLOW_OK=1, the command skips the phase3_entry HALL1 check and
     # proceeds into its normal setup path even while HALL1 stays active.
-    _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_IDLE
     set_sensor_active(feeder, "hall_overflow", True)
     events = []
@@ -183,7 +168,7 @@ def test_cmd_buffer_load_phase3_with_overflow_ok_skips_hall1_entry_lockout(monke
         ),
     )
 
-    feeder.cmd_BUFFER_LOAD_PHASE3(FakeGCmd({"OVERFLOW_OK": 1}))
+    feeder.cmd_BUFFER_LOAD_PHASE3(FakeGCmdLocal({"OVERFLOW_OK": 1}))
 
     assert events == [
         (

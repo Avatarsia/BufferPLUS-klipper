@@ -27,41 +27,29 @@ def make_feeder(values=None):
     return printer, feeder
 
 
-def test_idle_ready_pause_during_print_suspends_bang_bang():
-    """state='paused' is the legitimate RESUME-expected case."""
+@pytest.mark.parametrize(
+    "print_state,expect_suspended",
+    [
+        ("paused", True),    # legitimate RESUME-expected case
+        ("complete", False), # print finished — must NOT lock out (bug-report)
+        ("standby", False),  # post-print idle — buffer must stay available
+    ],
+    ids=["paused", "complete", "standby"],
+)
+def test_idle_ready_print_state_matrix(print_state, expect_suspended):
+    """Subsumes: test_idle_ready_pause_during_print_suspends_bang_bang,
+    test_idle_ready_print_end_does_not_suspend_bang_bang,
+    test_idle_ready_print_standby_does_not_suspend_bang_bang
+    (parametrized 2026-05-12, Audit-2 Cluster C)."""
     printer, feeder = make_feeder()
-    printer.objects['print_stats'] = FakePrintStats(state='paused')
+    printer.objects['print_stats'] = FakePrintStats(state=print_state)
     feeder._bang_bang_suspended = False
 
     feeder._on_idle_ready()
 
-    assert feeder._bang_bang_suspended is True
+    assert feeder._bang_bang_suspended is expect_suspended
+    # _print_running flips to False in all three branches.
     assert feeder._print_running is False
-
-
-def test_idle_ready_print_end_does_not_suspend_bang_bang():
-    """state='complete' means print finished — no RESUME ever, so
-    bang-bang must NOT lock out. This is the bug-report scenario."""
-    printer, feeder = make_feeder()
-    printer.objects['print_stats'] = FakePrintStats(state='complete')
-    feeder._bang_bang_suspended = False
-
-    feeder._on_idle_ready()
-
-    assert feeder._bang_bang_suspended is False
-    assert feeder._print_running is False
-
-
-def test_idle_ready_print_standby_does_not_suspend_bang_bang():
-    """state='standby' is the post-print idle state — same as complete:
-    no RESUME, buffer must stay available."""
-    printer, feeder = make_feeder()
-    printer.objects['print_stats'] = FakePrintStats(state='standby')
-    feeder._bang_bang_suspended = False
-
-    feeder._on_idle_ready()
-
-    assert feeder._bang_bang_suspended is False
 
 
 def test_idle_ready_preserves_prior_suspended_flag_on_print_end():

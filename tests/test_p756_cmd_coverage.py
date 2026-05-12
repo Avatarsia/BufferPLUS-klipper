@@ -114,46 +114,41 @@ def test_load_phase1_releases_state_on_exception(monkeypatch):
 # cmd_BUFFER_FEED / cmd_BUFFER_RETRACT (_cmd_feed_common)
 # ---------------------------------------------------------------------------
 
-def test_feed_rejects_in_overflow(monkeypatch):
-    _, feeder = make_feeder()
-    feeder._state = buffer_feeder.STATE_OVERFLOW
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "in_overflow",
+        "in_jam",
+        "when_hall1_physically_active",
+        "in_busy_phase",
+        "distance_above_max",
+    ],
+)
+def test_cmd_buffer_feed_reject_paths(scenario):
+    """Subsumes: test_feed_rejects_in_overflow, test_feed_rejects_in_jam,
+    test_feed_rejects_when_hall1_physically_active, test_feed_rejects_in_busy_phase,
+    test_feed_rejects_distance_above_max (parametrized 2026-05-12, Audit-2 Cluster A)."""
+    if scenario == "distance_above_max":
+        _, feeder = make_feeder(values={"max_feed_distance": 10})
+        set_sensor_active(feeder, 'hall_overflow', False)
+        gcmd = FakeGCmd({"DISTANCE": 999})
+    else:
+        _, feeder = make_feeder()
+        if scenario == "in_overflow":
+            feeder._state = buffer_feeder.STATE_OVERFLOW
+        elif scenario == "in_jam":
+            feeder._state = buffer_feeder.STATE_JAM
+        elif scenario == "when_hall1_physically_active":
+            set_sensor_active(feeder, 'hall_overflow', True)
+        elif scenario == "in_busy_phase":
+            # LOAD_PHASE_1, LOAD_PHASE_3 etc. block manual feed — operator
+            # must explicitly STOP_BUFFER_FILL first.
+            feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
+        gcmd = FakeGCmd({"DISTANCE": 50})
 
     with pytest.raises(Exception):
-        feeder.cmd_BUFFER_FEED(FakeGCmd({"DISTANCE": 50}))
-
-
-def test_feed_rejects_in_jam():
-    _, feeder = make_feeder()
-    feeder._state = buffer_feeder.STATE_JAM
-
-    with pytest.raises(Exception):
-        feeder.cmd_BUFFER_FEED(FakeGCmd({"DISTANCE": 50}))
-
-
-def test_feed_rejects_when_hall1_physically_active():
-    _, feeder = make_feeder()
-    set_sensor_active(feeder, 'hall_overflow', True)
-
-    with pytest.raises(Exception):
-        feeder.cmd_BUFFER_FEED(FakeGCmd({"DISTANCE": 50}))
-
-
-def test_feed_rejects_in_busy_phase(monkeypatch):
-    """LOAD_PHASE_1, LOAD_PHASE_3 etc. block manual feed — operator
-    must explicitly STOP_BUFFER_FILL first."""
-    _, feeder = make_feeder()
-    feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
-
-    with pytest.raises(Exception):
-        feeder.cmd_BUFFER_FEED(FakeGCmd({"DISTANCE": 50}))
-
-
-def test_feed_rejects_distance_above_max(monkeypatch):
-    _, feeder = make_feeder(values={"max_feed_distance": 10})
-    set_sensor_active(feeder, 'hall_overflow', False)
-
-    with pytest.raises(Exception):
-        feeder.cmd_BUFFER_FEED(FakeGCmd({"DISTANCE": 999}))
+        feeder.cmd_BUFFER_FEED(gcmd)
 
 
 def test_feed_clears_recovery_flags(monkeypatch):
@@ -221,48 +216,39 @@ def test_feed_distance_zero_starts_continuous(monkeypatch):
 # cmd_FORCE_BUFFER_FILL
 # ---------------------------------------------------------------------------
 
-def test_force_fill_rejects_without_entrance():
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "without_entrance",
+        "when_hall1_active",
+        "during_jam",
+        "when_print_paused",
+        "when_busy",
+    ],
+)
+def test_cmd_force_buffer_fill_reject_paths(scenario):
+    """Subsumes: test_force_fill_rejects_without_entrance,
+    test_force_fill_rejects_when_hall1_active, test_force_fill_rejects_during_jam,
+    test_force_fill_rejects_when_print_paused, test_force_fill_rejects_when_busy
+    (parametrized 2026-05-12, Audit-2 Cluster A)."""
     _, feeder = make_feeder()
-    set_sensor_active(feeder, 'entrance', False)
-
-    with pytest.raises(Exception):
-        feeder.cmd_FORCE_BUFFER_FILL(FakeGCmd())
-
-
-def test_force_fill_rejects_when_hall1_active():
-    _, feeder = make_feeder()
-    set_sensor_active(feeder, 'entrance', True)
-    set_sensor_active(feeder, 'hall_overflow', True)
-
-    with pytest.raises(Exception):
-        feeder.cmd_FORCE_BUFFER_FILL(FakeGCmd())
-
-
-def test_force_fill_rejects_during_jam():
-    _, feeder = make_feeder()
-    set_sensor_active(feeder, 'entrance', True)
-    feeder._state = buffer_feeder.STATE_JAM
-    feeder._jam_active = True
-
-    with pytest.raises(Exception):
-        feeder.cmd_FORCE_BUFFER_FILL(FakeGCmd())
-
-
-def test_force_fill_rejects_when_print_paused():
-    """bang_bang_suspended (= print PAUSE) blocks FORCE_BUFFER_FILL."""
-    _, feeder = make_feeder()
-    set_sensor_active(feeder, 'entrance', True)
-    feeder._bang_bang_suspended = True
-
-    with pytest.raises(Exception):
-        feeder.cmd_FORCE_BUFFER_FILL(FakeGCmd())
-
-
-def test_force_fill_rejects_when_busy():
-    """LOAD_PHASE_3 / MANUAL_FEED etc. — only IDLE/RUNOUT allowed."""
-    _, feeder = make_feeder()
-    set_sensor_active(feeder, 'entrance', True)
-    feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
+    if scenario == "without_entrance":
+        set_sensor_active(feeder, 'entrance', False)
+    elif scenario == "when_hall1_active":
+        set_sensor_active(feeder, 'entrance', True)
+        set_sensor_active(feeder, 'hall_overflow', True)
+    elif scenario == "during_jam":
+        set_sensor_active(feeder, 'entrance', True)
+        feeder._state = buffer_feeder.STATE_JAM
+        feeder._jam_active = True
+    elif scenario == "when_print_paused":
+        # bang_bang_suspended (= print PAUSE) blocks FORCE_BUFFER_FILL.
+        set_sensor_active(feeder, 'entrance', True)
+        feeder._bang_bang_suspended = True
+    elif scenario == "when_busy":
+        # LOAD_PHASE_3 / MANUAL_FEED etc. — only IDLE/RUNOUT allowed.
+        set_sensor_active(feeder, 'entrance', True)
+        feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
 
     with pytest.raises(Exception):
         feeder.cmd_FORCE_BUFFER_FILL(FakeGCmd())
@@ -294,7 +280,9 @@ def test_force_fill_happy_path_clears_flags_and_starts_grip(monkeypatch):
 # cmd_BUFFER_CLEAR_JAM
 # ---------------------------------------------------------------------------
 
-def test_clear_jam_rejects_when_not_in_jam():
+def test_cmd_buffer_clear_jam_rejects_when_not_in_jam():
+    """Subsumes: test_clear_jam_rejects_when_not_in_jam (renamed for
+    naming consistency with the other reject-path tests 2026-05-12)."""
     _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_IDLE
 

@@ -13,15 +13,7 @@ phases must early-return without firing PAUSE — vertauschung of the
 state list during refactor would silently pause the print.
 """
 
-from fakes_klipper import FakeConfig, FakePrinter
 from klipper_extras import buffer_feeder
-
-
-def make_feeder(values=None):
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
-    return printer, feeder
 
 
 def set_sensor_active(feeder, sensor_name, active):
@@ -33,12 +25,11 @@ def set_sensor_active(feeder, sensor_name, active):
 # Codex HIGH — nested BUFFER_* calls carry BUFFER=<name>
 # ---------------------------------------------------------------------------
 
-def test_python_unload_nested_calls_include_buffer_mux_key():
-    printer, feeder = make_feeder()
-    gcode = printer.lookup_object("gcode")
-    printer.lookup_object("extruder").heater.temperature = 220.0
+def test_python_unload_nested_calls_include_buffer_mux_key(fake_printer, feeder):
+    gcode = fake_printer.lookup_object("gcode")
+    fake_printer.lookup_object("extruder").heater.temperature = 220.0
 
-    class FakeGCmd:
+    class FakeGCmdLocal:
         def get(self, key, default=None):
             return default
 
@@ -48,7 +39,7 @@ def test_python_unload_nested_calls_include_buffer_mux_key():
         def get_float(self, key, default=None, **kwargs):
             return float(default)
 
-    feeder.cmd_BUFFER_UNLOAD_FILAMENT(FakeGCmd())
+    feeder.cmd_BUFFER_UNLOAD_FILAMENT(FakeGCmdLocal())
 
     nested_calls = [s for _, s in gcode.scripts if s.startswith("BUFFER_")]
     for call in nested_calls:
@@ -60,10 +51,9 @@ def test_python_unload_nested_calls_include_buffer_mux_key():
 # Reviewer #3 F1 — HALL1 + sync bypass
 # ---------------------------------------------------------------------------
 
-def test_hall1_active_bypassed_when_synced_sensor_callback():
+def test_hall1_active_bypassed_when_synced_sensor_callback(feeder):
     """HALL1 must NOT trigger overflow while the buffer stepper is
     synced to the extruder — this is the active path during UNLOAD."""
-    _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_AUTO
     set_sensor_active(feeder, "hall_overflow", True)
     feeder._stepper_synced_to = "extruder"
@@ -72,10 +62,9 @@ def test_hall1_active_bypassed_when_synced_sensor_callback():
     assert feeder._is_hall1_active("main_tick") is False
 
 
-def test_hall1_active_resumes_after_unsync():
+def test_hall1_active_resumes_after_unsync(feeder):
     """When _stepper_synced_to is cleared, the lockout re-engages
     immediately on the next sensor poll."""
-    _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_AUTO
     set_sensor_active(feeder, "hall_overflow", True)
     feeder._stepper_synced_to = "extruder"
@@ -90,7 +79,7 @@ def test_hall1_active_resumes_after_unsync():
 # Reviewer #3 F2 — on_entrance_runout suppressed during phases
 # ---------------------------------------------------------------------------
 
-def test_runout_during_load_phase_does_not_pause():
+def test_runout_during_load_phase_does_not_pause(feeder_factory):
     """on_entrance_runout must early-return without PAUSE when an
     active LOAD/UNLOAD/MANUAL phase is running. Vertauschung of the
     state list would silently pause the print mid-phase."""
@@ -103,7 +92,7 @@ def test_runout_during_load_phase_does_not_pause():
         buffer_feeder.STATE_MANUAL_RETRACT,
     )
     for state in suppressed_states:
-        printer, feeder = make_feeder(values={"runout_pause": True})
+        printer, feeder = feeder_factory(values={"runout_pause": True}, grace_done=False)
         gcode = printer.lookup_object("gcode")
         feeder._state = state
         feeder._print_running = True
@@ -117,10 +106,10 @@ def test_runout_during_load_phase_does_not_pause():
             "runout in %s must not change state, got %s" % (state, feeder._state))
 
 
-def test_runout_during_auto_with_runout_pause_does_trigger_pause():
+def test_runout_during_auto_with_runout_pause_does_trigger_pause(feeder_factory):
     """Companion test: in non-suppressed states (AUTO + print_running),
     runout_pause=True must still trigger the PAUSE script."""
-    printer, feeder = make_feeder(values={"runout_pause": True})
+    printer, feeder = feeder_factory(values={"runout_pause": True}, grace_done=False)
     gcode = printer.lookup_object("gcode")
     feeder._state = buffer_feeder.STATE_AUTO
     feeder._print_running = True

@@ -3,15 +3,7 @@
 Migrated from test_smoke.py + test_status_dump.py (2026-05-12).
 """
 
-from fakes_klipper import FakeConfig, FakePrinter
 from klipper_extras import buffer_feeder
-
-
-def make_feeder(values=None):
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
-    return printer, feeder
 
 
 def set_sensor_active(feeder, sensor_name, active):
@@ -46,11 +38,10 @@ def test_buffer_feeder_smoke(fake_config):
 
 # --- get_status / STATE_DUMP (from test_status_dump.py) ---
 
-def test_get_status_exposes_important_flags():
-    _, feeder = make_feeder(
-        values={
-            "use_fault_overlay": True,
-        }
+def test_get_status_exposes_important_flags(feeder_factory):
+    _, feeder = feeder_factory(
+        values={"use_fault_overlay": True},
+        grace_done=False,
     )
     feeder._state = buffer_feeder.STATE_AUTO
     set_sensor_active(feeder, "hall_overflow", True)
@@ -78,11 +69,10 @@ def test_get_status_exposes_important_flags():
     assert status["use_fault_overlay"] is True
 
 
-def test_buffer_state_dump_reports_core_flags():
-    printer, feeder = make_feeder(
-        values={
-            "use_fault_overlay": True,
-        }
+def test_buffer_state_dump_reports_core_flags(feeder_factory):
+    printer, feeder = feeder_factory(
+        values={"use_fault_overlay": True},
+        grace_done=False,
     )
     gcode = printer.lookup_object("gcode")
     feeder._state = buffer_feeder.STATE_AUTO

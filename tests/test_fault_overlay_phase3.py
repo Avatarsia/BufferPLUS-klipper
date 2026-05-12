@@ -6,15 +6,7 @@ state stays in LOAD_PHASE_3. With overlay disabled (default) the legacy
 state-flip path remains untouched.
 """
 
-from fakes_klipper import FakeConfig, FakePrinter
 from klipper_extras import buffer_feeder
-
-
-def make_feeder(values=None):
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
-    return printer, feeder
 
 
 def set_sensor_active(feeder, sensor_name, active):
@@ -22,8 +14,8 @@ def set_sensor_active(feeder, sensor_name, active):
     feeder._pin_stable_state[sensor_name] = (not active) if polarity_flip else active
 
 
-def test_enter_overflow_overlay_keeps_phase3_state():
-    _, feeder = make_feeder(values={"use_fault_overlay": True})
+def test_enter_overflow_overlay_keeps_phase3_state(feeder_factory):
+    _, feeder = feeder_factory(values={"use_fault_overlay": True}, grace_done=False)
     feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
     set_sensor_active(feeder, "hall_overflow", True)
 
@@ -34,8 +26,8 @@ def test_enter_overflow_overlay_keeps_phase3_state():
     assert feeder._overflow_interrupted_state == buffer_feeder.STATE_LOAD_PHASE_3
 
 
-def test_enter_overflow_legacy_flips_state():
-    _, feeder = make_feeder(values={"use_fault_overlay": False})
+def test_enter_overflow_legacy_flips_state(feeder_factory):
+    _, feeder = feeder_factory(values={"use_fault_overlay": False}, grace_done=False)
     feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
     set_sensor_active(feeder, "hall_overflow", True)
 
@@ -46,10 +38,10 @@ def test_enter_overflow_legacy_flips_state():
     assert feeder._fault_overflow is True
 
 
-def test_enter_overflow_overlay_only_for_phase3():
+def test_enter_overflow_overlay_only_for_phase3(feeder_factory):
     """Overlay path is currently scoped to LOAD_PHASE_3; other states
     keep flipping to STATE_OVERFLOW even when the flag is enabled."""
-    _, feeder = make_feeder(values={"use_fault_overlay": True})
+    _, feeder = feeder_factory(values={"use_fault_overlay": True}, grace_done=False)
     feeder._state = buffer_feeder.STATE_AUTO
     set_sensor_active(feeder, "hall_overflow", True)
 
@@ -58,8 +50,8 @@ def test_enter_overflow_overlay_only_for_phase3():
     assert feeder._state == buffer_feeder.STATE_OVERFLOW
 
 
-def test_exit_overflow_overlay_clears_flag():
-    _, feeder = make_feeder(values={"use_fault_overlay": True})
+def test_exit_overflow_overlay_clears_flag(feeder_factory):
+    _, feeder = feeder_factory(values={"use_fault_overlay": True}, grace_done=False)
     feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
     feeder._fault_overflow = True
     feeder._overflow_interrupted_state = buffer_feeder.STATE_LOAD_PHASE_3
@@ -71,8 +63,8 @@ def test_exit_overflow_overlay_clears_flag():
     assert feeder._state == buffer_feeder.STATE_LOAD_PHASE_3
 
 
-def test_exit_overflow_legacy_flips_to_idle():
-    _, feeder = make_feeder(values={"use_fault_overlay": False})
+def test_exit_overflow_legacy_flips_to_idle(feeder_factory):
+    _, feeder = feeder_factory(values={"use_fault_overlay": False}, grace_done=False)
     feeder._state = buffer_feeder.STATE_OVERFLOW
     feeder._fault_overflow = True
 
@@ -82,8 +74,8 @@ def test_exit_overflow_legacy_flips_to_idle():
     assert feeder._fault_overflow is False
 
 
-def test_main_tick_does_not_re_enter_with_overlay_set():
-    _, feeder = make_feeder(values={"use_fault_overlay": True})
+def test_main_tick_does_not_re_enter_with_overlay_set(feeder_factory):
+    _, feeder = feeder_factory(values={"use_fault_overlay": True}, grace_done=False)
     feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
     feeder._fault_overflow = True
     set_sensor_active(feeder, "hall_overflow", True)
@@ -91,8 +83,8 @@ def test_main_tick_does_not_re_enter_with_overlay_set():
     assert feeder._is_hall1_active('main_tick') is False
 
 
-def test_main_tick_re_enters_without_overlay_flag_pending():
-    _, feeder = make_feeder(values={"use_fault_overlay": True})
+def test_main_tick_re_enters_without_overlay_flag_pending(feeder_factory):
+    _, feeder = feeder_factory(values={"use_fault_overlay": True}, grace_done=False)
     feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
     feeder._fault_overflow = False
     set_sensor_active(feeder, "hall_overflow", True)

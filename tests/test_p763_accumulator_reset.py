@@ -47,6 +47,8 @@ Backstop summary:
     SAFETY_DISTANCE remains the runaway-feed backstop.
 """
 
+import pytest
+
 from fakes_klipper import FakeConfig, FakePrinter
 from klipper_extras import buffer_feeder
 
@@ -168,62 +170,56 @@ def test_trigger_jam_resets_accumulator_via_halt_motion():
 
 
 # ---------------------------------------------------------------------------
-# Test 4a: SAFETY_DISTANCE backstop fires in LEGACY AUTO
-# (use_flush_callback_bang_bang=False)
+# SAFETY_DISTANCE backstop matrix — P7-63 stelle 6 gate
 # ---------------------------------------------------------------------------
 
-def test_bouncing_safety_distance_legacy_auto():
-    """Backstop coverage for the LEGACY AUTO path
-    (use_flush_callback_bang_bang=False): SAFETY_DISTANCE remains the
-    runaway-feed safety against an over-large accumulator. The
-    P7-63 stelle 6 bypass is gated on use_flush_callback_bang_bang,
-    so this legacy code path still trips the safety abort.
 
-    The original "bouncing" scenario depended on the flush-callback
-    Zwischen-Zone branch firing _on_mcu_flush; that branch is a no-op
-    in the legacy path (use_flush_callback_bang_bang=False short-
-    circuits _on_mcu_flush at its entry guard). The remaining
-    invariant we care about for legacy AUTO is simply that
-    SAFETY_DISTANCE still fires.
+@pytest.mark.parametrize(
+    "state,bang_bang,expect_jam",
+    [
+        # legacy AUTO (bang-bang off) — SAFETY_DISTANCE still fires.
+        (buffer_feeder.STATE_AUTO, False, True),
+        # MANUAL_FEED — bypass is gated on STATE_AUTO, backstop active.
+        (buffer_feeder.STATE_MANUAL_FEED, True, True),
+        # LOAD_PHASE_3 — same: backstop remains active in non-AUTO.
+        (buffer_feeder.STATE_LOAD_PHASE_3, True, True),
+        # AUTO + bang-bang — the Issue #26 bypass: SAFETY_DISTANCE is
+        # suppressed; SUPPLY_JAM (via _jam_tick) is the correct detector.
+        (buffer_feeder.STATE_AUTO, True, False),
+    ],
+    ids=[
+        "auto-legacy-bangbang-off",
+        "manual_feed-bangbang-on",
+        "load_phase3-bangbang-on",
+        "auto-bangbang-on-bypassed",
+    ],
+)
+def test_safety_distance_backstop_matrix(state, bang_bang, expect_jam):
+    """Subsumes: test_bouncing_safety_distance_legacy_auto,
+    test_bouncing_safety_distance_manual,
+    test_safety_distance_still_active_in_load_phase,
+    test_safety_distance_still_active_in_legacy_auto
+    (parametrized 2026-05-12, Audit-2 Cluster E).
+
+    P7-63 stelle 6: SAFETY_DISTANCE is bypassed only when STATE_AUTO and
+    use_flush_callback_bang_bang are both set. All other combinations
+    keep the runaway-feed backstop active.
     """
-    printer, feeder = make_feeder({"use_flush_callback_bang_bang": False})
+    printer, feeder = make_feeder({"use_flush_callback_bang_bang": bang_bang})
+    feeder._state = state
     feeder.max_feed_distance = 100.0
 
     feeder._continuous_feed = True
     feeder._continuous_feed_direction = 1
     feeder._continuous_feed_speed = feeder.feed_speed
-    feeder._feed_distance_accumulator = 110.0
+    feeder._feed_distance_accumulator = 150.0
 
-    feeder._tick_safety_timeouts(eventtime=10.0)
-    assert feeder._jam_active is True, \
-        "JAM_SAFETY_DISTANCE must fire in legacy AUTO when " \
-        "accumulator >= max_feed_distance"
+    feeder._tick_safety_timeouts(eventtime=42.0)
 
-
-# ---------------------------------------------------------------------------
-# Test 4b: SAFETY_DISTANCE backstop fires in MANUAL_FEED
-# ---------------------------------------------------------------------------
-
-def test_bouncing_safety_distance_manual():
-    """Second backstop coverage: STATE_MANUAL_FEED with
-    use_flush_callback_bang_bang=True. The SAFETY_DISTANCE bypass from
-    P7-63 stelle 6 is gated specifically on STATE_AUTO, so other
-    states (MANUAL_FEED, LOAD_PHASE_3, ...) still use SAFETY_DISTANCE
-    as a backstop against runaway accumulation.
-    """
-    printer, feeder = make_feeder()  # use_flush_callback_bang_bang=True
-    feeder._state = buffer_feeder.STATE_MANUAL_FEED
-    feeder.max_feed_distance = 100.0
-
-    feeder._continuous_feed = True
-    feeder._continuous_feed_direction = 1
-    feeder._continuous_feed_speed = feeder.feed_speed
-    feeder._feed_distance_accumulator = 110.0
-
-    feeder._tick_safety_timeouts(eventtime=10.0)
-    assert feeder._jam_active is True, \
-        "JAM_SAFETY_DISTANCE must fire in MANUAL_FEED when " \
-        "accumulator >= max_feed_distance"
+    assert feeder._jam_active is expect_jam, (
+        "expected jam=%s for state=%s bang_bang=%s but saw %s"
+        % (expect_jam, state, bang_bang, feeder._jam_active)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -476,60 +472,6 @@ def test_issue26_stable_hall_empty_no_false_jam():
     assert feeder._state == buffer_feeder.STATE_AUTO, \
         "state must remain STATE_AUTO; SAFETY_DISTANCE must not " \
         "halt motion in this mode"
-
-
-# ---------------------------------------------------------------------------
-# Test 9: SAFETY_DISTANCE backstop still active in non-AUTO load phase
-# ---------------------------------------------------------------------------
-
-def test_safety_distance_still_active_in_load_phase():
-    """The P7-63 stelle 6 bypass is gated on STATE_AUTO. In load
-    phases (LOAD_PHASE_3 etc.) and manual operation, SAFETY_DISTANCE
-    remains the runaway-feed backstop. This test pins use_flush_callback_bang_bang
-    to True (the production setting) and verifies the LOAD_PHASE_3
-    state still trips the safety abort."""
-    printer, feeder = make_feeder()
-    feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
-    feeder.max_feed_distance = 100.0
-
-    feeder._continuous_feed = True
-    feeder._continuous_feed_direction = 1
-    feeder._continuous_feed_speed = feeder.feed_speed
-    feeder._feed_distance_accumulator = 150.0
-
-    feeder._tick_safety_timeouts(eventtime=42.0)
-
-    assert feeder._jam_active is True, \
-        "SAFETY_DISTANCE must remain active in LOAD_PHASE_3 backstop " \
-        "(P7-63 stelle 6 only bypasses STATE_AUTO+bang-bang)"
-
-
-# ---------------------------------------------------------------------------
-# Test 10: SAFETY_DISTANCE backstop still active in legacy AUTO
-# (use_flush_callback_bang_bang=False)
-# ---------------------------------------------------------------------------
-
-def test_safety_distance_still_active_in_legacy_auto():
-    """The P7-63 stelle 6 bypass is also gated on
-    use_flush_callback_bang_bang. Without the flush-callback path,
-    the legacy AUTO bang-bang (driven by _main_tick) does NOT have
-    the high-flow streaming geometry that produces Issue #26, and
-    SAFETY_DISTANCE must still serve as the runaway-feed backstop
-    for any setup that hasn't enabled the flush-callback path."""
-    printer, feeder = make_feeder({"use_flush_callback_bang_bang": False})
-    # State remains STATE_AUTO from make_feeder().
-    feeder.max_feed_distance = 100.0
-
-    feeder._continuous_feed = True
-    feeder._continuous_feed_direction = 1
-    feeder._continuous_feed_speed = feeder.feed_speed
-    feeder._feed_distance_accumulator = 150.0
-
-    feeder._tick_safety_timeouts(eventtime=42.0)
-
-    assert feeder._jam_active is True, \
-        "SAFETY_DISTANCE must remain active in legacy AUTO backstop " \
-        "(P7-63 stelle 6 only bypasses STATE_AUTO+bang-bang)"
 
 
 # ---------------------------------------------------------------------------

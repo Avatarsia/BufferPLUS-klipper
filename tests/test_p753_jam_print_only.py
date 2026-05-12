@@ -25,17 +25,8 @@ Tests cover:
 """
 
 import pytest
-from fakes_klipper import FakeConfig, FakePrinter
+
 from klipper_extras import buffer_feeder
-
-
-def make_feeder(values=None):
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
-    feeder._startup_grace_done = True
-    feeder._state = buffer_feeder.STATE_AUTO
-    return printer, feeder
 
 
 def set_sensor_active(feeder, sensor_name, active):
@@ -68,40 +59,49 @@ def setup_supply_jam_scenario(feeder):
 
 
 # ---------------------------------------------------------------------------
-# CLOG-detection
+# CLOG / SUPPLY jam — print-gate matrix
 # ---------------------------------------------------------------------------
 
-def test_clog_does_not_trigger_during_manual_extrude():
-    """The exact hardware bug: manual G1 E50 outside a print should
-    NOT trigger CLOG even after 99s + 50mm progress."""
-    _, feeder = make_feeder()
-    setup_clog_scenario(feeder)
-    feeder._print_running = False
 
-    # 99s have elapsed since hall2_start_time=0, HALL2 still active,
-    # 50mm progress — pre-fix this would trigger _trigger_jam.
-    feeder._jam_tick(eventtime=99.0)
+@pytest.mark.parametrize(
+    "jam_kind,printing,expect_jam",
+    [
+        ("clog", False, False),    # manual extrude outside a print — bug fix
+        ("clog", True, True),      # active print — safety preserved
+        ("supply", False, False),  # manual BUFFER_FEED outside print
+        ("supply", True, True),    # active print — safety preserved
+    ],
+    ids=["clog-idle", "clog-printing", "supply-idle", "supply-printing"],
+)
+def test_jam_detection_print_gate(feeder_factory, jam_kind, printing, expect_jam):
+    """Subsumes: test_clog_does_not_trigger_during_manual_extrude,
+    test_clog_triggers_during_active_print, test_supply_jam_does_not_trigger_outside_print,
+    test_supply_jam_triggers_during_active_print (parametrized 2026-05-12, Audit-2 Cluster B).
 
-    assert feeder._jam_active is False
-    assert feeder._state == buffer_feeder.STATE_AUTO
+    The exact hardware bug (2026-04-27): manual G1 E50 outside a print
+    should NOT trigger CLOG even after 99s + 50mm progress. Same gate
+    applies to SUPPLY-jam (HALL3 + feeder running forward)."""
+    _, feeder = feeder_factory(state=buffer_feeder.STATE_AUTO)
+    if jam_kind == "clog":
+        setup_clog_scenario(feeder)
+        eventtime = 99.0
+    else:  # supply
+        setup_supply_jam_scenario(feeder)
+        eventtime = 130.0  # jam_supply_dwell_time default is 120s
+    feeder._print_running = printing
+
+    feeder._jam_tick(eventtime=eventtime)
+
+    assert feeder._jam_active is expect_jam
+    if jam_kind == "clog" and not printing:
+        # Positive state-check from the original idle test.
+        assert feeder._state == buffer_feeder.STATE_AUTO
 
 
-def test_clog_triggers_during_active_print():
-    """Positive control: same conditions during an active print
-    must still fire CLOG-detection (real safety preserved)."""
-    _, feeder = make_feeder()
-    setup_clog_scenario(feeder)
-    feeder._print_running = True
-
-    feeder._jam_tick(eventtime=99.0)
-
-    assert feeder._jam_active is True
-
-
-def test_clog_does_not_trigger_below_threshold_even_in_print():
+def test_clog_does_not_trigger_below_threshold_even_in_print(feeder_factory):
     """Threshold guard intact: dwell < 60s OR progress < 30mm must
     not trigger even during print."""
-    _, feeder = make_feeder()
+    _, feeder = feeder_factory(state=buffer_feeder.STATE_AUTO)
     setup_clog_scenario(feeder)
     feeder._print_running = True
 
@@ -112,42 +112,13 @@ def test_clog_does_not_trigger_below_threshold_even_in_print():
 
 
 # ---------------------------------------------------------------------------
-# SUPPLY-jam detection
-# ---------------------------------------------------------------------------
-
-def test_supply_jam_does_not_trigger_outside_print():
-    """SUPPLY-jam (HALL3 active + feeder running forward) is also
-    print-only. Operator could be manually feeding via
-    BUFFER_FEED — that is not a supply jam."""
-    _, feeder = make_feeder()
-    setup_supply_jam_scenario(feeder)
-    feeder._print_running = False
-
-    # 130s elapsed (jam_supply_dwell_time default is 120s)
-    feeder._jam_tick(eventtime=130.0)
-
-    assert feeder._jam_active is False
-
-
-def test_supply_jam_triggers_during_active_print():
-    """Positive control."""
-    _, feeder = make_feeder()
-    setup_supply_jam_scenario(feeder)
-    feeder._print_running = True
-
-    feeder._jam_tick(eventtime=130.0)
-
-    assert feeder._jam_active is True
-
-
-# ---------------------------------------------------------------------------
 # Tracker reset on transition out of print
 # ---------------------------------------------------------------------------
 
-def test_tracker_variables_reset_when_print_ends():
+def test_tracker_variables_reset_when_print_ends(feeder_factory):
     """If a print ends mid-jam-watching, the trackers must be
     cleared so a subsequent print starts with a fresh state."""
-    _, feeder = make_feeder()
+    _, feeder = feeder_factory(state=buffer_feeder.STATE_AUTO)
     setup_clog_scenario(feeder)
     feeder._print_running = True
     feeder._jam_tick(eventtime=10.0)
@@ -166,13 +137,16 @@ def test_tracker_variables_reset_when_print_ends():
 # P7-56b: jam_action runs deferred (not blocking the reactor)
 # ---------------------------------------------------------------------------
 
-def test_trigger_jam_dispatches_jam_action_via_deferred_timer():
+def test_trigger_jam_dispatches_jam_action_via_deferred_timer(feeder_factory):
     """_trigger_jam runs from the reactor _jam_tick. jam_action must
     NOT call gc.run_script() inline (that would block the reactor for
     the entire macro). It is dispatched via _schedule_gcode_script
     (1ms timer); after fire_pending_timers the script lands in
     gcode.scripts."""
-    printer, feeder = make_feeder(values={"jam_action": "PAUSE"})
+    printer, feeder = feeder_factory(
+        values={"jam_action": "PAUSE"},
+        state=buffer_feeder.STATE_AUTO,
+    )
     gcode = printer.lookup_object("gcode")
     setup_clog_scenario(feeder)
     feeder._print_running = True

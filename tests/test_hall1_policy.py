@@ -1,13 +1,6 @@
 import pytest
 
-from fakes_klipper import FakeConfig, FakePrinter
 from klipper_extras import buffer_feeder
-
-
-def make_feeder():
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer)
-    return buffer_feeder.BufferFeeder(config)
 
 
 def configure_hall1_context(
@@ -50,9 +43,7 @@ def configure_hall1_context(
         "base_case",
     ],
 )
-def test_is_hall1_active_sensor_callback(case, expected):
-    feeder = make_feeder()
-
+def test_is_hall1_active_sensor_callback(feeder, case, expected):
     configure_hall1_context(feeder, **case)
 
     assert feeder._is_hall1_active("sensor_callback") is expected
@@ -86,9 +77,7 @@ def test_is_hall1_active_sensor_callback(case, expected):
         "base_case",
     ],
 )
-def test_is_hall1_active_main_tick(case, expected):
-    feeder = make_feeder()
-
+def test_is_hall1_active_main_tick(feeder, case, expected):
     configure_hall1_context(feeder, **case)
 
     assert feeder._is_hall1_active("main_tick") is expected
@@ -123,16 +112,13 @@ def test_is_hall1_active_main_tick(case, expected):
         "phase3_entry_active",
     ],
 )
-def test_is_hall1_active_other_contexts(context, case, expected):
-    feeder = make_feeder()
-
+def test_is_hall1_active_other_contexts(feeder, context, case, expected):
     configure_hall1_context(feeder, **case)
 
     assert feeder._is_hall1_active(context) is expected
 
 
-def test_is_hall1_active_rejects_unknown_context():
-    feeder = make_feeder()
+def test_is_hall1_active_rejects_unknown_context(feeder):
     configure_hall1_context(feeder, hall_active=True)
 
     with pytest.raises(ValueError, match="Unknown HALL1 context"):

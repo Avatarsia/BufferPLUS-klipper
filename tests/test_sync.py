@@ -266,3 +266,57 @@ def test_cmd_buffer_halt_unsyncs_before_halting_motion(monkeypatch):
         ("unsync", False),
         ("halt_motion", True),
     ]
+
+
+# --- Position seed for sync (P7-47, migrated 2026-05-12) ---
+
+
+def test_sync_seeds_stepper_with_extruder_last_position():
+    """The set_position call must carry extruder.last_position, not
+    (0, 0, 0). Verifies the central P7-47 fix."""
+    printer, feeder = make_feeder()
+    feeder._startup_grace_done = True
+    extruder = printer.lookup_object('extruder')
+    extruder.last_position = 180.0
+
+    feeder._sync_to_extruder('extruder')
+
+    # FakePrinterStepper records every set_position call with its
+    # argument; the most recent should match extruder.last_position.
+    assert feeder.stepper.position[0] == 180.0, (
+        "P7-47 broken: stepper position seeded with %r, expected "
+        "extruder.last_position=180.0" % (feeder.stepper.position,))
+
+
+def test_sync_position_seed_zero_when_extruder_fresh():
+    """At extruder.last_position=0.0 (fresh print, no extrude yet),
+    the seed is also 0.0 — no regression for the cold-start case."""
+    printer, feeder = make_feeder()
+    feeder._startup_grace_done = True
+    extruder = printer.lookup_object('extruder')
+    extruder.last_position = 0.0
+
+    feeder._sync_to_extruder('extruder')
+
+    assert feeder.stepper.position[0] == 0.0
+
+
+def test_sync_position_seed_propagates_through_unsync_cycle():
+    """LOAD-UNLOAD cycle: sync seeds with last_position, unsync resets
+    to 0 (own-trapq has its own zero). The next sync seeds again with
+    whatever last_position is at that moment."""
+    printer, feeder = make_feeder()
+    feeder._startup_grace_done = True
+    extruder = printer.lookup_object('extruder')
+
+    extruder.last_position = 180.0
+    feeder._sync_to_extruder('extruder')
+    assert feeder.stepper.position[0] == 180.0
+
+    feeder._unsync_if_synced()
+    # unsync_if_synced resets stepper to (0,0,0) on its own trapq.
+    assert feeder.stepper.position == (0., 0., 0.)
+
+    extruder.last_position = 250.0
+    feeder._sync_to_extruder('extruder')
+    assert feeder.stepper.position[0] == 250.0

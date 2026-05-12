@@ -1,12 +1,4 @@
-from fakes_klipper import FakeConfig, FakePrinter
 from klipper_extras import buffer_feeder
-
-
-def make_feeder(values=None):
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
-    return printer, feeder
 
 
 def set_sensor_active(feeder, sensor_name, active):
@@ -14,10 +6,10 @@ def set_sensor_active(feeder, sensor_name, active):
     feeder._pin_stable_state[sensor_name] = (not active) if polarity_flip else active
 
 
-def test_single_feed_click_starts_manual_feed_and_arms_click_settle_timer():
+def test_single_feed_click_starts_manual_feed_and_arms_click_settle_timer(fake_printer, feeder):
     # Current code counts clicks on button-press and single FEED click
     # enters the manual-start path, which also arms the settle timer.
-    printer, feeder = make_feeder()
+    printer = fake_printer
     feeder._state = buffer_feeder.STATE_IDLE
     set_sensor_active(feeder, "hall_overflow", False)
 
@@ -38,9 +30,9 @@ def test_single_feed_click_starts_manual_feed_and_arms_click_settle_timer():
     ]
 
 
-def test_click_settle_fire_responds_with_pending_message_and_clears_it():
+def test_click_settle_fire_responds_with_pending_message_and_clears_it(fake_printer, feeder):
     # The settle callback emits the deferred click summary and clears it.
-    printer, feeder = make_feeder()
+    printer = fake_printer
 
     feeder._set_pending_click_msg(buffer_feeder.BUTTON_FEED, "feed summary")
     result = feeder._click_settle_fire(buffer_feeder.BUTTON_FEED, 12.0)
@@ -50,10 +42,9 @@ def test_click_settle_fire_responds_with_pending_message_and_clears_it():
     assert printer.lookup_object("gcode").info_messages[-1] == "BufferFeeder: feed summary"
 
 
-def test_double_feed_click_halts_then_triggers_manual_pulse(monkeypatch):
+def test_double_feed_click_halts_then_triggers_manual_pulse(feeder, monkeypatch):
     # The second FEED click within the window halts first, then dispatches
     # to the manual-pulse branch.
-    _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_IDLE
     set_sensor_active(feeder, "hall_overflow", False)
     events = []
@@ -85,10 +76,10 @@ def test_double_feed_click_halts_then_triggers_manual_pulse(monkeypatch):
     assert feeder._click_count[buffer_feeder.BUTTON_FEED] == 2
 
 
-def test_triple_feed_click_with_burst_disabled_halts_then_restarts_manual_start(monkeypatch):
+def test_triple_feed_click_with_burst_disabled_halts_then_restarts_manual_start(feeder_factory, monkeypatch):
     # With feed_burst_enabled=0, the third FEED click halts and falls back
     # to manual-start instead of the burst branch.
-    _, feeder = make_feeder(values={"feed_burst_enabled": False})
+    _, feeder = feeder_factory(values={"feed_burst_enabled": False}, grace_done=False)
     feeder._state = buffer_feeder.STATE_IDLE
     set_sensor_active(feeder, "hall_overflow", False)
     events = []
@@ -128,10 +119,10 @@ def test_triple_feed_click_with_burst_disabled_halts_then_restarts_manual_start(
     assert feeder._click_count[buffer_feeder.BUTTON_FEED] == 0
 
 
-def test_triple_feed_click_with_burst_enabled_halts_then_triggers_burst(monkeypatch):
+def test_triple_feed_click_with_burst_enabled_halts_then_triggers_burst(feeder_factory, monkeypatch):
     # With feed_burst_enabled=1, the third FEED click halts and takes the
     # burst branch instead of restarting manual-start.
-    _, feeder = make_feeder(values={"feed_burst_enabled": True})
+    _, feeder = feeder_factory(values={"feed_burst_enabled": True}, grace_done=False)
     feeder._state = buffer_feeder.STATE_IDLE
     set_sensor_active(feeder, "hall_overflow", False)
     events = []
@@ -171,10 +162,9 @@ def test_triple_feed_click_with_burst_enabled_halts_then_triggers_burst(monkeypa
     assert feeder._click_count[buffer_feeder.BUTTON_FEED] == 0
 
 
-def test_entrance_insert_from_idle_after_empty_edge_starts_initial_grip(monkeypatch):
+def test_entrance_insert_from_idle_after_empty_edge_starts_initial_grip(feeder, monkeypatch):
     # The insert handler only auto-grips when IDLE and the feeder has seen
     # an empty entrance state first.
-    _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_IDLE
     feeder._entrance_was_empty = True
     events = []
@@ -191,10 +181,9 @@ def test_entrance_insert_from_idle_after_empty_edge_starts_initial_grip(monkeypa
     assert feeder._entrance_was_empty is False
 
 
-def test_entrance_insert_while_auto_and_already_filled_triggers_no_extra_actions(monkeypatch):
+def test_entrance_insert_while_auto_and_already_filled_triggers_no_extra_actions(feeder, monkeypatch):
     # When entrance filament was already present and state is AUTO, the
     # handler only emits its responses and does not start grip or scripts.
-    _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_AUTO
     feeder._entrance_was_empty = False
     responses = []
@@ -227,10 +216,10 @@ def test_entrance_insert_while_auto_and_already_filled_triggers_no_extra_actions
     assert feeder._entrance_was_empty is False
 
 
-def test_entrance_runout_during_print_with_runout_pause_triggers_pause_script(monkeypatch):
+def test_entrance_runout_during_print_with_runout_pause_triggers_pause_script(feeder_factory, monkeypatch):
     # During a print with runout_pause enabled, the runout handler halts,
     # disables the stepper, enters RUNOUT, and runs the PAUSE script.
-    _, feeder = make_feeder(values={"runout_pause": True})
+    _, feeder = feeder_factory(values={"runout_pause": True}, grace_done=False)
     feeder._state = buffer_feeder.STATE_AUTO
     feeder._print_running = True
     feeder._continuous_feed = True

@@ -26,15 +26,9 @@ C) Post-LOAD HALL1 grace: after Phase 3 with overflow_ok=1 exits
    HALL1 actually falls.
 """
 
-from fakes_klipper import FakeConfig, FakePrinter
+import pytest
+
 from klipper_extras import buffer_feeder
-
-
-def make_feeder(values=None):
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
-    return printer, feeder
 
 
 def set_sensor_active(feeder, sensor_name, active):
@@ -46,7 +40,8 @@ def set_sensor_active(feeder, sensor_name, active):
 # Fix A — BUFFER_AUTO_ON_IF_READY
 # ---------------------------------------------------------------------------
 
-class FakeGCmd:
+
+class FakeGCmdLocal:
     def __init__(self, values=None):
         self.values = {key.upper(): value for key, value in (values or {}).items()}
 
@@ -60,53 +55,48 @@ class FakeGCmd:
         return float(self.values.get(key.upper(), default))
 
 
-def test_buffer_auto_on_if_ready_engages_when_ready():
+def test_buffer_auto_on_if_ready_engages_when_ready(feeder):
     """Happy path: HALL1 inactive, no JAM, no PAUSE — engages AUTO."""
-    printer, feeder = make_feeder()
     set_sensor_active(feeder, 'entrance', True)
     set_sensor_active(feeder, 'hall_overflow', False)
 
-    feeder.cmd_BUFFER_AUTO_ON_IF_READY(FakeGCmd())
+    feeder.cmd_BUFFER_AUTO_ON_IF_READY(FakeGCmdLocal())
 
     assert feeder._state == buffer_feeder.STATE_AUTO
 
 
-def test_buffer_auto_on_if_ready_skips_silently_when_hall1_active():
+def test_buffer_auto_on_if_ready_skips_silently_when_hall1_active(fake_printer, feeder):
     """Block-reason path: HALL1 active. Hard cmd_BUFFER_AUTO_ON would
     raise — _IF_READY logs and returns. State stays unchanged."""
-    printer, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_IDLE
     set_sensor_active(feeder, 'hall_overflow', True)
-    gcode = printer.lookup_object('gcode')
+    gcode = fake_printer.lookup_object('gcode')
 
-    feeder.cmd_BUFFER_AUTO_ON_IF_READY(FakeGCmd())
+    feeder.cmd_BUFFER_AUTO_ON_IF_READY(FakeGCmdLocal())
 
     assert feeder._state == buffer_feeder.STATE_IDLE
     assert any("AUTO not engaged" in msg for msg in gcode.info_messages)
 
 
-def test_buffer_auto_on_hard_command_still_raises_on_hall1():
+def test_buffer_auto_on_hard_command_still_raises_on_hall1(feeder):
     """The original BUFFER_AUTO_ON command must keep the hard-fail
     semantics so direct user invocations still surface the issue."""
-    import pytest
-
-    _, feeder = make_feeder()
     set_sensor_active(feeder, 'hall_overflow', True)
 
     with pytest.raises(Exception, match="HALL1 overflow active"):
-        feeder.cmd_BUFFER_AUTO_ON(FakeGCmd())
+        feeder.cmd_BUFFER_AUTO_ON(FakeGCmdLocal())
 
 
 # ---------------------------------------------------------------------------
 # Fix B — sync_to_extruder gap-reprime
 # ---------------------------------------------------------------------------
 
-def test_sync_to_extruder_anchors_cursor_after_long_idle():
+
+def test_sync_to_extruder_anchors_cursor_after_long_idle(fake_printer, feeder):
     """If the last buffer move was > REPRIME_GAP (5s) ago, sync_to_
     extruder must anchor the own-trapq cursor before the swap to
     prevent 'Invalid sequence' on the first extruder-driven step."""
-    printer, feeder = make_feeder()
-    motion_q = printer.lookup_object('motion_queuing')
+    motion_q = fake_printer.lookup_object('motion_queuing')
 
     # Fake a long idle: last move ended way in the past relative to
     # the FakeMCU's print-time clock. FakeMCU.estimated_print_time
@@ -129,11 +119,10 @@ def test_sync_to_extruder_anchors_cursor_after_long_idle():
         "%.1fs gap" % feeder.reactor.now)
 
 
-def test_sync_to_extruder_no_anchor_on_short_gap():
+def test_sync_to_extruder_no_anchor_on_short_gap(fake_printer, feeder):
     """If the gap is below REPRIME_GAP, no anchor-step needed —
     avoids unnecessary buffer-stepper motion."""
-    printer, feeder = make_feeder()
-    motion_q = printer.lookup_object('motion_queuing')
+    motion_q = fake_printer.lookup_object('motion_queuing')
 
     # Recent move — gap is small.
     feeder.reactor.now = 1.0
@@ -149,12 +138,11 @@ def test_sync_to_extruder_no_anchor_on_short_gap():
         "sync_to_extruder anchored unnecessarily despite tiny gap")
 
 
-def test_sync_to_extruder_anchor_direction_follows_hall1():
+def test_sync_to_extruder_anchor_direction_follows_hall1(fake_printer, feeder):
     """Anchor direction is -1 (retract) when HALL1 active, +1 (feed)
     otherwise. Avoids forward-feed when the buffer is already
     overfilled."""
-    printer, feeder = make_feeder()
-    motion_q = printer.lookup_object('motion_queuing')
+    motion_q = fake_printer.lookup_object('motion_queuing')
 
     set_sensor_active(feeder, 'hall_overflow', True)
     feeder._last_move_end_time = 0.0
@@ -181,11 +169,11 @@ def test_sync_to_extruder_anchor_direction_follows_hall1():
 # Fix C — Post-LOAD HALL1 grace
 # ---------------------------------------------------------------------------
 
-def test_post_load_grace_set_on_phase3_overflow_treating_as_full():
+
+def test_post_load_grace_set_on_phase3_overflow_treating_as_full(feeder):
     """When LOAD_PHASE_3 with overflow_ok=1 exits via stable HALL1,
     the grace flag must be set so main_tick doesn't bounce state
     back to OVERFLOW."""
-    _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
     feeder._load_phase3_overflow_ok = True
     feeder._load_phase3_stable_timeout = 1.0
@@ -199,10 +187,9 @@ def test_post_load_grace_set_on_phase3_overflow_treating_as_full():
     assert feeder._post_load_overflow_grace is True
 
 
-def test_post_load_grace_blocks_main_tick_re_enter_overflow():
+def test_post_load_grace_blocks_main_tick_re_enter_overflow(feeder):
     """With grace set, _is_hall1_active('main_tick') must return
     False even though hall_overflow is True."""
-    _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_AUTO
     feeder._post_load_overflow_grace = True
     set_sensor_active(feeder, 'hall_overflow', True)
@@ -210,10 +197,9 @@ def test_post_load_grace_blocks_main_tick_re_enter_overflow():
     assert feeder._is_hall1_active('main_tick') is False
 
 
-def test_post_load_grace_clears_on_hall1_fall():
+def test_post_load_grace_clears_on_hall1_fall(feeder):
     """Once HALL1 actually falls, the sensor-callback path clears
     the grace and returns to normal HALL1-lockout regime."""
-    _, feeder = make_feeder()
     feeder._startup_grace_done = True   # callback only fires after grace
     feeder._state = buffer_feeder.STATE_AUTO
     feeder._post_load_overflow_grace = True
@@ -226,33 +212,30 @@ def test_post_load_grace_clears_on_hall1_fall():
     assert feeder._post_load_overflow_grace is False
 
 
-def test_post_load_grace_clears_on_auto_off():
+def test_post_load_grace_clears_on_auto_off(feeder):
     """Operator-explicit AUTO_OFF clears the grace too — any later
     HALL1-active spike must trigger the normal lockout."""
-    _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_AUTO
     feeder._post_load_overflow_grace = True
 
-    feeder.cmd_BUFFER_AUTO_OFF(FakeGCmd())
+    feeder.cmd_BUFFER_AUTO_OFF(FakeGCmdLocal())
 
     assert feeder._post_load_overflow_grace is False
 
 
-def test_post_load_grace_clears_on_stop_buffer_fill():
-    _, feeder = make_feeder()
+def test_post_load_grace_clears_on_stop_buffer_fill(feeder):
     feeder._state = buffer_feeder.STATE_AUTO
     feeder._post_load_overflow_grace = True
 
-    feeder.cmd_STOP_BUFFER_FILL(FakeGCmd())
+    feeder.cmd_STOP_BUFFER_FILL(FakeGCmdLocal())
 
     assert feeder._post_load_overflow_grace is False
 
 
-def test_post_load_grace_does_not_block_lockout_for_check_auto_ready():
+def test_post_load_grace_does_not_block_lockout_for_check_auto_ready(feeder):
     """The grace must NOT mask HALL1 active for _check_auto_ready
     (used by direct user-AUTO_ON). The _IF_READY variant respects
     the block-reason; only main_tick re-trigger is suppressed."""
-    _, feeder = make_feeder()
     feeder._post_load_overflow_grace = True
     set_sensor_active(feeder, 'hall_overflow', True)
 
@@ -260,8 +243,7 @@ def test_post_load_grace_does_not_block_lockout_for_check_auto_ready():
     assert feeder._is_hall1_active('auto_on') is True
 
 
-def test_post_load_grace_exposed_in_get_status():
-    _, feeder = make_feeder()
+def test_post_load_grace_exposed_in_get_status(feeder):
     feeder._post_load_overflow_grace = True
 
     status = feeder.get_status(0.0)

@@ -256,19 +256,36 @@ def test_streaming_max_two_chunks_pending():
 # Sicherheits-Pfade bleiben erhalten — P7-66 darf sie nicht unterlaufen.
 # ---------------------------------------------------------------------------
 
-def test_streaming_blocked_by_hall1_overflow():
-    """Hard-Safety: selbst wenn Lookahead greifen würde, blockiert
-    HALL1 (Overflow) jeden Forward-Submit. Diese Garantie kommt vom
-    `_is_hall1_active('submit_move')` Branch oben in _on_mcu_flush;
-    P7-66 darf sie nicht aushebeln."""
+@pytest.mark.parametrize(
+    "gate",
+    ["hall1-overflow", "wrong-state"],
+)
+def test_streaming_safety_gates(gate):
+    """Subsumes: test_streaming_blocked_by_hall1_overflow,
+    test_streaming_respects_state_auto_only
+    (parametrized 2026-05-12, Audit-2 Cluster D).
+
+    P7-66 R6 (Hardware-Bugfix): the streaming lookahead in _on_mcu_flush
+    must NOT bypass either safety gate.
+    """
     printer, feeder = make_feeder()
     motion_q = printer.lookup_object('motion_queuing')
     set_sensor_active(feeder, 'hall_empty', True)
-    set_sensor_active(feeder, 'hall_overflow', True)  # HALL1 aktiv
+    if gate == "hall1-overflow":
+        # Hard-Safety: selbst wenn Lookahead greifen wuerde, blockiert
+        # HALL1 (Overflow) jeden Forward-Submit. Diese Garantie kommt
+        # vom `_is_hall1_active('submit_move')` Branch oben in
+        # _on_mcu_flush; P7-66 darf sie nicht aushebeln.
+        set_sensor_active(feeder, 'hall_overflow', True)  # HALL1 aktiv
+    else:  # wrong-state
+        # P7-66 darf nur im AUTO-Pfad streamen. Nicht-AUTO Zustaende
+        # (LOAD/UNLOAD/MANUAL_FEED) haben eigene Submit-Pfade — Lookahead
+        # via flush-callback hier waere Double-Submit-Risiko.
+        feeder._state = buffer_feeder.STATE_MANUAL_FEED
 
     feeder.reactor.now = 5.00
     feeder._continuous_feed = True
-    feeder._last_move_end_time = 5.20  # Lookahead-Bedingung wäre wahr
+    feeder._last_move_end_time = 5.20  # Lookahead-Bedingung waere wahr
     feeder._current_move = {
         'end_time': 5.20,
         'direction': 1.0,
@@ -282,7 +299,10 @@ def test_streaming_blocked_by_hall1_overflow():
 
     own = [c for c in motion_q.append_calls[appends_before:]
            if c[0] is feeder.trapq]
-    assert not own, "HALL1-Lockout durchbrochen — Sicherheit verletzt"
+    if gate == "hall1-overflow":
+        assert not own, "HALL1-Lockout durchbrochen — Sicherheit verletzt"
+    else:  # wrong-state
+        assert not own, "Lookahead lief in STATE_MANUAL_FEED — verboten"
 
 
 def test_streaming_stops_on_hall_full():
@@ -322,34 +342,6 @@ def test_streaming_stops_on_hall_full():
     assert feeder._pending_remaining_mm == 0.0, (
         "HALL2 in _on_mcu_flush hat _pending_remaining_mm nicht "
         "gecleared — Move-Splitting overshoot Garantie gebrochen")
-
-
-def test_streaming_respects_state_auto_only():
-    """P7-66 darf nur im AUTO-Pfad streamen. Nicht-AUTO Zustände
-    (LOAD/UNLOAD/MANUAL_FEED) haben eigene Submit-Pfade — Lookahead
-    via flush-callback hier wäre Double-Submit-Risiko."""
-    printer, feeder = make_feeder()
-    motion_q = printer.lookup_object('motion_queuing')
-    feeder._state = buffer_feeder.STATE_MANUAL_FEED
-    set_sensor_active(feeder, 'hall_empty', True)
-
-    feeder.reactor.now = 5.00
-    feeder._continuous_feed = True
-    feeder._last_move_end_time = 5.20
-    feeder._current_move = {
-        'end_time': 5.20,
-        'direction': 1.0,
-        'distance': feeder.flush_callback_chunk_mm,
-        'speed': feeder.feed_speed,
-    }
-    feeder._stepcompress_primed = True
-
-    appends_before = len(motion_q.append_calls)
-    motion_q.trigger_flush(flush_time=5.00, step_gen_time=5.05)
-
-    own = [c for c in motion_q.append_calls[appends_before:]
-           if c[0] is feeder.trapq]
-    assert not own, "Lookahead lief in STATE_MANUAL_FEED — verboten"
 
 
 # ---------------------------------------------------------------------------

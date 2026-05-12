@@ -1,4 +1,9 @@
-"""P7-49 — LOAD always ends in AUTO when entrance is detected.
+"""Phase 3 LOAD tests — P7-49 (LOAD ends in AUTO) + P7-48 (HALL1 guard).
+
+Originally split across test_p749_load_ends_in_auto.py +
+test_p748_phase3_no_overfeed.py; merged 2026-05-12 (Audit-2 Operation 2c).
+
+P7-49 — LOAD always ends in AUTO when entrance is detected.
 
 Hardware-Test 2026-04-27 (operator note): "wenn der load beendet ist
 fehlt der wechsel in den automatik modus".
@@ -213,3 +218,105 @@ def test_hard_buffer_auto_on_still_raises_under_grace():
 
     with pytest.raises(Exception, match="HALL1 overflow active"):
         feeder.cmd_BUFFER_AUTO_ON(FakeGCmd())
+
+
+# --- Phase3 HALL1-guard (P7-48, migrated 2026-05-12) ---
+
+
+def test_phase3_tick_does_not_submit_while_hall1_active():
+    """The bug: while HALL1 stable-timer counts up, chunks were still
+    submitted, stuffing 300mm of filament against the extruder clamp.
+
+    Fix: hall_overflow=True → no submit, stable-timer keeps counting.
+    """
+    printer, feeder = make_feeder()
+    motion_q = printer.lookup_object('motion_queuing')
+
+    feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
+    feeder._load_phase3_overflow_ok = True
+    feeder._load_phase3_stable_timeout = 5.0   # would let ~3 chunks through pre-fix
+    feeder._load_phase3_max_distance = 2000.0
+    feeder._load_phase3_chunk_distance = 50.0
+    feeder._load_phase3_speed = 30.0
+    feeder._load_phase3_distance = 0.0
+    feeder._load_phase3_hall_overflow_since = None
+
+    # HALL1 active throughout
+    set_sensor_active(feeder, 'hall_overflow', True)
+
+    appends_before = len(motion_q.append_calls)
+
+    # Tick a few times during the stable-timer window.
+    feeder._load_phase3_tick(eventtime=0.0)
+    feeder._load_phase3_tick(eventtime=0.5)
+    feeder._load_phase3_tick(eventtime=1.0)
+    feeder._load_phase3_tick(eventtime=1.5)
+    # Verify timer is counting (not yet at threshold)
+    dwell = 1.5 - feeder._load_phase3_hall_overflow_since
+    assert dwell > 0, "stable timer should be counting"
+
+    # No new appends on own_trapq during the HALL1-stable window.
+    new_appends = motion_q.append_calls[appends_before:]
+    own_appends = [c for c in new_appends if c[0] is feeder.trapq]
+    assert not own_appends, (
+        "P7-48 broken: %d chunk(s) submitted during HALL1-stable window"
+        % len(own_appends))
+
+
+def test_phase3_tick_resumes_submission_when_hall1_drops():
+    """If HALL1 transient-falls during the stable-timer window, the
+    submit path must arm again so Phase 3 keeps making progress."""
+    printer, feeder = make_feeder()
+    motion_q = printer.lookup_object('motion_queuing')
+
+    feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
+    feeder._load_phase3_overflow_ok = True
+    feeder._load_phase3_stable_timeout = 5.0
+    feeder._load_phase3_max_distance = 2000.0
+    feeder._load_phase3_chunk_distance = 50.0
+    feeder._load_phase3_speed = 30.0
+    feeder._load_phase3_distance = 0.0
+    feeder._load_phase3_hall_overflow_since = None
+
+    set_sensor_active(feeder, 'hall_overflow', True)
+    feeder._load_phase3_tick(eventtime=0.0)
+    appends_after_stable = len(motion_q.append_calls)
+
+    # HALL1 falls (transient spike was over)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    feeder._load_phase3_tick(eventtime=0.5)
+
+    new_appends = motion_q.append_calls[appends_after_stable:]
+    own_appends = [c for c in new_appends if c[0] is feeder.trapq]
+    assert own_appends, (
+        "Phase 3 stopped feeding entirely after HALL1 fell — should "
+        "resume the chunk stream")
+
+
+def test_phase3_tick_exits_when_hall1_stable_timeout_reached():
+    """The original happy path stays intact: HALL1 stable for >=
+    threshold seconds → state transition to AUTO/IDLE."""
+    printer, feeder = make_feeder()
+    feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
+    feeder._load_phase3_overflow_ok = True
+    feeder._load_phase3_stable_timeout = 1.0   # P7-48 default
+    feeder._load_phase3_max_distance = 2000.0
+    feeder._load_phase3_chunk_distance = 50.0
+    feeder._load_phase3_speed = 30.0
+    feeder._load_phase3_distance = 0.0
+    feeder._load_phase3_hall_overflow_since = 0.0
+    feeder._print_running = False
+    set_sensor_active(feeder, 'hall_overflow', True)
+    set_sensor_active(feeder, 'entrance', True)
+
+    # Tick at eventtime = stable_timeout → exit triggers
+    feeder._load_phase3_tick(eventtime=1.5)
+
+    # P7-49: Phase 3 exit goes to AUTO when entrance is detected,
+    # regardless of _print_running. This is the new "deliberate-LOAD-
+    # ends-in-AUTO" semantic so bang-bang refills the buffer for the
+    # next manual extrusion or print start.
+    assert feeder._state == buffer_feeder.STATE_AUTO, (
+        "Phase 3 should exit to AUTO after stable timeout when "
+        "entrance is detected — got %s" % feeder._state)
+    assert feeder._post_load_overflow_grace is True
