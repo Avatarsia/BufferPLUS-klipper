@@ -2953,8 +2953,34 @@ class BufferFeeder:
         # t0 lands at _last_move_end_time with no enable-vs-step lead
         # → MCU "stepcompress Invalid sequence" shutdown (Issue #29,
         # LOAD_PHASE_1 post-OVERFLOW regression of P7-66).
+        #
+        # P7-71 (Issue #29 Eifel-Joe Update — AUTO-Rapid-Cycle):
+        # P7-67 only covers the SLOW-cycle path where _disable_stepper
+        # actually ran and flipped _stepcompress_primed=False between
+        # OVERFLOW and resume. The RAPID-cycle bypasses that: HALL1
+        # flickers so fast that _schedule_stepper_disable only ever
+        # sets _pending_disable=True (move-in-flight), and the
+        # subsequent _resume_after_overflow → _enable_stepper cancels
+        # _pending_disable=False (line 2697). _disable_stepper NEVER
+        # runs → _stepcompress_primed stays True over the entire
+        # cycle → was_primed=True on the next submit. Same scenario
+        # via a different path: any forced_t0=None submit after
+        # gap > REPRIME_GAP (5s) with primed=True triggers the
+        # reprime branch (need_reprime=True). In BOTH cases the
+        # reprime block has just called stepper.set_position((0,0,0))
+        # — which makes _last_move_end_time semantically dead
+        # (cursor reset to zero, old end_time no longer consistent
+        # with the new stepcompress base). Without en-floor t0
+        # would land at the stale _last_move_end_time, again with
+        # no enable-vs-step lead → "Invalid sequence" shutdown
+        # (rapid-cycle reproduction from Eifel-Joe hardware log).
+        #
+        # Third guard `not need_reprime`: en-floor is dropped ONLY if
+        # the cursor was primed on entry AND the reprime block did
+        # not just rewrite it. When need_reprime=True the reprime ran
+        # → en-floor is mandatory, even if was_primed=True.
         en = (0.0
-              if streaming and was_primed
+              if streaming and was_primed and not need_reprime
               else self._last_enable_schedule_time)
         if forced_t0 is not None:
             # P7-52 flush-callback path: caller provides a step_gen_
