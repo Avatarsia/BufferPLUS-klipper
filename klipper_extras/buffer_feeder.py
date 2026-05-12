@@ -2769,6 +2769,14 @@ class BufferFeeder:
         #     noetig. Bei primed=True: kein Aufruf (Schutz gegen rapide
         #     SET_VELOCITY_LIMIT-Flush-Callbacks die Cursor korrumpieren).
         #   - Gap-basierter Reprime entfaellt: step_gen_time ist der Anker.
+        # P7-67: snapshot the primed-flag BEFORE the reprime block
+        # rewrites it. The en-floor decision further down depends on
+        # whether the stepcompress cursor was primed on ENTRY, not on
+        # whether the reprime path just set it True. Without this
+        # snapshot, the post-reprime read of _stepcompress_primed
+        # would always be True and the new en-floor branch would
+        # never trigger — defeating the point of the patch.
+        was_primed = self._stepcompress_primed
         if forced_t0 is None:
             need_reprime = (not self._stepcompress_primed) or (gap > REPRIME_GAP)
         else:
@@ -2820,7 +2828,19 @@ class BufferFeeder:
         # 2026-04-29, c=22 i=0).
         # P7-66 R1: when streaming, en floor is DROPPED — see comment
         # at the _enable_stepper() guard above.
-        en = 0.0 if streaming else self._last_enable_schedule_time
+        # P7-67 (post-overflow resume primed=False edge case): the R1
+        # drop-en-floor optimisation is only safe when the stepcompress
+        # cursor was already primed on entry. If was_primed=False
+        # (typical resume path: _disable_stepper → _enable_stepper
+        # zyklus cleared _stepcompress_primed), the reprime above just
+        # rewrote stepcompress with set_position((0,0,0)) and the
+        # regular en floor must keep the lead_time margin — otherwise
+        # t0 lands at _last_move_end_time with no enable-vs-step lead
+        # → MCU "stepcompress Invalid sequence" shutdown (Issue #29,
+        # LOAD_PHASE_1 post-OVERFLOW regression of P7-66).
+        en = (0.0
+              if streaming and was_primed
+              else self._last_enable_schedule_time)
         if forced_t0 is not None:
             # P7-52 flush-callback path: caller provides a step_gen_
             # time-based anchor that is race-free against Klipper's
