@@ -2205,6 +2205,15 @@ class BufferFeeder:
         if self._bang_bang_suspended:
             # Print is paused — do nothing until idle_timeout:printing.
             return
+        # P7-69 (Issue #18): An explicit BUFFER_SYNC_TO_EXTRUDER (macro
+        # path) has bound the stepper to the extruder trapq. Submitting
+        # any move via the reactor-tick path while synced would queue
+        # trapezoids on the wrong trapq AND can trip the gap>5s reprime
+        # in _submit_single_trapezoid → mid-print toolhead.flush_step_-
+        # generation() → extruder stop. Mirror the guard from
+        # _on_mcu_flush (the legacy reactor-tick path was missing it).
+        if self._stepper_synced_to is not None:
+            return
         # P7-52: when flush-callback bang-bang is active, the
         # reactor-tick path becomes a no-op so we don't double-submit.
         # Stop-on-HALL2 is still needed via flush-callback path itself.
@@ -2741,6 +2750,17 @@ class BufferFeeder:
         """
         if signed_distance == 0 or speed <= 0:
             return
+        # P7-69 (Issue #18): defense-in-depth sync guard. _bang_bang_tick
+        # and _on_mcu_flush already guard, but _submit_move is reachable
+        # via several other call-sites (LOAD/UNLOAD phases, manual cmds,
+        # _tick_grip_completion). None of those should fire while a
+        # macro-driven SYNC has the stepper bound to the extruder trapq
+        # — submitting on own_trapq during that window would queue moves
+        # on the wrong trapq AND can trip the gap>5s reprime in
+        # _submit_single_trapezoid → toolhead.flush_step_generation()
+        # mid-print → extruder stops.
+        if self._stepper_synced_to is not None:
+            return
         # OVERFLOW: nur Forward-Submits ablehnen. Retract (signed_distance < 0)
         # ist die einzige Recovery-Bewegung, die einen überfüllten Buffer
         # entlasten kann — sonst sitzt der User in der Sackgasse.
@@ -2816,6 +2836,19 @@ class BufferFeeder:
         the binding floor → abuttend-anchor breaks → inter-chunk gap
         regrows to lead_time despite the lookahead path firing.
         """
+        # P7-69 (Issue #18): innermost defense-in-depth sync guard.
+        # _bang_bang_tick / _on_mcu_flush / _submit_move already guard,
+        # but this primitive is the actual site of the dangerous side-
+        # effects flagged in Issue #18: when forced_t0 is None AND
+        # gap > REPRIME_GAP, the legacy reprime path calls
+        # toolhead.flush_step_generation() + stepper.set_position(0)
+        # mid-print, which drains the toolhead queue and stops the
+        # extruder while it is actively driving the synced stepper.
+        # _tick_pending_chunk (P7-66 streaming) and other future call-
+        # sites would bypass the upstream guards; this final gate makes
+        # the invariant "no own-trapq submit while synced" robust.
+        if self._stepper_synced_to is not None:
+            return
         # Prime/re-prime stepcompress nach Idle-Pause die laenger ist als
         # CLOCK_DIFF_MAX (Klipper: 3<<28 ticks = ~16.7s @ 48MHz). Dahinter
         # laeuft compress_bisect_add in degenerierte Sequenzen ein
