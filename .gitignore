@@ -10,6 +10,7 @@ __pycache__/
 .tmp_pytest_shim/
 .claude/
 .pytest_cache/
+venv-test/
 
 # Logs (per-tool, nicht committen)
 klippy.log

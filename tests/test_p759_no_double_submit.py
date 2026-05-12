@@ -143,9 +143,12 @@ def test_on_mcu_flush_initial_feed_uses_forced_t0(monkeypatch):
         not False if polarity_flip['hall_overflow'] else False)
 
     submit_calls = []
+    # P7-66: accept **kw so streaming= and submit_chunk_cap= kwargs
+    # introduced by the lookahead/move-splitting pipeline don't break
+    # this contract test.
     monkeypatch.setattr(feeder, "_submit_move",
-                        lambda d, s, forced_t0=None: submit_calls.append(
-                            (d, s, forced_t0)))
+                        lambda d, s, forced_t0=None, **kw: (
+                            submit_calls.append((d, s, forced_t0))))
 
     # Simulate Klipper firing the flush-callback at print_time=10s,
     # step_gen_time=10.5s.
@@ -176,7 +179,7 @@ def test_main_tick_pending_chunk_still_runs_in_manual_feed(monkeypatch):
 
     submit_calls = []
     monkeypatch.setattr(feeder, "_submit_single_trapezoid",
-                        lambda d, s: submit_calls.append((d, s)))
+                        lambda d, s, **kw: submit_calls.append((d, s)))
     monkeypatch.setattr(feeder, "_abort_signalled", lambda: False)
 
     feeder._last_move_end_time = 0.0  # past — small gap triggers submit
@@ -203,7 +206,7 @@ def test_main_tick_pending_chunk_runs_in_auto_with_flush_callback(monkeypatch):
 
     submit_calls = []
     monkeypatch.setattr(feeder, "_submit_single_trapezoid",
-                        lambda d, s: submit_calls.append((d, s)))
+                        lambda d, s, **kw: submit_calls.append((d, s)))
     monkeypatch.setattr(feeder, "_abort_signalled", lambda: False)
 
     feeder._last_move_end_time = 0.0

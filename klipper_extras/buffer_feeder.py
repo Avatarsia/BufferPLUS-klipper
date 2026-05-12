@@ -813,6 +813,18 @@ class BufferFeeder:
         # der Feeder den HALL1-Overflow-Bereich nicht ueberschiesst.
         # Default 15.0mm = HALL3->HALL2-Pufferweg am Mellow LLL Plus.
         self.flush_callback_chunk_mm = config.getfloat('flush_callback_chunk_mm', 15.0, above=0.)
+        # P7-66b: Maximum size of a SINGLE submitted trapezoid in the
+        # AUTO bang-bang streaming path. When flush_callback_chunk_mm
+        # exceeds this cap, the chunk is split into sub-chunks via
+        # _pending_remaining_mm so HALL2/HALL1 can abort between
+        # sub-chunks (move-splitting interrupt). Default 9.0 mm gives
+        # ~128 ms sub-chunk duration at 70 mm/s — bounded overshoot.
+        # Hardware-test 2026-05-12: 45 mm without a cap → grinding.
+        # Cap <= max_move_chunk_mm.
+        self.interrupt_chunk_mm = config.getfloat(
+            'interrupt_chunk_mm', 9.0, above=0.)
+        if self.interrupt_chunk_mm > self.max_move_chunk_mm:
+            self.interrupt_chunk_mm = self.max_move_chunk_mm
 
         # ----- Config: jam detection -----
         self.jam_detection_enabled = config.getboolean('jam_detection_enabled', True)
@@ -984,6 +996,12 @@ class BufferFeeder:
         self._pending_remaining_mm = 0.0
         self._pending_direction = 0.0
         self._pending_speed = 0.0
+        # P7-66b: per-sub-chunk submit cap propagated to _tick_pending_-
+        # chunk so the HALL-interruptible streaming uses the same small
+        # trapezoid size as the first submit. Default None = legacy
+        # max_move_chunk_mm. AUTO+streaming sets this to
+        # interrupt_chunk_mm; LOAD/UNLOAD/MANUAL paths leave it None.
+        self._pending_submit_chunk_cap = None
         self._continuous_feed = False       # True = keep submitting moves while active
         self._continuous_feed_direction = 0 # +1 or -1
         self._continuous_feed_speed = 0.0
@@ -2040,6 +2058,21 @@ class BufferFeeder:
         if self._abort_signalled():
             self._pending_remaining_mm = 0.0
             return
+        # P7-66b: HALL2 (buffer full) MUST abort a forward streaming
+        # sequence. _abort_signalled covers HALL1 (overflow) but not
+        # the bang-bang stop-on-full case. Without this clamp the
+        # sub-chunks of a 45mm chunk would keep flowing into a full
+        # buffer until the original distance was exhausted — exactly
+        # the overshoot the hardware-test 2026-05-12 hit.
+        # Only forward direction + AUTO state — retract / UNLOAD must
+        # still drain pending distance regardless of HALL2 (it pulls
+        # filament back, doesn't push into the buffer).
+        if (self._pending_direction > 0
+                and self._state == STATE_AUTO
+                and self.hall_full):
+            self._pending_remaining_mm = 0.0
+            self._continuous_feed = False
+            return
         if (self._pending_direction < 0
                 and self._state == STATE_MANUAL_RETRACT
                 and not self.entrance_detected):
@@ -2048,7 +2081,15 @@ class BufferFeeder:
             return
         if self._pending_speed <= 0:
             return
-        chunk_duration = self.max_move_chunk_mm / self._pending_speed
+        # P7-66b: honour the sub-chunk cap if the active stream was
+        # opened with one. AUTO+streaming sets cap=interrupt_chunk_mm
+        # so HALL-interrupt latency stays bounded; legacy paths
+        # (LOAD/UNLOAD/MANUAL) leave _pending_submit_chunk_cap=None and
+        # fall back to max_move_chunk_mm exactly as before.
+        cap = self._pending_submit_chunk_cap
+        if cap is None or cap > self.max_move_chunk_mm:
+            cap = self.max_move_chunk_mm
+        chunk_duration = cap / self._pending_speed
         mcu = self.stepper.get_mcu()
         now_pt = mcu.estimated_print_time(eventtime)
         gap = self._last_move_end_time - now_pt
@@ -2056,10 +2097,22 @@ class BufferFeeder:
         # currently-queued move, so next trapezoid starts right at
         # the prior one's end_time.
         if gap <= chunk_duration * 0.5:
-            chunk = min(self._pending_remaining_mm, self.max_move_chunk_mm)
+            chunk = min(self._pending_remaining_mm, cap)
+            # P7-66 R1: this is the streaming continuation of an
+            # already-running burst. Pass streaming=True so the
+            # _enable_stepper() and _last_enable_schedule_time floor
+            # are skipped — same rationale as the lookahead branch in
+            # _on_mcu_flush. _move_in_flight() is implicit here: the
+            # gap-check above only fires while the previous trapezoid
+            # is still in the future.
             self._submit_single_trapezoid(
-                self._pending_direction * chunk, self._pending_speed)
+                self._pending_direction * chunk, self._pending_speed,
+                streaming=True)
             self._pending_remaining_mm -= chunk
+            if self._pending_remaining_mm <= 0:
+                # Drop the cap so a subsequent unrelated _submit_move
+                # call does not inherit it.
+                self._pending_submit_chunk_cap = None
 
     def _bang_bang_tick(self, eventtime):
         """HALL-based bang-bang with hysteresis. Reactor-tick driven —
@@ -2155,6 +2208,13 @@ class BufferFeeder:
                 # event lets the accumulator grow past max_feed_distance
                 # and trips a false JAM_SAFETY_DISTANCE (Issue #26).
                 self._feed_distance_accumulator = 0.0
+            # P7-66b: HALL2 must also clear _pending_remaining_mm so a
+            # still-streaming sub-chunk sequence (move-splitting) does
+            # NOT keep firing into the now-full buffer. Without this,
+            # only the new-submit path is gated; the sub-chunk pipeline
+            # keeps emitting up to flush_callback_chunk_mm of overshoot.
+            self._pending_remaining_mm = 0.0
+            self._pending_submit_chunk_cap = None
         elif self.hall_empty:
             # Buffer leer: feed. step_gen_time + lead_time is the
             # safe anchor — Klipper just told us the cursor is here.
@@ -2167,8 +2227,60 @@ class BufferFeeder:
             # masked this in stable until P7-59 correctly disabled
             # that racing path; _on_mcu_flush now owns the full
             # continuous-streaming responsibility.
+            #
+            # P7-66: Lookahead-Submit für Streaming-Pipeline. P7-61
+            # submitted nur, wenn der laufende Chunk *vollständig*
+            # ausgespielt war (Restzeit <= 0). Anker für den nächsten
+            # Chunk war step_gen_time + lead_time → bei lead_time=0.3 s
+            # entstand zwischen aufeinanderfolgenden Chunks ein
+            # sichtbarer Gap, Netto-Förderrate < nominal feed_speed
+            # (Motor lief seriell statt kontinuierlich).
+            #
+            # Neu: sobald die Restzeit des laufenden Chunks <= lead_time
+            # ist, wird der nächste Chunk JETZT submitted, mit
+            # t0 = _last_move_end_time (abuttend, identisch zum
+            # Pattern in _tick_pending_chunk). Erst-Chunk-Pfad
+            # (kein Move in flight) unverändert: t0 = step_gen_time
+            # + lead_time.
+            #
+            # HALT-Latenz: maximal 1 zusätzlicher Chunk gegenüber
+            # P7-61 (laufender + 1 vorab-submittierter). _halt_motion
+            # setzt _continuous_feed=False und clearisiert
+            # _pending_remaining_mm; ein bereits trapq-submittierter
+            # Chunk muss aussspielen. Bei flush_callback_chunk_mm=15
+            # und feed_speed=30 sind das ~0.5 s Worst-Case extra.
+            #
+            # P7-66b: HALL2-Interrupt via move-splitting. flush_call-
+            # back_chunk_mm > interrupt_chunk_mm wird intern in N
+            # sub-chunks zerlegt: der erste landet sofort in der trapq,
+            # der Rest via _pending_remaining_mm. _tick_pending_chunk
+            # prüft HALL2 zwischen jedem sub-chunk → der laufende sub-
+            # chunk spielt aus, der Rest wird verworfen. Worst-case
+            # Overshoot = ein interrupt_chunk_mm (Default 9 mm), nicht
+            # mehr 45 mm. Hardware-Test 2026-05-12: ohne Cap grindet
+            # Filament gegen vollen Puffer.
             self._auto_between_since = None
-            if not self._move_in_flight():
+            move_active = self._move_in_flight()
+            if move_active:
+                # Streaming-Pfad: Restzeit aus mcu_now-Perspektive.
+                # step_gen_time ist der race-free MCU-Cursor (vom
+                # Klipper-flush bereitgestellt); _last_move_end_time
+                # ist die in trapq stehende Endzeit. remaining <=
+                # lead_time bedeutet "Klipper braucht spätestens in
+                # lead_time einen neuen Move im trapq".
+                remaining = self._last_move_end_time - step_gen_time
+                can_lookahead = (remaining <= self.lead_time)
+            else:
+                can_lookahead = True  # erster Chunk / Move-Lücke
+            # P7-66b: don't queue a fresh chunk while a sub-chunk
+            # sequence is still draining — _tick_pending_chunk will
+            # continue submitting at the cap size and HALL2 abort
+            # remains the gate. Without this guard a flush-callback
+            # racing the pending-tick would double-submit and the
+            # interrupt latency invariant breaks.
+            if self._pending_remaining_mm > 0:
+                can_lookahead = False
+            if can_lookahead:
                 if not self._continuous_feed:
                     # P7-57: Reset safety-distance counter on every
                     # new feed session (first chunk after a hall_empty
@@ -2188,10 +2300,24 @@ class BufferFeeder:
                     self._continuous_feed = True
                     self._continuous_feed_direction = 1
                     self._continuous_feed_speed = self.feed_speed
-                anchor = step_gen_time + self.lead_time
+                if move_active:
+                    # Streaming: abuttend an in flight Move. t0 =
+                    # _last_move_end_time. _submit_single_trapezoid
+                    # nimmt im forced_t0-Pfad max(forced_t0,
+                    # _last_move_end_time, en, mcu_now) — identisch.
+                    anchor = self._last_move_end_time
+                else:
+                    # Erster Chunk: race-free Anker.
+                    anchor = step_gen_time + self.lead_time
+                # P7-66 R1 + P7-66b: streaming=True drops the en floor
+                # and skips _enable_stepper() so the abuttend-anchor
+                # holds; submit_chunk_cap=interrupt_chunk_mm splits
+                # the chunk into HALL-interruptible sub-chunks.
                 self._submit_move(self.flush_callback_chunk_mm,
                                    self.feed_speed,
-                                   forced_t0=anchor)
+                                   forced_t0=anchor,
+                                   streaming=move_active,
+                                   submit_chunk_cap=self.interrupt_chunk_mm)
         else:
             # P7-63: Zwischen-Zone — keep short bounce flicker, but end
             # the AUTO feed session once HALL3 has been inactive long
@@ -2498,7 +2624,8 @@ class BufferFeeder:
         except Exception:
             logging.exception("buffer_feeder: disable_stepper failed")
 
-    def _submit_move(self, signed_distance, speed, forced_t0=None):
+    def _submit_move(self, signed_distance, speed, forced_t0=None,
+                     streaming=False, submit_chunk_cap=None):
         """Submit a move. Chunks long moves asynchronously.
 
         Flush-free. For distances ≤ max_move_chunk_mm this queues
@@ -2515,6 +2642,20 @@ class BufferFeeder:
         only ever holding ~1.5 chunks ahead in the trapq, HALT can
         zero out _pending_remaining_mm and let the in-flight chunk
         drain out — max latency one chunk duration.
+
+        streaming (P7-66): set by _on_mcu_flush lookahead-submits when
+        a move is still in-flight. Skips _enable_stepper() (motor is
+        already energised from the in-flight chunk) and removes the
+        _last_enable_schedule_time floor on t0. Without this, the
+        enable-floor pushes the streaming-anchor forward by lead_time
+        → inter-chunk gap reopens.
+
+        submit_chunk_cap (P7-66b): caps the size of the FIRST submitted
+        trapezoid for hardware-safe HALL-interrupt latency. The full
+        signed_distance is honoured — anything beyond the cap is queued
+        into _pending_remaining_mm and streamed by _tick_pending_chunk,
+        which re-checks HALL2/HALL1 between sub-chunks. Default None
+        falls back to max_move_chunk_mm (legacy behaviour).
         """
         if signed_distance == 0 or speed <= 0:
             return
@@ -2540,23 +2681,42 @@ class BufferFeeder:
         # toggle scheduled on the MCU. Without this guard, a move submitted
         # right after an enable (e.g. LOAD_PHASE1 after IDLE→disable) would
         # send a trapezoid with t0 < enable_time → MCU "Timer too close".
-        self._last_move_end_time = max(self._last_move_end_time,
-                                       self._last_enable_schedule_time)
+        # P7-66 R1: only apply this floor when NOT streaming. In the
+        # streaming-lookahead path the stepper is already enabled and
+        # _last_enable_schedule_time is stale — pushing _last_move_end_-
+        # time forward would break the abuttend-anchor.
+        if not streaming:
+            self._last_move_end_time = max(self._last_move_end_time,
+                                           self._last_enable_schedule_time)
 
         distance_abs = abs(signed_distance)
         direction = 1.0 if signed_distance > 0 else -1.0
 
-        first_chunk = min(distance_abs, self.max_move_chunk_mm)
+        # P7-66b: hardware-safe sub-chunking. submit_chunk_cap (typ.
+        # interrupt_chunk_mm=9) limits the first trapezoid to a size
+        # that lets HALL2 abort within one sub-chunk's duration. The
+        # rest streams via _pending_remaining_mm with per-sub-chunk
+        # HALL re-checks in _tick_pending_chunk. Falls back to
+        # max_move_chunk_mm when caller does not request sub-chunking.
+        chunk_cap = submit_chunk_cap if submit_chunk_cap is not None \
+            else self.max_move_chunk_mm
+        if chunk_cap > self.max_move_chunk_mm:
+            chunk_cap = self.max_move_chunk_mm
+        first_chunk = min(distance_abs, chunk_cap)
         self._submit_single_trapezoid(direction * first_chunk, speed,
-                                       forced_t0=forced_t0)
+                                       forced_t0=forced_t0,
+                                       streaming=streaming)
         remaining = distance_abs - first_chunk
         if remaining > 0:
             self._pending_remaining_mm = remaining
             self._pending_direction = direction
             self._pending_speed = speed
+            # P7-66b: propagate the cap so _tick_pending_chunk uses
+            # the same sub-chunk size for the streaming continuation.
+            self._pending_submit_chunk_cap = chunk_cap
 
     def _submit_single_trapezoid(self, signed_distance, speed,
-                                  forced_t0=None):
+                                  forced_t0=None, streaming=False):
         """Append one trapezoid to our trapq. Low-level primitive.
 
         forced_t0 (P7-52): when not None, overrides the t0 anchor with
@@ -2565,6 +2725,14 @@ class BufferFeeder:
         race-free anchor at step_gen_time + lead_time. The default
         (None) keeps the existing toolhead-anchor logic for the
         legacy reactor-tick path.
+
+        streaming (P7-66 R1): set by lookahead-submits during a still-
+        in-flight previous chunk. Suppresses _enable_stepper() (motor
+        is already on) and drops the _last_enable_schedule_time floor
+        from the t0 max(). Without this, _enable_stepper() bumps
+        _last_enable_schedule_time forward by lead_time → en becomes
+        the binding floor → abuttend-anchor breaks → inter-chunk gap
+        regrows to lead_time despite the lookahead path firing.
         """
         # Prime/re-prime stepcompress nach Idle-Pause die laenger ist als
         # CLOCK_DIFF_MAX (Klipper: 3<<28 ticks = ~16.7s @ 48MHz). Dahinter
@@ -2618,7 +2786,16 @@ class BufferFeeder:
             self._commanded_pos = 0.0
             self._stepcompress_primed = True
 
-        self._enable_stepper()
+        # P7-66 R1: skip _enable_stepper() in streaming-lookahead path.
+        # The previous (still in-flight) chunk has already enabled the
+        # motor and pushed _last_enable_schedule_time forward by lead_-
+        # time. A re-enable here would push it ANOTHER lead_time into
+        # the future → en floor wins below → abuttend-anchor broken.
+        # Safe to skip: streaming=True only when _move_in_flight() was
+        # True on entry, so the motor is energised through end_time of
+        # the prior chunk, which equals our t0 floor.
+        if not streaming:
+            self._enable_stepper()
 
         # Time base selection:
         # For streaming chunks (previous chunk still in the future):
@@ -2641,13 +2818,20 @@ class BufferFeeder:
         # Ohne diesen Floor: t0 = _last_move_end_time < enable_pt →
         # enable NACH Steps → "Invalid sequence" MCU-Shutdown (Hardware
         # 2026-04-29, c=22 i=0).
-        en = self._last_enable_schedule_time
+        # P7-66 R1: when streaming, en floor is DROPPED — see comment
+        # at the _enable_stepper() guard above.
+        en = 0.0 if streaming else self._last_enable_schedule_time
         if forced_t0 is not None:
             # P7-52 flush-callback path: caller provides a step_gen_
             # time-based anchor that is race-free against Klipper's
             # MCU flush cycle. Honor _last_move_end_time as the floor
             # so streaming chunks still abut without gap.
-            t0 = max(forced_t0, self._last_move_end_time, en)
+            # P7-66 R1b: mcu_now as additional floor — if a previous
+            # streamed move ended slightly before step_gen_time (clock
+            # drift, queue underrun race), forced_t0=_last_move_end_-
+            # time would land in the past → "Timer too close". mcu_now
+            # is the safe rebase anchor for that degenerate case.
+            t0 = max(forced_t0, self._last_move_end_time, en, mcu_now)
         elif self._last_move_end_time > mcu_now + self.lead_time:
             # Streaming: previous chunk is still in the future — abut.
             t0 = max(self._last_move_end_time, en)
@@ -2748,6 +2932,10 @@ class BufferFeeder:
         self._feed_distance_accumulator = 0.0
         self._auto_between_since = None
         self._pending_remaining_mm = 0.0
+        # P7-66b: drop the streaming sub-chunk cap so a subsequent
+        # LOAD/UNLOAD/MANUAL pending-stream uses its own (max_move_-
+        # chunk_mm) sizing without inheriting a stale AUTO cap.
+        self._pending_submit_chunk_cap = None
         self._feed_deadline_time = None
 
     def _start_continuous_motion(self, direction, speed, max_duration_s):
@@ -3830,6 +4018,7 @@ class BufferFeeder:
             'accel':                    self.accel,
             'max_move_chunk_mm':        self.max_move_chunk_mm,
             'flush_callback_chunk_mm':  self.flush_callback_chunk_mm,
+            'interrupt_chunk_mm':       self.interrupt_chunk_mm,
         }
 
 

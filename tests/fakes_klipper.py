@@ -340,6 +340,17 @@ class FakePrinter:
     def register_event_handler(self, event, handler):
         self.event_handlers.setdefault(event, []).append(handler)
 
+    def fire_event(self, event, *args, **kwargs):
+        """Test-helper: synchronously dispatch all handlers for an event.
+
+        Real Klipper fires klippy:connect / klippy:ready / klippy:disconnect
+        from klippy.py during boot. Tests that exercise code paths reading
+        state set up by these handlers (e.g. _stepper_enable wired in
+        _handle_connect) must invoke this helper.
+        """
+        for handler in list(self.event_handlers.get(event, [])):
+            handler(*args, **kwargs)
+
 
 class FakeConfig:
     DEFAULT_VALUES = {
