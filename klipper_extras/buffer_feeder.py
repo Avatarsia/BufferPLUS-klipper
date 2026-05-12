@@ -1164,6 +1164,7 @@ class BufferFeeder:
             ('FORCE_BUFFER_FILL',           self.cmd_FORCE_BUFFER_FILL,           None),
             ('STOP_BUFFER_FILL',            self.cmd_STOP_BUFFER_FILL,            None),
             ('BUFFER_STATE_DUMP',           self.cmd_BUFFER_STATE_DUMP,           None),
+            ('BUFFER_SET',                  self.cmd_BUFFER_SET,                  None),
             ('CALIBRATE_FEEDER_SYNC',       self.cmd_CALIBRATE_FEEDER_SYNC,       None),
             ('MEASURE_LOAD_START',          self.cmd_MEASURE_LOAD_START,          None),
             ('MEASURE_LOAD_STOP',           self.cmd_MEASURE_LOAD_STOP,           None),
@@ -3818,6 +3819,111 @@ class BufferFeeder:
         gc = self.printer.lookup_object('gcode')
         for line in lines:
             gc.respond_info(line)
+
+    # ---- P7-68: runtime parameter tuning (Issue #28) ----
+    # Hot-swap setter for the five hardware-discovery parameters. All
+    # writes are picked up by the next read on the streaming/auto path
+    # (no Klipper restart). NO persistence: the operator manually
+    # transfers a confirmed value to lll.cfg.
+    cmd_BUFFER_SET_help = (
+        "Live-tune buffer parameters without restart. All args optional:\n"
+        "  CHUNK_MM              flush_callback_chunk_mm (mm,  default 15, lll.cfg 45)\n"
+        "  SPEED                 feed_speed              (mm/s, default 30, lll.cfg 70)\n"
+        "  INTERRUPT_CHUNK_MM    interrupt_chunk_mm      (mm,  default 9, cap <= MAX_MOVE_CHUNK_MM)\n"
+        "  LEAD_TIME             lead_time               (s,   default 0.3, lll.cfg 0.12; warn outside 0.05..1.0)\n"
+        "  MAX_MOVE_CHUNK_MM     max_move_chunk_mm       (mm,  default 50)\n"
+        "Without args: prints current values. No persistence — copy "
+        "the final value into lll.cfg manually."
+    )
+    def cmd_BUFFER_SET(self, gcmd):
+        # All args optional. above=0. ensures only positive values.
+        new_chunk      = gcmd.get_float('CHUNK_MM',           None, above=0.)
+        new_speed      = gcmd.get_float('SPEED',              None, above=0.)
+        new_interrupt  = gcmd.get_float('INTERRUPT_CHUNK_MM', None, above=0.)
+        new_lead       = gcmd.get_float('LEAD_TIME',          None, above=0.)
+        new_max_move   = gcmd.get_float('MAX_MOVE_CHUNK_MM',  None, above=0.)
+
+        gc = self.printer.lookup_object('gcode')
+        changed = False
+
+        # Apply MAX_MOVE_CHUNK_MM first so INTERRUPT_CHUNK_MM cap below
+        # sees the new ceiling (operator can raise both in one call).
+        if new_max_move is not None:
+            old = self.max_move_chunk_mm
+            self.max_move_chunk_mm = new_max_move
+            gc.respond_info("BUFFER_SET: max_move_chunk_mm  %.3f -> %.3f mm"
+                            % (old, new_max_move))
+            # Existing interrupt-chunk might now violate the new cap;
+            # never raised, only lowered (mirrors __init__ cap-on-init).
+            if self.interrupt_chunk_mm > self.max_move_chunk_mm:
+                old_ic = self.interrupt_chunk_mm
+                self.interrupt_chunk_mm = self.max_move_chunk_mm
+                gc.respond_info(
+                    "BUFFER_SET: interrupt_chunk_mm capped %.3f -> %.3f mm "
+                    "(<= max_move_chunk_mm=%.3f)"
+                    % (old_ic, self.interrupt_chunk_mm,
+                       self.max_move_chunk_mm))
+            changed = True
+
+        if new_interrupt is not None:
+            old = self.interrupt_chunk_mm
+            # Cap at max_move_chunk_mm — mirrors the init-time check at
+            # buffer_feeder.py:826 (P7-66b). We CAP (not raise) so the
+            # operator can issue a single command without micromanaging
+            # ordering against MAX_MOVE_CHUNK_MM.
+            capped = new_interrupt
+            if capped > self.max_move_chunk_mm:
+                gc.respond_info(
+                    "BUFFER_SET: INTERRUPT_CHUNK_MM=%.3f exceeds "
+                    "max_move_chunk_mm=%.3f — capping"
+                    % (new_interrupt, self.max_move_chunk_mm))
+                capped = self.max_move_chunk_mm
+            self.interrupt_chunk_mm = capped
+            gc.respond_info("BUFFER_SET: interrupt_chunk_mm  %.3f -> %.3f mm"
+                            % (old, capped))
+            changed = True
+
+        if new_chunk is not None:
+            old = self.flush_callback_chunk_mm
+            self.flush_callback_chunk_mm = new_chunk
+            gc.respond_info(
+                "BUFFER_SET: flush_callback_chunk_mm  %.3f -> %.3f mm"
+                % (old, new_chunk))
+            changed = True
+
+        if new_speed is not None:
+            old = self.feed_speed
+            self.feed_speed = new_speed
+            gc.respond_info("BUFFER_SET: feed_speed  %.3f -> %.3f mm/s"
+                            % (old, new_speed))
+            changed = True
+
+        if new_lead is not None:
+            old = self.lead_time
+            self.lead_time = new_lead
+            gc.respond_info("BUFFER_SET: lead_time  %.4f -> %.4f s"
+                            % (old, new_lead))
+            if new_lead > 1.0 or new_lead < 0.05:
+                gc.respond_info(
+                    "BUFFER_SET: WARNING lead_time=%.4f outside typical "
+                    "hardware range 0.05..1.0 s — proceed with caution"
+                    % new_lead)
+            changed = True
+
+        if not changed:
+            # No-op: dump current values so the operator can read the
+            # live picture without a separate command.
+            gc.respond_info("BUFFER_SET: no args — current values:")
+            gc.respond_info("  flush_callback_chunk_mm = %.3f mm"
+                            % self.flush_callback_chunk_mm)
+            gc.respond_info("  feed_speed              = %.3f mm/s"
+                            % self.feed_speed)
+            gc.respond_info("  interrupt_chunk_mm      = %.3f mm"
+                            % self.interrupt_chunk_mm)
+            gc.respond_info("  lead_time               = %.4f s"
+                            % self.lead_time)
+            gc.respond_info("  max_move_chunk_mm       = %.3f mm"
+                            % self.max_move_chunk_mm)
 
     cmd_CALIBRATE_FEEDER_SYNC_help = ("No-op under python-ansatz — feeder is not synced "
                                       "to extruder. Use MEASURE_LOAD_START for distance calibration.")
