@@ -1153,6 +1153,17 @@ class BufferFeeder:
         # nach Stille nicht c=7 Invalid sequence wirft. 0.0 = "noch nie
         # ein Flush gesehen" (Boot-Schutz, kein Override moeglich).
         self._last_mcu_flush_time = 0.0
+        # C-cont T2: ExtruderVelocityTracker fuer SpeedModulator.
+        # Read-only passiver Observer ueber extruder.get_status. Kein
+        # flush_step_generation, kein SYNC -> kein Druckkopf-Pause-
+        # Risiko. Tick-Driver ist _main_tick (50Hz), Tracker drosselt
+        # intern auf sample_interval=0.025s (40Hz).
+        self.velocity_tracker = ExtruderVelocityTracker(
+            owner=self, printer=self.printer,
+            sample_interval=0.025,
+            window_size=0.3,
+            filament_diameter=config.getfloat(
+                'filament_diameter', 1.75, above=0.))
         # P7-54: After OVERFLOW → IDLE → AUTO the stepcompress cursor
         # is out of sync. _main_tick handles the safe resync (forced_t0=None
         # path → flush_step_generation allowed). _on_mcu_flush skips while
@@ -1969,6 +1980,12 @@ class BufferFeeder:
         late-disable, then state-completion handlers, then submit
         helpers (bang-bang / phase3 / continuous / pending-chunks)."""
         try:
+            # C-cont T2: Velocity-Tracker tick (50Hz, intern throttled
+            # auf sample_interval=0.025s = 40Hz). Read-only passiver
+            # Observer ueber extruder.get_status — kein flush, kein
+            # SYNC, kein Side-Effect auf den Druckkopf.
+            self.velocity_tracker.tick(eventtime)
+
             self._check_debounce(eventtime)
 
             # During startup grace, only sensor polling runs. No state
