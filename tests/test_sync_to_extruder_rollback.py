@@ -52,15 +52,15 @@ def test_resume_after_overflow_phase3_overlay_branch(feeder_factory):
     so the cmd_BUFFER_LOAD_PHASE3 while-loop continues spinning, instead
     of falling through to STATE_AUTO and silently returning success."""
     _, feeder = feeder_factory(values={"use_fault_overlay": True}, grace_done=False)
-    feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
-    feeder._overflow_interrupted_state = buffer_feeder.STATE_LOAD_PHASE_3
+    feeder._state = buffer_feeder.STATE_LOADING_PUSH
+    feeder._overflow_interrupted_state = buffer_feeder.STATE_LOADING_PUSH
     feeder._overflow_resume_mm = 50.0
     feeder._entrance_pin_polarity_flip = False
     feeder._pin_stable_state['entrance'] = True
 
     feeder._resume_after_overflow()
 
-    assert feeder._state == buffer_feeder.STATE_LOAD_PHASE_3
+    assert feeder._state == buffer_feeder.STATE_LOADING_PUSH
     assert feeder._overflow_resume_mm == 0.0
 
 
@@ -69,7 +69,7 @@ def test_resume_after_overflow_legacy_phase3_falls_to_auto(feeder_factory):
     NOT trigger — old default-fallthrough path stays untouched."""
     _, feeder = feeder_factory(values={"use_fault_overlay": False}, grace_done=False)
     feeder._state = buffer_feeder.STATE_IDLE
-    feeder._overflow_interrupted_state = buffer_feeder.STATE_LOAD_PHASE_3
+    feeder._overflow_interrupted_state = buffer_feeder.STATE_LOADING_PUSH
     feeder._overflow_resume_mm = 50.0
     feeder._pin_stable_state['entrance'] = True
 
@@ -83,7 +83,7 @@ def test_set_state_idle_clears_overlay_flag(feeder_factory):
     """STOP_BUFFER_FILL / BUFFER_HALT take state→IDLE while HALL1 is
     still asserted. The fault_overflow overlay flag must not leak."""
     _, feeder = feeder_factory(values={"use_fault_overlay": True}, grace_done=False)
-    feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
+    feeder._state = buffer_feeder.STATE_LOADING_PUSH
     feeder._fault_overflow = True
 
     feeder._set_state(buffer_feeder.STATE_IDLE)

@@ -78,7 +78,7 @@ class FakeGCmd:
 def test_phase3_hall1_exit_goes_to_auto_when_print_not_running():
     """Operator-LOAD outside a print: stable-HALL1 → STATE_AUTO."""
     _, feeder = make_feeder()
-    feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
+    feeder._state = buffer_feeder.STATE_LOADING_PUSH
     feeder._load_phase3_overflow_ok = True
     feeder._load_phase3_stable_timeout = 1.0
     feeder._load_phase3_max_distance = 2000.0
@@ -98,7 +98,7 @@ def test_phase3_hall1_exit_goes_to_auto_when_print_not_running():
 def test_phase3_hall2_exit_goes_to_auto_when_print_not_running():
     """Same for the HALL2-stable Exit branch."""
     _, feeder = make_feeder()
-    feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
+    feeder._state = buffer_feeder.STATE_LOADING_PUSH
     feeder._load_phase3_overflow_ok = False
     feeder._load_phase3_stable_timeout = 1.0
     feeder._load_phase3_max_distance = 2000.0
@@ -118,7 +118,7 @@ def test_phase3_hall2_exit_goes_to_auto_when_print_not_running():
 def test_phase3_exit_stays_idle_when_auto_off_by_user():
     """Operator-explicit AUTO_OFF block must still hold."""
     _, feeder = make_feeder()
-    feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
+    feeder._state = buffer_feeder.STATE_LOADING_PUSH
     feeder._load_phase3_overflow_ok = True
     feeder._load_phase3_stable_timeout = 1.0
     feeder._load_phase3_max_distance = 2000.0
@@ -138,7 +138,7 @@ def test_phase3_exit_stays_idle_when_auto_off_by_user():
 def test_phase3_exit_stays_idle_when_no_entrance_filament():
     """Without filament at entrance, IDLE is the safe state."""
     _, feeder = make_feeder()
-    feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
+    feeder._state = buffer_feeder.STATE_LOADING_PUSH
     feeder._load_phase3_overflow_ok = True
     feeder._load_phase3_stable_timeout = 1.0
     feeder._load_phase3_max_distance = 2000.0
@@ -232,7 +232,7 @@ def test_phase3_tick_does_not_submit_while_hall1_active():
     printer, feeder = make_feeder()
     motion_q = printer.lookup_object('motion_queuing')
 
-    feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
+    feeder._state = buffer_feeder.STATE_LOADING_PUSH
     feeder._load_phase3_overflow_ok = True
     feeder._load_phase3_stable_timeout = 5.0   # would let ~3 chunks through pre-fix
     feeder._load_phase3_max_distance = 2000.0
@@ -269,7 +269,7 @@ def test_phase3_tick_resumes_submission_when_hall1_drops():
     printer, feeder = make_feeder()
     motion_q = printer.lookup_object('motion_queuing')
 
-    feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
+    feeder._state = buffer_feeder.STATE_LOADING_PUSH
     feeder._load_phase3_overflow_ok = True
     feeder._load_phase3_stable_timeout = 5.0
     feeder._load_phase3_max_distance = 2000.0
@@ -297,7 +297,7 @@ def test_phase3_tick_exits_when_hall1_stable_timeout_reached():
     """The original happy path stays intact: HALL1 stable for >=
     threshold seconds → state transition to AUTO/IDLE."""
     printer, feeder = make_feeder()
-    feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
+    feeder._state = buffer_feeder.STATE_LOADING_PUSH
     feeder._load_phase3_overflow_ok = True
     feeder._load_phase3_stable_timeout = 1.0   # P7-48 default
     feeder._load_phase3_max_distance = 2000.0

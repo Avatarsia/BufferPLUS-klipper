@@ -174,7 +174,7 @@ def test_post_load_grace_set_on_phase3_overflow_treating_as_full(feeder):
     """When LOAD_PHASE_3 with overflow_ok=1 exits via stable HALL1,
     the grace flag must be set so main_tick doesn't bounce state
     back to OVERFLOW."""
-    feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
+    feeder._state = buffer_feeder.STATE_LOADING_PUSH
     feeder._load_phase3_overflow_ok = True
     feeder._load_phase3_stable_timeout = 1.0
     feeder._load_phase3_hall_overflow_since = 0.0

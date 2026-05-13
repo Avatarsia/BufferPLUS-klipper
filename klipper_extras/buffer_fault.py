@@ -8,9 +8,9 @@ import logging
 
 from ._buffer_common import (
     BUSY_PHASE_STATES,
-    STATE_AUTO, STATE_INITIAL_GRIP, STATE_JAM, STATE_LOAD_PHASE_1,
-    STATE_LOAD_PHASE_3, STATE_MANUAL_RETRACT, STATE_OVERFLOW,
-    STATE_UNLOAD_PHASE_3,
+    STATE_AUTO, STATE_INITIAL_GRIP, STATE_JAM, STATE_LOADING_PULL,
+    STATE_LOADING_PUSH, STATE_MANUAL_RETRACT, STATE_OVERFLOW,
+    STATE_UNLOADING,
 )
 
 
@@ -25,19 +25,19 @@ class FaultManager:
         if not owner.hall_overflow:
             return False
 
-        phase3_overflow_ok = (owner._state == STATE_LOAD_PHASE_3
+        phase3_overflow_ok = (owner._state == STATE_LOADING_PUSH
                               and owner._load_phase3_overflow_ok)
         if context == 'sensor_callback':
             if phase3_overflow_ok:
                 return False
-            if owner._state in (STATE_UNLOAD_PHASE_3, STATE_MANUAL_RETRACT):
+            if owner._state in (STATE_UNLOADING, STATE_MANUAL_RETRACT):
                 return False
             if owner._stepper_synced_to is not None:
                 return False
             return True
         if context == 'main_tick':
             if owner._state in (STATE_OVERFLOW, STATE_MANUAL_RETRACT,
-                                STATE_UNLOAD_PHASE_3):
+                                STATE_UNLOADING):
                 return False
             if phase3_overflow_ok:
                 return False
@@ -99,9 +99,9 @@ class FaultManager:
             owner._maybe_auto_load()
             return
 
-        if interrupted == STATE_LOAD_PHASE_1 and owner._overflow_resume_mm > 0:
+        if interrupted == STATE_LOADING_PULL and owner._overflow_resume_mm > 0:
             owner._enable_stepper()
-            owner._set_state(STATE_LOAD_PHASE_1)
+            owner._set_state(STATE_LOADING_PULL)
             owner._pending_remaining_mm = owner._overflow_resume_mm
             owner._pending_direction = owner._overflow_resume_dir
             owner._pending_speed = owner._overflow_resume_spd
@@ -112,9 +112,9 @@ class FaultManager:
         # still spinning — keep _state=LOAD_PHASE_3 so the loop continues
         # feeding instead of falling through to STATE_AUTO and silently
         # returning success on an aborted phase 3.
-        if (interrupted == STATE_LOAD_PHASE_3
+        if (interrupted == STATE_LOADING_PUSH
                 and owner.use_fault_overlay
-                and owner._state == STATE_LOAD_PHASE_3):
+                and owner._state == STATE_LOADING_PUSH):
             owner._overflow_resume_mm = 0.0
             owner._enable_stepper()
             return

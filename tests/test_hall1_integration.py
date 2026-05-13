@@ -178,13 +178,13 @@ def test_cmd_buffer_load_phase3_with_overflow_ok_skips_hall1_entry_lockout(feede
                 buffer_feeder.STATE_IDLE,
                 buffer_feeder.STATE_AUTO,
                 buffer_feeder.STATE_RUNOUT,
-                buffer_feeder.STATE_LOAD_PHASE_3,
+                buffer_feeder.STATE_LOADING_PUSH,
                 buffer_feeder.STATE_OVERFLOW,
             },
         ),
         ("wait_for_move_done", True),
         "enable_stepper",
-        ("set_state", buffer_feeder.STATE_LOAD_PHASE_3),
+        ("set_state", buffer_feeder.STATE_LOADING_PUSH),
         ("start_continuous_motion", 1, feeder.feed_speed, feeder.max_feed_time),
     ]
     assert feeder._load_phase3_overflow_ok is True

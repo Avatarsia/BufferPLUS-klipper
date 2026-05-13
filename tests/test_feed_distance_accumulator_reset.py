@@ -190,7 +190,7 @@ def test_trigger_jam_resets_accumulator_via_halt_motion():
         # MANUAL_FEED — bypass is gated on STATE_AUTO, backstop active.
         (buffer_feeder.STATE_MANUAL_FEED, True, True),
         # LOAD_PHASE_3 — same: backstop remains active in non-AUTO.
-        (buffer_feeder.STATE_LOAD_PHASE_3, True, True),
+        (buffer_feeder.STATE_LOADING_PUSH, True, True),
         # AUTO + bang-bang — the Issue #26 bypass: SAFETY_DISTANCE is
         # suppressed; SUPPLY_JAM (via _jam_tick) is the correct detector.
         (buffer_feeder.STATE_AUTO, True, False),

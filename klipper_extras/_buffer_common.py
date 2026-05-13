@@ -15,9 +15,9 @@ STATE_INITIAL_GRIP   = "INITIAL_GRIP"
 STATE_AUTO           = "AUTO"
 STATE_MANUAL_FEED    = "MANUAL_FEED"
 STATE_MANUAL_RETRACT = "MANUAL_RETRACT"
-STATE_LOAD_PHASE_1   = "LOAD_PHASE_1"
-STATE_LOAD_PHASE_3   = "LOAD_PHASE_3"
-STATE_UNLOAD_PHASE_3 = "UNLOAD_PHASE_3"
+STATE_LOADING_PULL   = "LOAD_PHASE_1"
+STATE_LOADING_PUSH   = "LOAD_PHASE_3"
+STATE_UNLOADING = "UNLOAD_PHASE_3"
 STATE_OVERFLOW       = "OVERFLOW"
 STATE_RUNOUT         = "RUNOUT"
 STATE_JAM            = "JAM"
@@ -25,19 +25,19 @@ STATE_JAM            = "JAM"
 # States where LOAD/UNLOAD is active — override commands
 # (BUFFER_FEED/RETRACT/AUTO_ON/FORCE_BUFFER_FILL) must refuse.
 BUSY_PHASE_STATES = {STATE_INITIAL_GRIP,
-                     STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_3,
-                     STATE_UNLOAD_PHASE_3}
+                     STATE_LOADING_PULL, STATE_LOADING_PUSH,
+                     STATE_UNLOADING}
 
 # States where the main_tick continuous-feed chunk-pump is allowed
 # to run. In any other state, a stale _continuous_feed must NOT
 # cause new chunks to be submitted — otherwise a previously-active
 # bang-bang or manual dauerfeed leaks into subsequent phases.
 CONTINUOUS_FEED_STATES = {STATE_AUTO, STATE_MANUAL_FEED,
-                          STATE_MANUAL_RETRACT, STATE_LOAD_PHASE_3,
+                          STATE_MANUAL_RETRACT, STATE_LOADING_PUSH,
                           STATE_INITIAL_GRIP}
 
 # States where jam-detection watches for HALL dwell anomalies.
-JAM_WATCH_STATES = {STATE_AUTO, STATE_LOAD_PHASE_3}
+JAM_WATCH_STATES = {STATE_AUTO, STATE_LOADING_PUSH}
 
 
 # ---------------------------------------------------------------------------

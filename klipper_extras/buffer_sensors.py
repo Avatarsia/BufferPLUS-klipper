@@ -6,9 +6,9 @@ from ._buffer_common import (
     BUTTON_FEED, BUTTON_RETRACT,
     CLICK_DOUBLE, CLICK_SINGLE, CLICK_TRIPLE,
     STATE_AUTO, STATE_IDLE, STATE_INITIAL_GRIP, STATE_JAM,
-    STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_3, STATE_MANUAL_FEED,
+    STATE_LOADING_PULL, STATE_LOADING_PUSH, STATE_MANUAL_FEED,
     STATE_MANUAL_RETRACT, STATE_OVERFLOW, STATE_RUNOUT,
-    STATE_UNLOAD_PHASE_3,
+    STATE_UNLOADING,
 )
 
 
@@ -248,8 +248,8 @@ class HallSensorMonitor:
     def on_entrance_runout(self, eventtime):
         owner = self.owner
         owner._entrance_was_empty = True
-        if owner._state in (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_3,
-                            STATE_UNLOAD_PHASE_3, STATE_MANUAL_FEED,
+        if owner._state in (STATE_LOADING_PULL, STATE_LOADING_PUSH,
+                            STATE_UNLOADING, STATE_MANUAL_FEED,
                             STATE_MANUAL_RETRACT):
             return
 
@@ -318,8 +318,8 @@ class HallSensorMonitor:
             and owner._state != STATE_JAM
         )
 
-        block_states = (STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_3,
-                        STATE_UNLOAD_PHASE_3, STATE_OVERFLOW, STATE_JAM,
+        block_states = (STATE_LOADING_PULL, STATE_LOADING_PUSH,
+                        STATE_UNLOADING, STATE_OVERFLOW, STATE_JAM,
                         STATE_INITIAL_GRIP)
         if owner._state in block_states and not retract_overflow_override:
             hint = ""
@@ -327,8 +327,8 @@ class HallSensorMonitor:
                 hint = " — fix the cause, then BUFFER_CLEAR_JAM"
             elif owner._state == STATE_OVERFLOW:
                 hint = " — clear HALL1 (lockout releases automatically); retract button is allowed"
-            elif owner._state in (STATE_LOAD_PHASE_1,
-                                  STATE_LOAD_PHASE_3, STATE_UNLOAD_PHASE_3):
+            elif owner._state in (STATE_LOADING_PULL,
+                                  STATE_LOADING_PUSH, STATE_UNLOADING):
                 hint = " — wait for LOAD/UNLOAD to finish, or BUFFER_HALT"
             elif owner._state == STATE_INITIAL_GRIP:
                 hint = " — wait for grip to finish, or STOP_BUFFER_FILL"

@@ -24,12 +24,12 @@ def configure_hall1_context(
         (
             {
                 "hall_active": True,
-                "state": buffer_feeder.STATE_LOAD_PHASE_3,
+                "state": buffer_feeder.STATE_LOADING_PUSH,
                 "load_phase3_overflow_ok": True,
             },
             False,
         ),
-        ({"hall_active": True, "state": buffer_feeder.STATE_UNLOAD_PHASE_3}, False),
+        ({"hall_active": True, "state": buffer_feeder.STATE_UNLOADING}, False),
         ({"hall_active": True, "state": buffer_feeder.STATE_MANUAL_RETRACT}, False),
         ({"hall_active": True, "synced_to": "extruder"}, False),
         ({"hall_active": True}, True),
@@ -55,11 +55,11 @@ def test_is_hall1_active_sensor_callback(feeder, case, expected):
         ({"hall_active": False}, False),
         ({"hall_active": True, "state": buffer_feeder.STATE_OVERFLOW}, False),
         ({"hall_active": True, "state": buffer_feeder.STATE_MANUAL_RETRACT}, False),
-        ({"hall_active": True, "state": buffer_feeder.STATE_UNLOAD_PHASE_3}, False),
+        ({"hall_active": True, "state": buffer_feeder.STATE_UNLOADING}, False),
         (
             {
                 "hall_active": True,
-                "state": buffer_feeder.STATE_LOAD_PHASE_3,
+                "state": buffer_feeder.STATE_LOADING_PUSH,
                 "load_phase3_overflow_ok": True,
             },
             False,
@@ -91,7 +91,7 @@ def test_is_hall1_active_main_tick(feeder, case, expected):
             "submit_move",
             {
                 "hall_active": True,
-                "state": buffer_feeder.STATE_LOAD_PHASE_3,
+                "state": buffer_feeder.STATE_LOADING_PUSH,
                 "load_phase3_overflow_ok": True,
             },
             False,

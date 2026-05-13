@@ -435,7 +435,7 @@ def test_c_cont_hall1_in_auto_defers_no_state_change(monkeypatch):
 def test_c_cont_hall1_in_load_keeps_immediate_overflow(monkeypatch):
     """Nicht-AUTO-State + HALL1-Edge -> sofortiger OVERFLOW."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
-    feeder._state = buffer_feeder.STATE_LOAD_PHASE_1
+    feeder._state = buffer_feeder.STATE_LOADING_PULL
     set_sensor_active(feeder, 'hall_overflow', True)
     _fire_hall1_callback(feeder)
     # In LOAD-Phase soll HALL1 sofort OVERFLOW triggern

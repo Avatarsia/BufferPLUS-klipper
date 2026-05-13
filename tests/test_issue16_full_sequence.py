@@ -76,7 +76,7 @@ def test_full_load_unload_sequence_no_invalid_sequence():
     set_sensor_active(feeder, 'hall_overflow', True)
 
     # ---------------- Phase 3 stable-HALL1 exit (treating as full) ----
-    feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
+    feeder._state = buffer_feeder.STATE_LOADING_PUSH
     feeder._load_phase3_overflow_ok = True
     feeder._load_phase3_stable_timeout = 1.0
     feeder._load_phase3_hall_overflow_since = 0.0

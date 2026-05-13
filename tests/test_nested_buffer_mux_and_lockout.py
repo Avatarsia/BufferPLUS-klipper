@@ -85,9 +85,9 @@ def test_runout_during_load_phase_does_not_pause(feeder_factory):
     state list would silently pause the print mid-phase."""
     # P7-55b: STATE_LOAD_PHASE_2 entfernt mit cmd_BUFFER_LOAD_PHASE2.
     suppressed_states = (
-        buffer_feeder.STATE_LOAD_PHASE_1,
-        buffer_feeder.STATE_LOAD_PHASE_3,
-        buffer_feeder.STATE_UNLOAD_PHASE_3,
+        buffer_feeder.STATE_LOADING_PULL,
+        buffer_feeder.STATE_LOADING_PUSH,
+        buffer_feeder.STATE_UNLOADING,
         buffer_feeder.STATE_MANUAL_FEED,
         buffer_feeder.STATE_MANUAL_RETRACT,
     )

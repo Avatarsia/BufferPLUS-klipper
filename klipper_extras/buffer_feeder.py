@@ -38,9 +38,9 @@ from ._buffer_common import (
     MAIN_TICK_INTERVAL, MAX_T0_LOOKAHEAD_S, REPRIME_GAP_S,
     STABLE_DROP_GRACE,
     STATE_AUTO, STATE_IDLE, STATE_INIT, STATE_INITIAL_GRIP,
-    STATE_JAM, STATE_LOAD_PHASE_1, STATE_LOAD_PHASE_3,
+    STATE_JAM, STATE_LOADING_PULL, STATE_LOADING_PUSH,
     STATE_MANUAL_FEED, STATE_MANUAL_RETRACT, STATE_OVERFLOW,
-    STATE_RUNOUT, STATE_UNLOAD_PHASE_3,
+    STATE_RUNOUT, STATE_UNLOADING,
 )
 
 
@@ -1038,7 +1038,7 @@ class BufferFeeder:
         # cmd loop terminates via fault_overflow check, postcheck raises
         # like the legacy STATE_OVERFLOW path.
         self._fault_overflow = True
-        if self.use_fault_overlay and self._state == STATE_LOAD_PHASE_3:
+        if self.use_fault_overlay and self._state == STATE_LOADING_PUSH:
             return
         self._set_state(STATE_OVERFLOW)
 
@@ -1068,7 +1068,7 @@ class BufferFeeder:
         # restarting the interrupted phase3 move via _overflow_resume_*.
         if (self.use_fault_overlay
                 and self._fault_overflow
-                and self._state == STATE_LOAD_PHASE_3):
+                and self._state == STATE_LOADING_PUSH):
             self._fault_overflow = False
             self._respond("HALL1 cleared — overflow lockout released (overlay)")
             self._resume_after_overflow()
@@ -1546,7 +1546,7 @@ class BufferFeeder:
             self._tick_runout_follow(eventtime)
 
             # LOAD Phase 3 — feed until HALL2 or max distance.
-            if self._state == STATE_LOAD_PHASE_3:
+            if self._state == STATE_LOADING_PUSH:
                 self._load_phase3_tick(eventtime)
 
             # Continuous feed: keep chunks streaming, but only in
@@ -3144,7 +3144,7 @@ class BufferFeeder:
         self._halt_requested = False    # ack any stale console HALT
         self._raise_if_locked_out(gcmd)
         self._check_phase_entry('LOAD_PHASE1', {
-            STATE_IDLE, STATE_AUTO, STATE_RUNOUT, STATE_LOAD_PHASE_1,
+            STATE_IDLE, STATE_AUTO, STATE_RUNOUT, STATE_LOADING_PULL,
         })
         distance = gcmd.get_float('DISTANCE', self.load_fast_distance, above=0.)
         speed    = gcmd.get_float('SPEED',    self.load_fast_speed,    above=0.)
@@ -3152,7 +3152,7 @@ class BufferFeeder:
         # any in-flight chunk so residual motion doesn't extend Phase 1.
         self._continuous_feed = False
         self._wait_for_move_done(gcmd)
-        self._set_state(STATE_LOAD_PHASE_1)
+        self._set_state(STATE_LOADING_PULL)
         self._enable_stepper()
         self._submit_move(+distance, speed)
         # Blocking: wait for move done, but pause-and-resume on HALL1 overflow
@@ -3214,7 +3214,7 @@ class BufferFeeder:
         # Vorgaenger-State (das aufrufende Macro hat das vorher
         # abgesichert via Status-Check).
         allowed_states = {STATE_IDLE, STATE_AUTO, STATE_RUNOUT,
-                          STATE_LOAD_PHASE_3}
+                          STATE_LOADING_PUSH}
         if overflow_ok:
             allowed_states.add(STATE_OVERFLOW)
         self._check_phase_entry('LOAD_PHASE3', allowed_states)
@@ -3251,14 +3251,14 @@ class BufferFeeder:
                      stable_timeout, overflow_ok, chunk_distance,
                      self.hall_overflow, self.hall_full, self._state)
         self._enable_stepper()
-        self._set_state(STATE_LOAD_PHASE_3)
+        self._set_state(STATE_LOADING_PUSH)
         self._start_continuous_motion(+1, speed, self.max_feed_time)
-        # Block until the tick-driven state machine exits STATE_LOAD_PHASE_3.
+        # Block until the tick-driven state machine exits STATE_LOADING_PUSH.
         # P7-35 fault-overlay: in overlay mode HALL1 sets _fault_overflow
         # without state change, so the overlay flag is an additional exit
         # condition. _exit_overflow clears it; postcheck below raises if
         # HALL1 is still asserted.
-        while (self._state == STATE_LOAD_PHASE_3
+        while (self._state == STATE_LOADING_PUSH
                and not (self.use_fault_overlay and self._fault_overflow)):
             self.reactor.pause(self.reactor.monotonic() + 0.1)
         # Postcheck: JAM bleibt absolut. Bei overflow_ok haben wir den
@@ -3372,7 +3372,7 @@ class BufferFeeder:
         self._raise_if_locked_out(gcmd, direction=-1)
         # OVERFLOW/JAM erlaubt fuer Retract-Recovery.
         self._check_phase_entry('UNLOAD_PHASE3', {
-            STATE_IDLE, STATE_AUTO, STATE_RUNOUT, STATE_UNLOAD_PHASE_3,
+            STATE_IDLE, STATE_AUTO, STATE_RUNOUT, STATE_UNLOADING,
             STATE_OVERFLOW, STATE_JAM,
         })
         max_distance = gcmd.get_float('MAX_DISTANCE', self.unload_fast_max, above=0.)
@@ -3382,7 +3382,7 @@ class BufferFeeder:
         # any in-flight move so residual motion doesn't join the retract.
         self._continuous_feed = False
         self._wait_for_move_done(gcmd, direction=-1)
-        self._set_state(STATE_UNLOAD_PHASE_3)
+        self._set_state(STATE_UNLOADING)
         self._enable_stepper()
         retracted = 0.0
         overshoot = False

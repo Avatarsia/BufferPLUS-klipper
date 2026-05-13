@@ -86,7 +86,7 @@ def test_load_phase1_happy_path_transitions_through_phase1(monkeypatch):
 
     feeder.cmd_BUFFER_LOAD_PHASE1(FakeGCmd({"DISTANCE": 100, "SPEED": 50}))
 
-    assert buffer_feeder.STATE_LOAD_PHASE_1 in states
+    assert buffer_feeder.STATE_LOADING_PULL in states
     assert feeder._state == buffer_feeder.STATE_IDLE
 
 
@@ -144,7 +144,7 @@ def test_cmd_buffer_feed_reject_paths(scenario):
         elif scenario == "in_busy_phase":
             # LOAD_PHASE_1, LOAD_PHASE_3 etc. block manual feed — operator
             # must explicitly STOP_BUFFER_FILL first.
-            feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
+            feeder._state = buffer_feeder.STATE_LOADING_PUSH
         gcmd = FakeGCmd({"DISTANCE": 50})
 
     with pytest.raises(Exception):
@@ -248,7 +248,7 @@ def test_cmd_force_buffer_fill_reject_paths(scenario):
     elif scenario == "when_busy":
         # LOAD_PHASE_3 / MANUAL_FEED etc. — only IDLE/RUNOUT allowed.
         set_sensor_active(feeder, 'entrance', True)
-        feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
+        feeder._state = buffer_feeder.STATE_LOADING_PUSH
 
     with pytest.raises(Exception):
         feeder.cmd_FORCE_BUFFER_FILL(FakeGCmd())
