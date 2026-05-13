@@ -97,3 +97,32 @@ def test_c_cont_tracker_tick_in_main_tick(monkeypatch):
         lambda t: tick_calls.append(t))
     feeder._main_tick(eventtime=10.0)
     assert 10.0 in tick_calls
+
+
+# ===========================================================================
+# C-cont T3: cfg-Params
+# ===========================================================================
+
+
+def test_c_cont_cfg_params_loaded(monkeypatch):
+    """Neue cfg-Params werden gelesen mit Defaults."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    assert hasattr(feeder, 'max_feed_speed')
+    assert feeder.max_feed_speed == 100.0
+    assert hasattr(feeder, 'hall1_persist_timeout')
+    assert feeder.hall1_persist_timeout == 2.0
+    assert hasattr(feeder, 'buffer_debug_metrics')
+    assert feeder.buffer_debug_metrics is False
+
+
+def test_c_cont_cfg_params_custom(monkeypatch):
+    """Custom cfg-Params funktionieren."""
+    overrides = {
+        'max_feed_speed': 80.0,
+        'hall1_persist_timeout': 3.0,
+        'buffer_debug_metrics': True,
+    }
+    printer, feeder = make_c_cont_feeder(monkeypatch, cfg_overrides=overrides)
+    assert feeder.max_feed_speed == 80.0
+    assert feeder.hall1_persist_timeout == 3.0
+    assert feeder.buffer_debug_metrics is True

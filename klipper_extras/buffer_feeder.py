@@ -940,6 +940,25 @@ class BufferFeeder:
             'interrupt_chunk_mm', 9.0, above=0.)
         if self.interrupt_chunk_mm > self.max_move_chunk_mm:
             self.interrupt_chunk_mm = self.max_move_chunk_mm
+        # C-cont T3: max_feed_speed = Cap fuer SpeedModulator-Output.
+        # Bei extruder_velocity * factor sollte das Stepper-Hardware-Limit
+        # nicht ueberschritten werden. Default 100 mm/s (deutlich ueber
+        # Default feed_speed=30, lll.cfg-Wert=70).
+        self.max_feed_speed = config.getfloat(
+            'max_feed_speed', 100.0, above=0.)
+        if self.max_feed_speed < self.feed_speed:
+            raise config.error(
+                "max_feed_speed (%.1f) must be >= feed_speed (%.1f)"
+                % (self.max_feed_speed, self.feed_speed))
+        # C-cont T3: HALL1-Persist-Timeout. HALL1 (Ueberlast) im STATE_AUTO
+        # loest erst nach diesem Timeout den echten OVERFLOW-State aus.
+        # In der Zwischenzeit setzt SpeedModulator nur target_speed=0.
+        self.hall1_persist_timeout = config.getfloat(
+            'hall1_persist_timeout', 2.0, above=0.)
+        # C-cont T3: Diagnostik-Logs (Buffer-Metrics alle 1s, Per-Submit-
+        # DEBUG). Default off fuer Production.
+        self.buffer_debug_metrics = config.getboolean(
+            'buffer_debug_metrics', False)
         # P7-70 (Issue #12): Interval after which an IDLE stepper gets a
         # micro-anchor move to refresh stepcompress's last_step_clock.
         # Background: STATE_IDLE has no periodic move activity. After
