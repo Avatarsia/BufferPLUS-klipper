@@ -265,7 +265,22 @@ class HallSensorMonitor:
                 owner._mark_hall1_cleared()
                 owner._exit_overflow()
         elif name == 'hall_full':
-            pass
+            if owner.hall_full:
+                # C-cont T7 fix: HALL2 rising edge — buffer "full-edge".
+                # Replacement for the P7-63 (Issue #26) accumulator
+                # reset that previously lived in _on_mcu_flush's
+                # hall_full branch in the bang-bang block. In
+                # continuous-streaming HALL2 is only a speed-modulator
+                # input (no state transition), so the reset must be
+                # surfaced here as an explicit edge event. Without it
+                # _feed_distance_accumulator grows monotonically over
+                # long sessions and trips a false JAM_SAFETY_DISTANCE
+                # (relevant in legacy-AUTO without bang-bang and in
+                # LOAD/MANUAL paths where SAFETY_DISTANCE is still
+                # armed; STATE_AUTO + use_flush_callback_bang_bang
+                # bypasses it via P7-63 stelle 6 but defense-in-depth
+                # is cheap).
+                owner._feed_distance_accumulator = 0.0
         elif name == 'hall_empty':
             pass
         elif name == 'entrance':
@@ -1163,7 +1178,15 @@ class BufferFeeder:
         self._continuous_feed = False       # True = keep submitting moves while active
         self._continuous_feed_direction = 0 # +1 or -1
         self._continuous_feed_speed = 0.0
-        self._auto_between_since = None     # sustained HALL3-leave in AUTO
+        # Tracked HALL3-leave grace timer in the legacy bang-bang AUTO
+        # path (P7-63 stelle 3). C-cont T7 removed the read sites in
+        # _on_mcu_flush — the field is now dead in continuous-streaming
+        # but kept (a) for compatibility with the existing P7-63 test
+        # surface which still writes/asserts on it as a regression
+        # guard against a future legacy path re-emergence, and (b)
+        # because _halt_motion still clears it for free (defense in
+        # depth on the stop paths).
+        self._auto_between_since = None     # dead in C-cont, see comment
         self._pending_disable = False       # deferred stepper disable (while move in flight)
         # P7-70 (Issue #12): timestamp of the last idle-watchdog anchor.
         # Gates the watchdog so it fires at most every idle_anchor_gap
@@ -2799,48 +2822,50 @@ class BufferFeeder:
         if self._is_hall1_active('submit_move'):
             return
 
-        # C-cont T7: Continuous-Streaming-Submit ersetzt den frueheren
-        # Bang-Bang-Block (hall_full/hall_empty/else mit STABLE_DROP_-
-        # GRACE). Jede flush-callback bestimmt die target_speed via
-        # SpeedModulator (_compute_target_feed_speed) aus HALL-Sensor-
-        # Kombination + ExtruderVelocityTracker. Submit nur wenn
-        # target_speed > 0; sonst kein Move (Notbremse oder Modulator
-        # entscheidet, dass aktuell kein Foerder-Bedarf besteht).
+        # C-cont T7: Continuous-streaming submit replaces the former
+        # bang-bang block (hall_full / hall_empty / else with
+        # STABLE_DROP_GRACE). Every flush-callback computes target_-
+        # speed via SpeedModulator (_compute_target_feed_speed) from
+        # the HALL-sensor combination + ExtruderVelocityTracker.
+        # Submit only when target_speed > 0; otherwise no move
+        # (emergency brake, or modulator decided no feed demand right
+        # now).
         #
-        # Lookahead-Pipeline (P7-66 Streaming-Pattern) bleibt: ein
-        # neuer Chunk wird erst eingereiht, wenn der laufende Move
-        # weniger als lead_time Restzeit hat; sub-chunk-Pipeline
-        # (_pending_remaining_mm) gates weiter wie bisher (HALL2-
-        # Interrupt via move-splitting).
+        # Lookahead pipeline (P7-66 streaming pattern) is preserved:
+        # a new chunk is only queued when the running move has less
+        # than lead_time remaining; the sub-chunk pipeline
+        # (_pending_remaining_mm) still gates as before (HALL2
+        # interrupt via move splitting).
         target_speed = self._compute_target_feed_speed()
         if target_speed <= 0.0:
             if self.buffer_debug_metrics:
                 logging.debug(
-                    "buffer_feeder: target_speed=0 - kein Submit "
+                    "buffer_feeder: target_speed=0 - no submit "
                     "(hall1=%s ready=%s)",
                     self.hall_overflow,
                     self.velocity_tracker.is_ready())
             return
 
-        # Lookahead-Check: laeuft noch ein Move? P7-66 Streaming-Pattern.
+        # Lookahead check: is a move still in flight? P7-66 streaming
+        # pattern.
         move_active = self._move_in_flight()
         if move_active:
             remaining = self._last_move_end_time - step_gen_time
             if remaining > self.lead_time:
-                return  # noch frueh, kein neuer Chunk
+                return  # too early, no new chunk yet
         if self._pending_remaining_mm > 0:
-            return  # Sub-Chunk-Pipeline laeuft
+            return  # sub-chunk pipeline already running
 
-        # Anchor wie in Bang-Bang (P7-66 Pattern).
+        # Anchor as in bang-bang (P7-66 pattern).
         if move_active:
             anchor = self._last_move_end_time
         else:
             anchor = step_gen_time + self.lead_time
 
-        # C-cont T7: continuous_feed bleibt strukturell True im Stream-
-        # Mode. Reset nur bei echtem Uebergang inactive->active
-        # (P7-57: Safety-Distance-Accumulator-Reset; P7-61b:
-        # _feed_deadline_time-Reset).
+        # C-cont T7: continuous_feed stays structurally True in stream
+        # mode. Reset only on a real inactive->active transition
+        # (P7-57: safety-distance accumulator reset; P7-61b:
+        # _feed_deadline_time reset).
         if not self._continuous_feed:
             self._feed_distance_accumulator = 0.0
             self._feed_deadline_time = None

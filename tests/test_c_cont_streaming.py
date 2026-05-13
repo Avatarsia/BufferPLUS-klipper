@@ -348,3 +348,46 @@ def test_c_cont_hall1_active_no_submit(monkeypatch):
     submits = _capture_submits(feeder, monkeypatch)
     feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
     assert len(submits) == 0
+
+
+# ===========================================================================
+# C-cont T7 followup: HALL2-rising-edge accumulator reset
+# (replacement for P7-63 hall_full branch in bang-bang _on_mcu_flush)
+# ===========================================================================
+
+
+def _fire_hall2_callback(feeder, eventtime=0.0):
+    """Fire the stable-sensor callback for hall_full after set_sensor_-
+    active has set the _pin_stable_state. Mirror of _fire_hall1_callback
+    for the hall_full branch."""
+    raw = feeder._pin_stable_state['hall_full']
+    feeder.sensors.on_stable_sensor_change(eventtime, 'hall_full', raw)
+
+
+def test_c_cont_hall2_edge_resets_accumulator(monkeypatch):
+    """HALL2-rising-edge resettet _feed_distance_accumulator
+    (Replacement fuer P7-63 hall_full-reset)."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    feeder._feed_distance_accumulator = 500.0  # Simuliere lange Session
+    set_sensor_active(feeder, 'hall_full', True)
+    _fire_hall2_callback(feeder)
+    assert feeder._feed_distance_accumulator == 0.0
+
+
+def test_c_cont_hall2_falling_edge_does_not_reset(monkeypatch):
+    """HALL2 falling edge MUST NOT reset accumulator (only rising edge
+    represents the 'buffer full' confirmation that warrants the reset).
+    Without this guard, a buffer arm bouncing around HALL2 would reset
+    the accumulator on every bounce — fine for the safety-distance
+    semantics, but not what the original P7-63 design intended."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    # Start: HALL2 active, accumulator full from prior session.
+    set_sensor_active(feeder, 'hall_full', True)
+    feeder._feed_distance_accumulator = 300.0
+    # Falling edge: HALL2 -> inactive (arm dropped out of full zone).
+    set_sensor_active(feeder, 'hall_full', False)
+    _fire_hall2_callback(feeder)
+    # Accumulator should be untouched on falling edge.
+    assert feeder._feed_distance_accumulator == 300.0
