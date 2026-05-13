@@ -152,15 +152,18 @@ def test_c_cont_modulator_hall1_zero(monkeypatch):
 
 
 def test_c_cont_modulator_hall3_max(monkeypatch):
-    """Hotfix5: HALL3 active (Buffer leer) -> feed_speed (sanfter
-    Initial-Fill statt max_feed_speed=100 — letzteres ueberschiesst
-    Arm in 1 Sub-Chunk von HALL3 nach HALL1)."""
+    """Hotfix6: HALL3 active (Buffer leer) -> 30.0 mm/s konstant
+    (sanfter Initial-Fill). Hotfix5 nutzte feed_speed=70, was
+    HALL3->HALL1 ueberschoss (Hardware-Beleg klippy_real.log
+    2026-05-13: 6+ Cycles HALL3->HALL1, c=16 crash). Hotfix6:
+    30 mm/s gibt 300ms Push-Zeit pro 5mm Sub-Chunk -> HALL2 hat
+    Zeit zum Trigger."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
     _populate_tracker_to_ready(feeder, velocity=15.0)
-    assert feeder._compute_target_feed_speed() == feeder.feed_speed
+    assert feeder._compute_target_feed_speed() == 30.0
 
 
 def test_c_cont_modulator_hall2_half(monkeypatch):
@@ -252,9 +255,10 @@ def test_c_cont_hotfix4_stalled_toolhead_no_submit_in_full_buffer(monkeypatch):
 
 
 def test_c_cont_hotfix4_stalled_but_hall_empty_still_fills(monkeypatch):
-    """Hotfix5: HALL3 active + Toolhead stalled -> foerdere TROTZDEM
-    (Buffer wirklich leer). Hotfix5-Update: feed_speed statt
-    max_feed_speed (sanfter Initial-Fill)."""
+    """Hotfix6: HALL3 active + Toolhead stalled -> foerdere TROTZDEM
+    (Buffer wirklich leer). Hotfix6-Update: 30.0 mm/s konstant statt
+    feed_speed (sanfter Initial-Fill, vermeidet HALL3->HALL1
+    Durchschuss)."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'hall_full', False)
@@ -266,8 +270,8 @@ def test_c_cont_hotfix4_stalled_but_hall_empty_still_fills(monkeypatch):
         feeder.velocity_tracker.tick(t)
         t += 0.025
     assert feeder.velocity_tracker.get_velocity() == 0.0
-    # HALL3 dominiert -> feed_speed (vor not_ready/stalled-Checks)
-    assert feeder._compute_target_feed_speed() == feeder.feed_speed
+    # HALL3 dominiert -> 30.0 (vor not_ready/stalled-Checks)
+    assert feeder._compute_target_feed_speed() == 30.0
 
 
 def test_c_cont_hotfix4_not_ready_no_submit_in_full(monkeypatch):
@@ -282,14 +286,14 @@ def test_c_cont_hotfix4_not_ready_no_submit_in_full(monkeypatch):
 
 
 def test_c_cont_hotfix4_not_ready_but_hall_empty_uses_fallback(monkeypatch):
-    """Hotfix5: tracker not_ready + HALL3 -> feed_speed (sanfter
-    Initial-Fill statt max_feed_speed)."""
+    """Hotfix6: tracker not_ready + HALL3 -> 30.0 mm/s (sanfter
+    Initial-Fill, Hotfix6-Konstante statt feed_speed)."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
     assert not feeder.velocity_tracker.is_ready()
-    assert feeder._compute_target_feed_speed() == feeder.feed_speed
+    assert feeder._compute_target_feed_speed() == 30.0
 
 
 # ---------------------------------------------------------------------------
@@ -369,15 +373,18 @@ def test_c_cont_hotfix5_hall2_returns_zero(monkeypatch):
     assert feeder._compute_target_feed_speed() == 0.0
 
 
-def test_c_cont_hotfix5_hall3_uses_feed_speed_not_max(monkeypatch):
-    """Hotfix5: HALL3 nutzt feed_speed (sanfter Initial-Fill statt
-    max_feed_speed=100, das den Arm in 1 Sub-Chunk von HALL3 nach
-    HALL1 ueberschoss)."""
-    printer, feeder = make_c_cont_feeder(monkeypatch)
+def test_c_cont_hotfix6_hall3_uses_30_not_feed_speed(monkeypatch):
+    """Hotfix6: HALL3 nutzt feste 30.0 mm/s (statt feed_speed=70).
+    Hotfix5 nutzte feed_speed; das war immer noch zu schnell und
+    schoss in 130ms HALL3->HALL1 durch (Hardware-Beleg
+    klippy_real.log 2026-05-13)."""
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'feed_speed': 70.0})
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
-    assert feeder._compute_target_feed_speed() == feeder.feed_speed
+    assert feeder._compute_target_feed_speed() == 30.0
+    assert feeder._compute_target_feed_speed() != feeder.feed_speed
     assert feeder._compute_target_feed_speed() != feeder.max_feed_speed
 
 
@@ -518,8 +525,9 @@ def _capture_submits(feeder, monkeypatch):
 def test_c_cont_continuous_streaming_in_auto(monkeypatch):
     """STATE_AUTO + HALL3 stable + tracker ready -> Submit bei jedem flush.
 
-    Hotfix5: HALL3-Submit nutzt feed_speed (lll=70) statt
-    max_feed_speed (100) — sanfter Initial-Fill verhindert Overshoot."""
+    Hotfix6: HALL3-Submit nutzt feste 30.0 mm/s (statt feed_speed=70
+    in Hotfix5) — sanfter Initial-Fill verhindert HALL3->HALL1
+    Durchschuss in 130ms."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     feeder._state = buffer_feeder.STATE_AUTO
     set_sensor_active(feeder, 'hall_empty', True)
@@ -530,21 +538,21 @@ def test_c_cont_continuous_streaming_in_auto(monkeypatch):
     feeder._pending_remaining_mm = 0.0
     feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
     assert len(submits) == 1
-    assert submits[0]['speed'] == feeder.feed_speed
+    assert submits[0]['speed'] == 30.0
 
 
 def test_c_cont_speed_modulation_via_hall_state(monkeypatch):
     """HALL-State-Change zwischen flushes -> Speed-Aenderung.
 
-    Hotfix5:
-    - HALL3 -> feed_speed (sanfter Initial-Fill)
+    Hotfix6:
+    - HALL3 -> 30.0 mm/s (sanfter Initial-Fill, Hotfix6-Konstante)
     - HALL2 -> 0.0 (kein Submit, Buffer voll = drain ueber Toolhead)
     """
     printer, feeder = make_c_cont_feeder(monkeypatch)
     feeder._state = buffer_feeder.STATE_AUTO
     _populate_tracker_to_ready(feeder, velocity=40.0)
     submits = _capture_submits(feeder, monkeypatch)
-    # HALL3 -> feed_speed
+    # HALL3 -> 30.0
     set_sensor_active(feeder, 'hall_empty', True)
     feeder._last_move_end_time = 0.0
     feeder._pending_remaining_mm = 0.0
@@ -556,7 +564,7 @@ def test_c_cont_speed_modulation_via_hall_state(monkeypatch):
     feeder._on_mcu_flush(flush_time=10.5, step_gen_time=10.5)
     # Nur 1 Submit (HALL3), HALL2 ist Skip
     assert len(submits) == 1
-    assert submits[0]['speed'] == feeder.feed_speed
+    assert submits[0]['speed'] == 30.0
 
 
 def test_c_cont_hall1_active_no_submit(monkeypatch):
@@ -820,13 +828,15 @@ def test_c_cont_continuous_feed_persists_through_hall_state_change(monkeypatch):
 
 
 def test_c_cont_hotfix3_pipeline_one_chunk_only(monkeypatch):
-    """Hotfix3 Fix 2: _on_mcu_flush submittet interrupt_chunk_mm (9)
-    statt flush_callback_chunk_mm (45). Pipeline maximal 1 Sub-Chunk
-    in-flight. HALL1-Trigger stoppt die Pipeline sofort beim
-    naechsten flush-callback (Hardware 2026-05-13 klippy(9), 30/30
-    Cycles HALL1-Overshoot-Storm fix).
+    """Hotfix3 Fix 2: _on_mcu_flush submittet interrupt_chunk_mm
+    (Hotfix6 default: 5mm) statt flush_callback_chunk_mm (45).
+    Pipeline maximal 1 Sub-Chunk in-flight. HALL1-Trigger stoppt
+    die Pipeline sofort beim naechsten flush-callback (Hardware
+    2026-05-13 klippy(9), 30/30 Cycles HALL1-Overshoot-Storm fix).
 
-    Hotfix5: HALL3-Speed ist jetzt feed_speed statt max_feed_speed."""
+    Hotfix6: HALL3-Speed ist jetzt 30.0 mm/s konstant (statt
+    feed_speed=70 in Hotfix5) + interrupt_chunk_mm default 5mm
+    (statt 9mm in Hotfix5)."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     feeder._state = buffer_feeder.STATE_AUTO
     set_sensor_active(feeder, 'hall_empty', True)
@@ -836,11 +846,13 @@ def test_c_cont_hotfix3_pipeline_one_chunk_only(monkeypatch):
     feeder._pending_remaining_mm = 0.0
     feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
     assert len(submits) == 1
-    # Hotfix3: Submit-Distanz = interrupt_chunk_mm (9), nicht
-    # flush_callback_chunk_mm (Default 15, lll.cfg 45):
+    # Hotfix6: Submit-Distanz = interrupt_chunk_mm (default 5), nicht
+    # flush_callback_chunk_mm:
     assert submits[0]['distance'] == feeder.interrupt_chunk_mm
-    # Hotfix5: Speed = feed_speed (HALL3-Branch sanfter Initial-Fill)
-    assert submits[0]['speed'] == feeder.feed_speed
+    assert feeder.interrupt_chunk_mm == 5.0  # Hotfix6 default
+    # Hotfix6: Speed = 30.0 (HALL3-Branch sanfter Initial-Fill,
+    # Konstante statt feed_speed)
+    assert submits[0]['speed'] == 30.0
     # submit_chunk_cap bleibt gesetzt (defense-in-depth fuer Safety-
     # Pfade, falls _submit_move spaeter doch in Sub-Chunk-Stream
     # gerinnt — Continuous-Mode selbst nutzt kein Pending mehr):
@@ -890,5 +902,51 @@ def test_c_cont_hotfix3_no_pending_remaining_in_continuous(monkeypatch):
     feeder._last_move_end_time = 0.0
     feeder._pending_remaining_mm = 0.0
     feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
-    # Nach Submit: kein pending (Submit-Distanz = Cap-Distanz = 9mm)
+    # Nach Submit: kein pending (Submit-Distanz = Cap-Distanz, Hotfix6 5mm)
     assert feeder._pending_remaining_mm == 0.0
+
+
+# ===========================================================================
+# C-cont Hotfix6 (2026-05-13 klippy_real.log Hotfix5-aktiv):
+#   Layer 1: HALL3-Refill-Speed feste Konstante 30.0 mm/s (statt feed_speed).
+#   Layer 2: interrupt_chunk_mm Default 5.0 mm (statt 9.0 mm).
+#   Beleg: 6+ Cycles HALL3->HALL1 in 30s, stepcompress c=16 Crash mit
+#   Hotfix5-Settings (feed_speed=70, interrupt_chunk_mm=9). 9mm @ 70 =
+#   130ms war zu kurz fuer HALL2-Detection. Hotfix6: 5mm @ 30 = 167ms.
+# ===========================================================================
+
+
+def test_c_cont_hotfix6_hall3_speed_constant_30(monkeypatch):
+    """Hotfix6 Layer 1: HALL3 -> 30.0 mm/s konstant (nicht feed_speed).
+
+    Selbst wenn feed_speed=70 (lll.cfg) oder feed_speed=100 ist, muss
+    HALL3-Branch immer 30.0 zurueckgeben. Verhindert HALL3->HALL1
+    Durchschuss in 1 Sub-Chunk (Hardware-Beleg klippy_real.log
+    2026-05-13: 6+ Cycles HALL3->HALL1 mit feed_speed=70)."""
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'feed_speed': 70.0})
+    set_sensor_active(feeder, 'hall_empty', True)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    assert feeder._compute_target_feed_speed() == 30.0
+    # Selbst bei feed_speed=100 waere Output 30
+    feeder.feed_speed = 100.0
+    assert feeder._compute_target_feed_speed() == 30.0
+
+
+def test_c_cont_hotfix6_interrupt_chunk_default_5(monkeypatch):
+    """Hotfix6 Layer 2: interrupt_chunk_mm Default 5.0 mm.
+
+    Kleinere Sub-Chunks reduzieren HALL3->HALL1 Overshoot-Distanz.
+    Bei 5mm @ 30 mm/s = 167ms — HALL2-Detection-Zeit ausreichend.
+    Vorher 9.0 mm war zu gross bei HALL3-Speed-Reduktion."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    assert feeder.interrupt_chunk_mm == 5.0
+
+
+def test_c_cont_hotfix6_interrupt_chunk_override(monkeypatch):
+    """Hotfix6 Layer 2: interrupt_chunk_mm kann via cfg ueberschrieben
+    werden (BUFFER_SET live-tune-Pfad muss weiter funktionieren)."""
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'interrupt_chunk_mm': 3.0})
+    assert feeder.interrupt_chunk_mm == 3.0

@@ -959,12 +959,15 @@ class BufferFeeder:
         # AUTO bang-bang streaming path. When flush_callback_chunk_mm
         # exceeds this cap, the chunk is split into sub-chunks via
         # _pending_remaining_mm so HALL2/HALL1 can abort between
-        # sub-chunks (move-splitting interrupt). Default 9.0 mm gives
-        # ~128 ms sub-chunk duration at 70 mm/s — bounded overshoot.
-        # Hardware-test 2026-05-12: 45 mm without a cap → grinding.
-        # Cap <= max_move_chunk_mm.
+        # sub-chunks (move-splitting interrupt). Hotfix6 default 5.0 mm
+        # gives ~167 ms sub-chunk duration at 30 mm/s HALL3-Refill —
+        # HALL2 has time to trigger before the next sub-chunk submit.
+        # Vorher: Default 9.0 mm @ 70 mm/s = 130 ms war zu kurz; der
+        # Buffer-Arm schoss HALL3 -> HALL1 durch (Hardware-Beleg
+        # klippy_real.log 2026-05-13: 6+ Cycles HALL3->HALL1, dann
+        # stepcompress c=16 Crash). Cap <= max_move_chunk_mm.
         self.interrupt_chunk_mm = config.getfloat(
-            'interrupt_chunk_mm', 9.0, above=0.)
+            'interrupt_chunk_mm', 5.0, above=0.)  # Hotfix6: 9.0 -> 5.0
         if self.interrupt_chunk_mm > self.max_move_chunk_mm:
             self.interrupt_chunk_mm = self.max_move_chunk_mm
         # C-cont T3: max_feed_speed = Cap fuer SpeedModulator-Output.
@@ -2746,9 +2749,20 @@ class BufferFeeder:
             pass
 
     def _compute_target_feed_speed(self):
-        """C-cont T4 + Hotfix3/4/5: SpeedModulator.
+        """C-cont T4 + Hotfix3/4/5/6: SpeedModulator.
 
-        Hotfix5-Update gegen Overshoot-Cycle (Hardware-Beleg
+        Hotfix6: HALL3-Refill mit fester Konstante 30 mm/s (statt
+        self.feed_speed=70). Bei 70 mm/s schiesst der Arm in 130ms
+        durch HALL2 direkt in HALL1 (Hardware-Beleg klippy_real.log
+        2026-05-13: 6+ HALL3->HALL1-Cycles, dann c=16 crash). 30 mm/s
+        gibt 300ms Push-Zeit pro 5mm-Sub-Chunk -> HALL2 hat Zeit
+        zum Trigger, naechster Submit hat target=0 (Hotfix5 H2-stop).
+
+        Max-Throughput bei HALL3: 30 mm/s × 2.405 = 72 mm³/s. Reicht
+        fuer C-cont-Zielbereich (10-30 mm³/s Toolhead-Pull plus
+        Zwischenzone-Modulator 1.10× extruder_vel = bis ~33 mm/s).
+
+        Hotfix5-Vorgeschichte gegen Overshoot-Cycle (Hardware-Beleg
         klippy_real.log HEAD 2615b96):
         - HALL2 active (Buffer voll) -> 0.0 (drain via Toolhead,
           KEIN Push). Alter HALL2-Branch 0.5*v mit MIN_FLOOR=15
@@ -2757,8 +2771,8 @@ class BufferFeeder:
           vollem Buffer NIE foerdern.
         - HALL3 active (Buffer leer) -> feed_speed (lll=70) statt
           max_feed_speed (100). HALL3-Submit @100 mm/s ueberschoss
-          Arm in 1 Sub-Chunk von HALL3 nach HALL1. feed_speed ist
-          sanfter Initial-Fill.
+          Arm in 1 Sub-Chunk von HALL3 nach HALL1. Hotfix6: jetzt
+          30 mm/s konstant — feed_speed=70 war immer noch zu schnell.
         - Zwischenzone proposed < MIN_FLOOR -> 0 (Pipeline-Safe
           Skip statt force-clamp). Bei tracker=10 -> 1.10*10=11 <
           15 wurde vorher auf 15 geclampt -> Pipeline-Last bei
@@ -2769,8 +2783,8 @@ class BufferFeeder:
           HALL1 (overflow)        -> 0.0 (Notbremse)
           HALL2 (full)            -> 0.0 (Hotfix5: kein Push in
                                           vollen Buffer)
-          HALL3 (empty)           -> feed_speed (Hotfix5: sanfter
-                                                 Initial-Fill)
+          HALL3 (empty)           -> 30.0 (Hotfix6: feste sanfte
+                                            Refill-Speed)
           tracker not_ready       -> 0.0 (Boot: warten)
           tracker vel <= 0        -> 0.0 (Toolhead stalled)
           Zwischenzone proposed
@@ -2783,7 +2797,7 @@ class BufferFeeder:
         if self.hall_full:
             return 0.0  # Hotfix5: HALL2 = stop (Buffer voll)
         if self.hall_empty:
-            return self.feed_speed  # Hotfix5: feed_speed statt max
+            return 30.0  # Hotfix6: feste sanfte Refill-Speed
         # Zwischenzone — fluss-proportional, aber kein Force-Clamp
         if not self.velocity_tracker.is_ready():
             return 0.0  # Boot: kein Submit, warten auf Tracker
@@ -4665,7 +4679,7 @@ class BufferFeeder:
         "Live-tune buffer parameters without restart. All args optional:\n"
         "  CHUNK_MM              flush_callback_chunk_mm (mm,  default 15, lll.cfg 45)\n"
         "  SPEED                 feed_speed              (mm/s, default 30, lll.cfg 70)\n"
-        "  INTERRUPT_CHUNK_MM    interrupt_chunk_mm      (mm,  default 9, cap <= MAX_MOVE_CHUNK_MM)\n"
+        "  INTERRUPT_CHUNK_MM    interrupt_chunk_mm      (mm,  default 5, cap <= MAX_MOVE_CHUNK_MM)\n"
         "  LEAD_TIME             lead_time               (s,   default 0.3, lll.cfg 0.12; warn outside 0.05..1.0)\n"
         "  MAX_MOVE_CHUNK_MM     max_move_chunk_mm       (mm,  default 50)\n"
         "Without args: prints current values. No persistence — copy "
