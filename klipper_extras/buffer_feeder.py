@@ -2749,66 +2749,94 @@ class BufferFeeder:
             pass
 
     def _compute_target_feed_speed(self):
-        """C-cont T4 + Hotfix3/4/5/6: SpeedModulator.
+        """C-cont Hotfix7 (Hardware-Crash 2026-05-13 klippy.log
+        Z.104571, c=12 i=0 Invalid sequence nach 16+ HALL1-OVERFLOW-
+        Zyklen in 80s Druckzeit). Soft-Throttle: Feeder-Speed skaliert
+        mit Extruder-Verbrauch statt fixer Konstante.
 
-        Hotfix6: HALL3-Refill mit fester Konstante 30 mm/s (statt
-        self.feed_speed=70). Bei 70 mm/s schiesst der Arm in 130ms
-        durch HALL2 direkt in HALL1 (Hardware-Beleg klippy_real.log
-        2026-05-13: 6+ HALL3->HALL1-Cycles, dann c=16 crash). 30 mm/s
-        gibt 300ms Push-Zeit pro 5mm-Sub-Chunk -> HALL2 hat Zeit
-        zum Trigger, naechster Submit hat target=0 (Hotfix5 H2-stop).
+        Wurzel-Ursache (Hardware-Geometrie, User-vermessen 2026-05-13):
+          Sensorik:               optische Lichtschranken (KEINE Hall-
+                                  Magnete trotz Codename)
+          HALL3 <-> HALL2:        12.8 mm
+          HALL2 <-> HALL1:         3.6 mm  (Sicherheitsmarge)
+          Ausloeser-Fahne:         3-4 mm
+          Hebel:                  ~2:1 (5mm Filament-Push -> 2.5mm
+                                  Arm-Deflektion via Schlaufe)
+          Voller Hub HALL3->HALL1: 16.4 mm
 
-        Max-Throughput bei HALL3: 30 mm/s × 2.405 = 72 mm³/s. Reicht
-        fuer C-cont-Zielbereich (10-30 mm³/s Toolhead-Pull plus
-        Zwischenzone-Modulator 1.10× extruder_vel = bis ~33 mm/s).
+        Bei Hotfix6's fix 30 mm/s + 5mm Sub-Chunk dauert ein Sub-Chunk
+        ~167ms. HALL2->HALL1 Strecke (3.6mm) bei Schwung-Geschwindigkeit
+        ist in 120ms ueberbrueckt — kuerzer als ein Flush-Tick
+        (~250-500ms). Die Software ist strukturell zu langsam, um den
+        Arm vor HALL1 zu stoppen sobald er HALL2 erreicht. Im Log
+        (Z.104017-) sehen wir HALL1-Trigger OHNE vorheriges H2:on in
+        buffer_metrics — der Auslöser passiert HALL2 zwischen zwei
+        Polling-Ticks.
 
-        Hotfix5-Vorgeschichte gegen Overshoot-Cycle (Hardware-Beleg
-        klippy_real.log HEAD 2615b96):
-        - HALL2 active (Buffer voll) -> 0.0 (drain via Toolhead,
-          KEIN Push). Alter HALL2-Branch 0.5*v mit MIN_FLOOR=15
-          verursachte Submit @15 mm/s in vollen Buffer wenn
-          tracker_vel=1.6 (Resume-Phase). Strukturell falsch — bei
-          vollem Buffer NIE foerdern.
-        - HALL3 active (Buffer leer) -> feed_speed (lll=70) statt
-          max_feed_speed (100). HALL3-Submit @100 mm/s ueberschoss
-          Arm in 1 Sub-Chunk von HALL3 nach HALL1. Hotfix6: jetzt
-          30 mm/s konstant — feed_speed=70 war immer noch zu schnell.
-        - Zwischenzone proposed < MIN_FLOOR -> 0 (Pipeline-Safe
-          Skip statt force-clamp). Bei tracker=10 -> 1.10*10=11 <
-          15 wurde vorher auf 15 geclampt -> Pipeline-Last bei
-          niedrigem Flow. Stattdessen kein Submit bis tracker_vel
-          hoch genug fuer Pipeline-Safety.
+        Hotfix7 koppelt feed_speed an Extruder-Verbrauch -> bei
+        langsamem Druck (vel=5) schiebt Feeder nur 15 mm/s statt 30
+        -> halbierte Schwung-Energie -> Arm bremst in HALL2-
+        Sicherheitsfenster ab.
 
         Logik:
-          HALL1 (overflow)        -> 0.0 (Notbremse)
-          HALL2 (full)            -> 0.0 (Hotfix5: kein Push in
-                                          vollen Buffer)
-          HALL3 (empty)           -> 30.0 (Hotfix6: feste sanfte
-                                            Refill-Speed)
-          tracker not_ready       -> 0.0 (Boot: warten)
-          tracker vel <= 0        -> 0.0 (Toolhead stalled)
-          Zwischenzone proposed
-            < MIN_FLOOR           -> 0.0 (Hotfix5: lieber kein
-                                          Submit als zu langsam)
-            >= MIN_FLOOR          -> extruder_vel * 1.10
+          HALL1 (overflow)            -> 0.0 (Notbremse)
+          HALL2 (full)                -> 0.0 (Hotfix5: kein Push in
+                                              vollen Buffer)
+          HALL3 (empty):
+            tracker not_ready         -> MIN_FLOOR=15 (Print-Start sanft)
+            vel < MIN_FLOOR oder vel=0 -> MIN_FLOOR=15 (Initial/Idle)
+            vel >= MIN_FLOOR          -> min(vel*1.5, feed_speed)
+                                          (50% Margin ueber Verbrauch,
+                                           cap auf konfiguriertes Max)
+          Zwischenzone (kein HALL):
+            tracker not_ready         -> 0.0 (Boot warten)
+            vel < MIN_FLOOR oder vel=0 -> 0.0 (Hotfix5: lieber kein
+                                              Submit als zu langsam)
+            vel >= MIN_FLOOR          -> min(vel*1.10, feed_speed)
+                                          (10% Margin, cap auf Max)
+
+        Hotfix6 (vorher): HALL3:on -> 30 mm/s fix. Bei vel=5 (low-flow
+        Druck) injiziert das 6x Verbrauch -> Buffer-Arm-Overshoot
+        HALL2->HALL1 regelmaessig (siehe Hardware-Beleg oben).
+
+        Soft-Cap auf feed_speed (NEU vs Hotfix3): verhindert dass
+        vel*1.5 oder vel*1.10 bei schnellen Drucken target_speed
+        ueber die konfigurierte Obergrenze treibt. Hardware-sicher
+        weil feed_speed im cfg bereits hardware-validiert ist.
+
+        Siehe specs/2026-05-13-c-cont-hotfix7-soft-throttle.md fuer
+        vollstaendige Analyse und Optionen-Vergleich (A/B/C).
         """
+        MIN_FLOOR = 15.0  # mm/s, ererbt von Hotfix3 (validated baseline)
+        # Boundary-tolerant comparison gegen MIN_FLOOR: vel_tracker
+        # akkumuliert FP-Drift via 0.025s-Ticks (0.025 ist nicht exakt
+        # in binary representable). Ohne Epsilon faellt vel=MIN_FLOOR
+        # genau auf den falschen Pfad. 1e-6 mm/s Toleranz ist hardware-
+        # irrelevant (kleiner als jeder Stepper-Microstep).
+        FLOOR_EPSILON = 1e-6
+
         if self.hall_overflow:
             return 0.0
         if self.hall_full:
             return 0.0  # Hotfix5: HALL2 = stop (Buffer voll)
+
+        vel_ready = self.velocity_tracker.is_ready()
+        extruder_vel = self.velocity_tracker.get_velocity() if vel_ready \
+            else 0.0
+
         if self.hall_empty:
-            return 30.0  # Hotfix6: feste sanfte Refill-Speed
-        # Zwischenzone — fluss-proportional, aber kein Force-Clamp
-        if not self.velocity_tracker.is_ready():
-            return 0.0  # Boot: kein Submit, warten auf Tracker
-        extruder_vel = self.velocity_tracker.get_velocity()
-        if extruder_vel <= 0.0:
-            return 0.0  # Toolhead stalled — nicht foerdern
-        MIN_FLOOR = 15.0  # mm/s — Pipeline-Backpressure-Mindest
-        proposed = extruder_vel * 1.10
-        if proposed < MIN_FLOOR:
-            return 0.0  # Hotfix5: lieber kein Submit als zu langsam
-        return proposed
+            # HALL3:on -> Buffer leer, Auffuellen mit 50% Margin ueber
+            # Verbrauch. Bei not_ready / vel<MIN_FLOOR: MIN_FLOOR-Boden
+            # damit Buffer trotzdem gefuellt wird, aber sanft (statt
+            # Hotfix6 30 mm/s).
+            if not vel_ready or extruder_vel < MIN_FLOOR - FLOOR_EPSILON:
+                return MIN_FLOOR
+            return min(max(extruder_vel * 1.5, MIN_FLOOR), self.feed_speed)
+
+        # Zwischenzone (kein HALL aktiv)
+        if not vel_ready or extruder_vel < MIN_FLOOR - FLOOR_EPSILON:
+            return 0.0  # Hotfix5 unveraendert
+        return min(extruder_vel * 1.10, self.feed_speed)
 
     def _on_mcu_flush(self, flush_time, step_gen_time):
         """P7-52: Flush-callback driven bang-bang. Klipper's motion_
