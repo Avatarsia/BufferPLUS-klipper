@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>LLL Plus Buffer — High-Flow Architektur-Vergleich</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    max-width: 920px;
+    margin: 2em auto;
+    padding: 0 1.5em;
+    line-height: 1.6;
+    color: #1d1d1f;
+    background: #fafafa;
+  }
+  h1 {
+    color: #0a4d8c;
+    border-bottom: 3px solid #0a4d8c;
+    padding-bottom: 0.3em;
+  }
+  h2 {
+    color: #0a4d8c;
+    margin-top: 2em;
+    border-left: 4px solid #0a4d8c;
+    padding-left: 0.6em;
+  }
+  h3 {
+    color: #2a6fb5;
+    margin-top: 1.5em;
+  }
+  .problem {
+    background: #fff3e0;
+    border-left: 4px solid #e6750a;
+    padding: 1em 1.2em;
+    margin: 1em 0;
+    border-radius: 4px;
+  }
+  .solution {
+    background: #e8f4fd;
+    border-left: 4px solid #2a6fb5;
+    padding: 1em 1.2em;
+    margin: 1em 0;
+    border-radius: 4px;
+  }
+  .winner {
+    background: #e8f7e8;
+    border-left: 4px solid #2e7d32;
+    padding: 1em 1.2em;
+    margin: 1em 0;
+    border-radius: 4px;
+  }
+  .compare {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1em 0;
+    background: #ffffff;
+  }
+  .compare th, .compare td {
+    border: 1px solid #ddd;
+    padding: 0.6em 0.8em;
+    text-align: left;
+    vertical-align: top;
+  }
+  .compare th {
+    background: #0a4d8c;
+    color: white;
+    font-weight: 600;
+  }
+  .compare tr:nth-child(even) td {
+    background: #f5f9fc;
+  }
+  .compare td.good {
+    color: #2e7d32;
+    font-weight: 600;
+  }
+  .compare td.warn {
+    color: #e6750a;
+    font-weight: 600;
+  }
+  .flow-diagram {
+    background: #ffffff;
+    padding: 1.5em;
+    margin: 1em 0;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    text-align: center;
+  }
+  .arm-state {
+    display: inline-block;
+    padding: 0.8em 1.2em;
+    margin: 0.3em;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 0.95em;
+  }
+  .state-h3 { background: #ffe0b3; border: 2px solid #e6750a; }
+  .state-mid { background: #e0f0ff; border: 2px solid #2a6fb5; }
+  .state-h2 { background: #d4edda; border: 2px solid #2e7d32; }
+  .state-h1 { background: #f8d7da; border: 2px solid #c0392b; }
+  .arrow {
+    display: inline-block;
+    color: #888;
+    font-size: 1.4em;
+    margin: 0 0.2em;
+  }
+  .small {
+    font-size: 0.9em;
+    color: #555;
+  }
+  .key-point {
+    background: #fff9e6;
+    padding: 0.4em 0.7em;
+    border-left: 3px solid #d4a017;
+    margin: 0.5em 0;
+  }
+  .timeline {
+    border-left: 3px solid #2a6fb5;
+    padding-left: 1.2em;
+    margin: 1em 0;
+  }
+  .timeline-item {
+    margin: 0.8em 0;
+  }
+  .timeline-item strong {
+    color: #0a4d8c;
+  }
+  code {
+    background: #f0f0f0;
+    padding: 0.1em 0.4em;
+    border-radius: 3px;
+    font-size: 0.9em;
+  }
+  footer {
+    margin-top: 3em;
+    padding-top: 1em;
+    border-top: 1px solid #ddd;
+    color: #666;
+    font-size: 0.9em;
+  }
+</style>
+</head>
+<body>
+
+<h1>LLL Plus Buffer — High-Flow Architektur-Vergleich</h1>
+<p class="small">Übersicht vom 13.05.2026 · zur Architektur-Entscheidung für höhere Durchflussraten</p>
+
+<h2>📋 Worum geht's?</h2>
+
+<p>Beim 3D-Druck mit hohen Durchflussraten (über ca. 20 mm³/s) hält der Buffer das Filament nicht mehr zuverlässig nach. Drei sichtbare Symptome:</p>
+
+<div class="problem">
+  <strong>🔴 Beobachtete Probleme im Hardware-Test:</strong>
+  <ul>
+    <li>Bei ~18 mm³/s: Druckkopf macht kurze "Gedenkpausen" während Buffer nachfördert</li>
+    <li>Der Buffer-Arm pendelt im unteren Drittel — Buffer wird nie wirklich voll</li>
+    <li>Bei 30+ mm³/s: Buffer kommt gar nicht mehr zum Fördern, Arm bleibt permanent unten</li>
+    <li>Eifel-Joe (anderer Tester) bestätigt das Symptom ab ~24 mm³/s mit detailliertem Log</li>
+  </ul>
+  <strong>Ziel:</strong> Stabiler Druck bei <strong>70 mm³/s</strong>.
+</div>
+
+<h2>🔍 Warum passiert das?</h2>
+
+<p>Stell dir den Buffer-Arm als Wippe mit drei Schaltern vor:</p>
+
+<div class="flow-diagram">
+  <div class="arm-state state-h1">HALL1 oben<br><span class="small">= Überlast</span></div>
+  <div class="arm-state state-h2">HALL2 oben<br><span class="small">= Buffer voll</span></div>
+  <div class="arm-state state-mid">Zwischenzone</div>
+  <div class="arm-state state-h3">HALL3 unten<br><span class="small">= Buffer leer</span></div>
+</div>
+
+<p>Die heutige Logik arbeitet <strong>reaktiv</strong>: Sie wartet darauf, dass HALL3 (leer) auslöst, schiebt dann einen Filament-Schub ein, und wenn HALL1 (Überlast) anschlägt → Notstop für 0.5 Sekunden.</p>
+
+<div class="problem">
+  <strong>Das Problem bei hohem Durchfluss:</strong>
+  <ul>
+    <li>Die Filament-Schübe sind so groß, dass der Arm in einem Wisch von "leer" zu "Überlast" springt</li>
+    <li>HALL2 ("voll") wird im Flug nur gestreift, aber nie als stabiler Zustand erkannt</li>
+    <li>Bei jedem Überlast-Stopp gehen 250-700 ms verloren — Zeit, in der der Druckkopf weiter Filament verbraucht</li>
+    <li>Bei sehr hohem Durchfluss reicht die Förderleistung nicht mal mehr, um den Arm überhaupt nach oben zu drücken</li>
+  </ul>
+</div>
+
+<h2>💡 Zwei Lösungs-Ideen</h2>
+
+<p>Wir haben zwei Ansätze identifiziert und wollen sie auf <strong>parallelen Test-Branches</strong> bauen, um sie auf der Hardware direkt vergleichen zu können.</p>
+
+<h3>🅰️ Variante A — "C-cont" (Kontinuierlich + Geschwindigkeits-Modulation)</h3>
+
+<div class="solution">
+  <strong>Die Idee:</strong> Der Buffer-Motor läuft <em>dauerhaft</em>, statt zwischen "An" und "Aus" zu pendeln. Die Sensoren bestimmen nur, <em>wie schnell</em> er läuft.
+
+  <div class="flow-diagram" style="text-align: left;">
+    <strong>Buffer-Arm steht bei…</strong>
+    <ul style="list-style: none; padding: 0;">
+      <li>🟧 <strong>HALL3 (leer)</strong> → Buffer fördert mit voller Geschwindigkeit</li>
+      <li>🟦 <strong>Zwischenzone</strong> → Buffer fördert genau so schnell wie der Druckkopf verbraucht (Balance)</li>
+      <li>🟩 <strong>HALL2 (voll)</strong> → Buffer fördert halb so schnell wie verbraucht (langsam zurücknehmen)</li>
+      <li>🟥 <strong>HALL1 (Überlast)</strong> → Geschwindigkeit auf 0, kein Hard-Stop</li>
+    </ul>
+  </div>
+
+  <strong>Vorteile:</strong>
+  <ul>
+    <li>Keine Stopp-Phasen mehr — keine 250-700 ms Totzeit</li>
+    <li>Buffer-Arm kann tatsächlich in HALL2 stabil bleiben</li>
+    <li>Strukturell für 70 mm³/s und höher ausgelegt</li>
+  </ul>
+
+  <strong>Nachteile:</strong>
+  <ul>
+    <li>Größerer Code-Umbau — die ganze Bang-Bang-Logik wird ersetzt</li>
+    <li>Höheres Risiko von Regressionen bei niedrigem Flow</li>
+  </ul>
+</div>
+
+<h3>🅱️ Variante B — "C-pred" (Vorausschauend, Bang-Bang behalten)</h3>
+
+<div class="solution">
+  <strong>Die Idee:</strong> Wir behalten die heutige Bang-Bang-Logik, machen aber die Buffer-Geschwindigkeit <em>dynamisch</em>. Der Buffer beobachtet, wie schnell der Druckkopf gerade Filament verbraucht, und passt seine Geschwindigkeit entsprechend an.
+
+  <div class="key-point">
+    Wenn der Druckkopf 30 mm/s zieht → Buffer fördert 30 × 1.2 = 36 mm/s (mit 20% Sicherheits-Reserve).
+  </div>
+
+  <strong>Vorteile:</strong>
+  <ul>
+    <li>Kleiner, konservativer Eingriff — alle bisherigen Schutz-Mechanismen bleiben</li>
+    <li>Bestehende Tests laufen weiter</li>
+    <li>Niedriges Regressions-Risiko bei niedrigem Flow</li>
+  </ul>
+
+  <strong>Nachteile:</strong>
+  <ul>
+    <li>HALL2-Problem und Stopp-Phasen bleiben strukturell vorhanden</li>
+    <li>Wahrscheinlich nicht ausreichend für die 70 mm³/s-Zielmarke</li>
+    <li>Erwartete Grenze: 30-50 mm³/s</li>
+  </ul>
+</div>
+
+<h3>🔑 Was beiden Varianten gemeinsam ist</h3>
+
+<div class="key-point">
+  <strong>Ein neuer "Velocity-Tracker"</strong> beobachtet passiv, wie schnell der Druckkopf Filament verbraucht.
+  <ul>
+    <li>Liest 40× pro Sekunde die aktuelle Filament-Position</li>
+    <li>Bildet Durchschnitt über 300 ms für stabile Werte</li>
+    <li><strong>Wichtig:</strong> Rein passiver Beobachter — er ändert nichts am Druckkopf, kann ihn nicht pausieren oder verzögern</li>
+  </ul>
+  Das ist der Hauptgrund, warum beide Varianten keine Druckkopf-Pausen produzieren werden.
+</div>
+
+<h2>📊 Vergleich auf einen Blick</h2>
+
+<table class="compare">
+  <thead>
+    <tr>
+      <th>Aspekt</th>
+      <th>C-cont (Kontinuierlich)</th>
+      <th>C-pred (Vorausschauend)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Erwartete Throughput-Grenze</strong></td>
+      <td class="good">70+ mm³/s</td>
+      <td class="warn">30-50 mm³/s</td>
+    </tr>
+    <tr>
+      <td><strong>Code-Umfang</strong></td>
+      <td class="warn">Mittel-Groß</td>
+      <td class="good">Klein-Mittel</td>
+    </tr>
+    <tr>
+      <td><strong>Regressions-Risiko bei niedrigem Flow</strong></td>
+      <td class="warn">Mittel</td>
+      <td class="good">Niedrig</td>
+    </tr>
+    <tr>
+      <td><strong>Druckkopf-Pause-Risiko</strong></td>
+      <td class="good">Keines (passiver Read)</td>
+      <td class="good">Keines (passiver Read)</td>
+    </tr>
+    <tr>
+      <td><strong>Bestehende Tests bleiben grün</strong></td>
+      <td class="warn">5-15 Tests müssen angepasst</td>
+      <td class="good">Ja</td>
+    </tr>
+    <tr>
+      <td><strong>Eifels c=14-Crash-Schutz (P7-79)</strong></td>
+      <td class="good">Strukturell eliminiert</td>
+      <td class="good">P7-79 weiter aktiv</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>🧪 Hardware-Test-Plan — schrittweise</h2>
+
+<p>Bevor wir die nächste Flow-Stufe testen, muss die vorige stabil laufen:</p>
+
+<div class="timeline">
+  <div class="timeline-item">
+    <strong>Phase 1 — Baseline (30 mm³/s):</strong> mindestens 10 min Print stabil, keine Crashes, keine Druckkopf-Stalls. Wenn das passt → Phase 2.
+  </div>
+  <div class="timeline-item">
+    <strong>Phase 2 — Mid-Flow (50 mm³/s):</strong> mindestens 15 min stabil. Bei C-cont sollte der Arm visuell in der HALL2-Zone stehen. Wenn das passt → Phase 3.
+  </div>
+  <div class="timeline-item">
+    <strong>Phase 3 — High-Flow (70 mm³/s):</strong> mindestens 30 min Steady-State. Das ist die eigentliche Zielmarke.
+  </div>
+  <div class="timeline-item">
+    <strong>A/B-Vergleich:</strong> Beide Branches auf identischer Print-Sequenz. Welche Variante ist stabiler? Welche hat weniger Stopp-Phasen? Der Gewinner wird in den Hauptbranch übernommen.
+  </div>
+</div>
+
+<h2>📈 Diagnostik beim Testen</h2>
+
+<p>Beide Varianten bekommen ausführliche Debug-Logs (über den Schalter <code>buffer_debug_metrics=true</code>). Damit sehen wir live, was passiert:</p>
+
+<ul>
+  <li>Wie oft Überlast (HALL1) auftritt</li>
+  <li>Ob HALL2 (voll) jemals erreicht wird</li>
+  <li>Wie schnell der Druckkopf tatsächlich Filament zieht (gemessen)</li>
+  <li>Wie viel der Buffer im selben Zeitraum nachfördert</li>
+  <li>Verhältnis Buffer-Förderung zu Druckkopf-Verbrauch (sollte ≥ 1.0 sein)</li>
+</ul>
+
+<h2>✅ Aktueller Stand</h2>
+
+<div class="winner">
+  <strong>Was schon fertig ist:</strong>
+  <ul>
+    <li>✓ P7-78 gepusht — stale-Cursor-Crash bei HALL2-Stille gefixt (Issue #29 ursprünglicher Trigger)</li>
+    <li>✓ P7-79 lokal committet (noch nicht gepusht) — Eifels c=14-Position-Mismatch-Crash gefixt</li>
+    <li>✓ Architektur-Spec geschrieben und committet (dieses Dokument basiert darauf)</li>
+    <li>✓ Alle 351 automatisierten Tests laufen grün</li>
+  </ul>
+
+  <strong>Was als Nächstes kommt:</strong>
+  <ol>
+    <li>Du reviewst das Spec-Dokument und gibst Feedback</li>
+    <li>Wir legen die zwei Test-Branches an: <code>feature/c-cont-streaming</code> und <code>feature/c-pred-adaptive</code></li>
+    <li>Pro Branch wird ein detaillierter Implementations-Plan geschrieben</li>
+    <li>Code wird in separaten Sessions implementiert + getestet</li>
+    <li>Du + Eifel testen beide Branches schrittweise auf Hardware</li>
+    <li>Gewinner-Branch wird in den Hauptbranch übernommen</li>
+  </ol>
+</div>
+
+<h2>❓ Häufige Fragen</h2>
+
+<h3>Warum nicht einfach den Buffer-Motor schneller laufen lassen?</h3>
+<p>Der Motor läuft auf dem Papier schon mit 70 mm/s — schnell genug für 70 mm³/s. Aber die Beschleunigungs- und Brems-Phasen pro Mini-Stück (9 mm Sub-Chunks) fressen so viel Zeit, dass die effektive Förderrate viel niedriger ist. Beide Varianten reduzieren dieses Beschleunigungs-Overhead.</p>
+
+<h3>Was wenn beide Varianten nicht funktionieren?</h3>
+<p>Wir können jederzeit auf den stabilen Stand (<code>python-ansatz</code> HEAD) zurückspringen. Die Test-Branches sind isoliert — sie beeinflussen den produktiven Stand nicht.</p>
+
+<h3>Warum nicht den Buffer einfach direkt mit dem Druckkopf synchronisieren?</h3>
+<p>Das wäre die "SYNC-Variante" — sie wurde ausgeschlossen, weil sie genau die Druckkopf-Pausen produziert, die du eliminiert haben wolltest. Im SYNC-Modus muss der Druckkopf warten, wenn der Buffer eine Latenz hat. Das ist eine Lockstep-Architektur. Beide hier vorgeschlagenen Varianten halten Buffer und Druckkopf strikt getrennt.</p>
+
+<h3>Wer testet was?</h3>
+<p>Du testest auf deiner Hardware, Eifel-Joe testet auf seiner. Bei zwei verschiedenen Hardware-Setups bekommen wir robustere Daten — wenn beide Setups gut laufen, ist die Lösung wirklich generisch.</p>
+
+<footer>
+  <p>Erstellt am 13.05.2026 · LLL Plus Buffer Projekt · Avatarsia/BufferPLUS-klipper</p>
+  <p>Spec-Dokument (technisch): <code>docs/superpowers/specs/2026-05-13-high-flow-buffer-architecture.md</code></p>
+</footer>
+
+</body>
+</html>
