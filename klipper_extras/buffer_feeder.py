@@ -24,6 +24,7 @@
 # See docs/superpowers/specs/2026-04-23-python-ansatz-design.md for the
 # full design rationale and feature mapping.
 
+import collections
 import logging
 import math
 
@@ -760,6 +761,87 @@ class FaultManager:
                     "print — bang-bang re-engages automatically. If the "
                     "print is already finished, use BUFFER_AUTO_OFF first.")
         return None
+
+
+# ---------------------------------------------------------------------------
+# ExtruderVelocityTracker
+# ---------------------------------------------------------------------------
+
+class ExtruderVelocityTracker:
+    """Read-only passive tracker for extruder velocity.
+
+    Uses extruder.get_status(eventtime)['position'] — no flush_step_
+    generation, no SYNC, no lockstep with toolhead pipeline. Pure
+    observer pattern. Output drives C-cont SpeedModulator and C-pred
+    safety-factor override.
+    """
+
+    def __init__(self, owner, printer, *,
+                 sample_interval=0.025,
+                 window_size=0.3,
+                 filament_diameter=1.75):
+        self.owner = owner
+        self.printer = printer
+        self.sample_interval = sample_interval
+        self.window_size = window_size
+        self._cross_section = math.pi * (filament_diameter / 2.0) ** 2
+        # round() avoids float-precision truncation (e.g. 0.3 / 0.025
+        # = 11.999... -> int() would yield 11 instead of expected 12).
+        self._max_samples = max(2, int(round(window_size / sample_interval)))
+        self._samples = collections.deque(maxlen=self._max_samples)
+        self._extruder = None
+        self._last_sample_time = None
+
+    def _get_extruder(self):
+        if self._extruder is not None:
+            return self._extruder
+        self._extruder = self.printer.lookup_object('extruder', None)
+        return self._extruder
+
+    def tick(self, eventtime):
+        """Call from _main_tick (50Hz reactor). Throttles internally
+        to sample_interval (default 25ms / 40Hz). Uses 1us tolerance
+        to absorb float-accumulation drift in periodic callers."""
+        if (self._last_sample_time is not None
+                and (eventtime - self._last_sample_time
+                     < self.sample_interval - 1e-6)):
+            return
+        ext = self._get_extruder()
+        if ext is None:
+            return
+        try:
+            status = ext.get_status(eventtime)
+        except Exception:
+            return
+        position = status.get('position', 0.0) if isinstance(
+            status, dict) else 0.0
+        self._samples.append((eventtime, position))
+        self._last_sample_time = eventtime
+
+    def get_velocity(self):
+        """Returns linear filament velocity (mm/s, non-negative).
+        0.0 if fewer than 2 samples or negative dp."""
+        if len(self._samples) < 2:
+            return 0.0
+        (t0, p0), (t1, p1) = self._samples[0], self._samples[-1]
+        dt = t1 - t0
+        if dt < 1e-6:
+            return 0.0
+        return max(0.0, (p1 - p0) / dt)
+
+    def get_volumetric_flow(self):
+        """Returns volumetric flow (mm^3/s)."""
+        return self.get_velocity() * self._cross_section
+
+    def is_ready(self):
+        """True after sliding window has filled (window_size seconds
+        of samples accumulated)."""
+        return len(self._samples) == self._max_samples
+
+    def reset(self):
+        """Clear all samples. Call on klippy:disconnect / BUFFER_RESET."""
+        self._samples.clear()
+        self._last_sample_time = None
 
 
 # ---------------------------------------------------------------------------
