@@ -2746,46 +2746,55 @@ class BufferFeeder:
             pass
 
     def _compute_target_feed_speed(self):
-        """C-cont T4 + Hotfix3 + Hotfix4: SpeedModulator.
+        """C-cont T4 + Hotfix3/4/5: SpeedModulator.
 
-        Hotfix4-Update: Fallback-Branches (tracker not_ready, extruder
-        stalled) duerfen NICHT in nicht-leeren Buffer foerdern. Sonst
-        Overshoot bei Boot wenn Arm bereits in HALL2/H1 steht
-        (Hardware-Test 2026-05-13 klippy(11).log: Boot-Status
-        hall_full=True+hall_overflow=True -> erster AUTO-Resume
-        submittete 70 mm/s in vollen Buffer -> cycle crash).
-
-        Fallback-Regel: bei extruder_vel <= 0 oder tracker not_ready
-        foerdern wir NUR wenn HALL3 active (Buffer wirklich leer).
-        Sonst target=0 (Stillstand bis Tracker echte Toolhead-Velocity
-        sieht).
+        Hotfix5-Update gegen Overshoot-Cycle (Hardware-Beleg
+        klippy_real.log HEAD 2615b96):
+        - HALL2 active (Buffer voll) -> 0.0 (drain via Toolhead,
+          KEIN Push). Alter HALL2-Branch 0.5*v mit MIN_FLOOR=15
+          verursachte Submit @15 mm/s in vollen Buffer wenn
+          tracker_vel=1.6 (Resume-Phase). Strukturell falsch — bei
+          vollem Buffer NIE foerdern.
+        - HALL3 active (Buffer leer) -> feed_speed (lll=70) statt
+          max_feed_speed (100). HALL3-Submit @100 mm/s ueberschoss
+          Arm in 1 Sub-Chunk von HALL3 nach HALL1. feed_speed ist
+          sanfter Initial-Fill.
+        - Zwischenzone proposed < MIN_FLOOR -> 0 (Pipeline-Safe
+          Skip statt force-clamp). Bei tracker=10 -> 1.10*10=11 <
+          15 wurde vorher auf 15 geclampt -> Pipeline-Last bei
+          niedrigem Flow. Stattdessen kein Submit bis tracker_vel
+          hoch genug fuer Pipeline-Safety.
 
         Logik:
           HALL1 (overflow)        -> 0.0 (Notbremse)
-          HALL3 (empty)           -> max_feed_speed (auffuellen)
-          tracker not_ready       -> 0.0 (Boot: warten auf Tracker)
-          tracker vel == 0        -> 0.0 (Toolhead stalled, nicht
-                                          foerdern in vollen Buffer)
-          HALL2 (full)            -> max(MIN_FLOOR, 0.5 * extruder_vel)
-                                     (langsam, aber kein Stillstand)
-          Zwischenzone            -> max(MIN_FLOOR, extruder_vel * 1.10)
-                                     (10% Vorlauf statt harter Floor)
+          HALL2 (full)            -> 0.0 (Hotfix5: kein Push in
+                                          vollen Buffer)
+          HALL3 (empty)           -> feed_speed (Hotfix5: sanfter
+                                                 Initial-Fill)
+          tracker not_ready       -> 0.0 (Boot: warten)
+          tracker vel <= 0        -> 0.0 (Toolhead stalled)
+          Zwischenzone proposed
+            < MIN_FLOOR           -> 0.0 (Hotfix5: lieber kein
+                                          Submit als zu langsam)
+            >= MIN_FLOOR          -> extruder_vel * 1.10
         """
         if self.hall_overflow:
             return 0.0
+        if self.hall_full:
+            return 0.0  # Hotfix5: HALL2 = stop (Buffer voll)
         if self.hall_empty:
-            return self.max_feed_speed  # Buffer wirklich leer
-        # Buffer in Zwischenzone oder HALL2 — foerdere nur bei echtem
-        # Extruder-Verbrauch (Tracker liefert > 0)
+            return self.feed_speed  # Hotfix5: feed_speed statt max
+        # Zwischenzone — fluss-proportional, aber kein Force-Clamp
         if not self.velocity_tracker.is_ready():
             return 0.0  # Boot: kein Submit, warten auf Tracker
         extruder_vel = self.velocity_tracker.get_velocity()
         if extruder_vel <= 0.0:
             return 0.0  # Toolhead stalled — nicht foerdern
         MIN_FLOOR = 15.0  # mm/s — Pipeline-Backpressure-Mindest
-        if self.hall_full:
-            return max(MIN_FLOOR, 0.5 * extruder_vel)
-        return max(MIN_FLOOR, extruder_vel * 1.10)
+        proposed = extruder_vel * 1.10
+        if proposed < MIN_FLOOR:
+            return 0.0  # Hotfix5: lieber kein Submit als zu langsam
+        return proposed
 
     def _on_mcu_flush(self, flush_time, step_gen_time):
         """P7-52: Flush-callback driven bang-bang. Klipper's motion_

@@ -200,9 +200,13 @@ def test_main_tick_pending_chunk_runs_in_auto_with_flush_callback(monkeypatch):
 
     C-cont Hotfix4: AUTO+forward sub-chunk path now uses Speed-
     Modulator; mit not-ready Tracker + Zwischenzone wuerde target=0
-    den Stream abbrechen. Wir populieren den Tracker, damit das
-    P7-59 Contract (pending-chunk submit unabhaengig von continuous-
-    feed-gating) weiter geprueft werden kann."""
+    den Stream abbrechen.
+
+    Hotfix5: bei sample-window-mismatch (tracker tick @t=10 vs.
+    populated @t<0.3) faellt vel auf ~0.5 mm/s, was Hotfix5's
+    'proposed < MIN_FLOOR -> 0' triggert. Wir monkeypatchen daher
+    _compute_target_feed_speed direkt mit einem stabilen Wert,
+    damit der Pending-Chunk-Pfad-Contract testbar bleibt."""
     printer, feeder = make_feeder(values={'use_flush_callback_bang_bang': True})
     feeder._state = buffer_feeder.STATE_AUTO
     feeder._continuous_feed = False
@@ -210,19 +214,13 @@ def test_main_tick_pending_chunk_runs_in_auto_with_flush_callback(monkeypatch):
     feeder._pending_direction = 1
     feeder._pending_speed = 25.0
 
-    # Hotfix4: Tracker ready mit echter Velocity, sonst Sub-Chunk-Pfad
-    # abortiert wegen target_speed=0.
-    fake_ext = printer.objects['extruder']
-    t = 0.0
-    for _ in range(12):
-        fake_ext.last_position = t * 20.0  # 20 mm/s
-        feeder.velocity_tracker.tick(t)
-        t += 0.025
-
     submit_calls = []
     monkeypatch.setattr(feeder, "_submit_single_trapezoid",
                         lambda d, s, **kw: submit_calls.append((d, s)))
     monkeypatch.setattr(feeder, "_abort_signalled", lambda: False)
+    # Hotfix5: Modulator-Override damit Pending-Chunk-Pfad testbar
+    monkeypatch.setattr(feeder, "_compute_target_feed_speed",
+                        lambda: 25.0)
 
     feeder._last_move_end_time = 0.0
 
