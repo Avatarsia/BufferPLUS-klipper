@@ -828,6 +828,7 @@ class ExtruderVelocityTracker:
         self._max_samples = max(2, int(round(window_size / sample_interval)))
         self._samples = collections.deque(maxlen=self._max_samples)
         self._extruder = None
+        self._mcu = None
         self._last_sample_time = None
 
     def _get_extruder(self):
@@ -835,6 +836,40 @@ class ExtruderVelocityTracker:
             return self._extruder
         self._extruder = self.printer.lookup_object('extruder', None)
         return self._extruder
+
+    def _get_mcu(self):
+        if self._mcu is not None:
+            return self._mcu
+        try:
+            self._mcu = self.printer.lookup_object('mcu', None)
+        except (KeyError, AttributeError):
+            self._mcu = None
+        return self._mcu
+
+    def _read_position(self, ext, eventtime):
+        """Liest die tatsaechliche Extruder-Position.
+
+        Idiomatisch in Klipper (siehe filament_motion_sensor.py): via
+        find_past_position(print_time) rekonstruiert aus den MCU-Steps
+        — das ist die "real-time" Position, nicht die geplante
+        last_position. Fallback auf last_position wenn find_past_position
+        nicht vorhanden ist (z.B. PrinterDummyExtruder).
+        """
+        find_past = getattr(ext, 'find_past_position', None)
+        if find_past is not None:
+            mcu = self._get_mcu()
+            if mcu is not None:
+                try:
+                    print_time = mcu.estimated_print_time(eventtime)
+                    return float(find_past(print_time))
+                except (AttributeError, TypeError, ValueError):
+                    pass
+            else:
+                try:
+                    return float(find_past(eventtime))
+                except (AttributeError, TypeError, ValueError):
+                    pass
+        return float(getattr(ext, 'last_position', 0.0))
 
     def tick(self, eventtime):
         """Call from _main_tick (50Hz reactor). Throttles internally
@@ -848,12 +883,7 @@ class ExtruderVelocityTracker:
         if ext is None:
             return
         try:
-            # Mainline-API: PrinterExtruder.last_position wird in
-            # move() auf move.end_pos[3] gesetzt. get_status() enthaelt
-            # KEINEN 'position'-Key (T1 hatte fehlerhafte FakeExtruder-
-            # Mock-API). Bei Stepper-Objekten ohne last_position-Attribut
-            # (z.B. PrinterDummyExtruder): Fallback 0.0.
-            position = float(getattr(ext, 'last_position', 0.0))
+            position = self._read_position(ext, eventtime)
         except (AttributeError, TypeError):
             return
         self._samples.append((eventtime, position))

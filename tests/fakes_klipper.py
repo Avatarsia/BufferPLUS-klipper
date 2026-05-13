@@ -182,8 +182,8 @@ class FakeExtruder:
         self.trapq = object()
         self.heater = FakeHeater()
         # Klipper-Mainline klippy/kinematics/extruder.py:75 reads
-        # extruder.last_position when syncing. PR #17 (P7-47) does the
-        # same. Default 0.0 mirrors a freshly-instantiated extruder.
+        # extruder.last_position when syncing. Default 0.0 mirrors a
+        # freshly-instantiated extruder.
         self.last_position = 0.0
 
     def get_trapq(self):
@@ -191,6 +191,13 @@ class FakeExtruder:
 
     def get_heater(self):
         return self.heater
+
+    def find_past_position(self, print_time):
+        # Mainline kinematics/extruder.py::PrinterExtruder.find_past_position
+        # rekonstruiert die echte MCU-Position. Tests manipulieren
+        # last_position direkt — Tracker erwartet hier denselben Wert.
+        del print_time
+        return self.last_position
 
 
 class FakeToolhead:
