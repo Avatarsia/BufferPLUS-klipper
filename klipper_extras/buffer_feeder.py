@@ -2584,6 +2584,30 @@ class BufferFeeder:
             # Nichts tun — _continuous_feed bleibt wie es ist.
             pass
 
+    def _compute_target_feed_speed(self):
+        """C-cont T4: SpeedModulator.
+
+        HALL-Sensoren + ExtruderVelocity -> target feed_speed (mm/s)
+        fuer den naechsten Submit. Returns 0.0 als Notbremse (HALL1).
+
+        Logik:
+          HALL1 (overflow)  -> 0.0 (Notbremse, ohne State-Wechsel)
+          HALL3 (empty)     -> max_feed_speed (Buffer auffuellen)
+          HALL2 (full)      -> 0.5 * extruder_velocity (langsam)
+          Zwischenzone      -> extruder_velocity (Balance)
+          Tracker not_ready -> config feed_speed (Fallback)
+        """
+        if self.hall_overflow:
+            return 0.0
+        if self.hall_empty:
+            return self.max_feed_speed
+        if not self.velocity_tracker.is_ready():
+            return self.feed_speed
+        extruder_vel = self.velocity_tracker.get_velocity()
+        if self.hall_full:
+            return 0.5 * extruder_vel
+        return extruder_vel
+
     def _on_mcu_flush(self, flush_time, step_gen_time):
         """P7-52: Flush-callback driven bang-bang. Klipper's motion_
         queuing module fires this synchronously inside the MCU flush

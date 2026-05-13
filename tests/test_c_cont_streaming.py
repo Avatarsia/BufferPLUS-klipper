@@ -126,3 +126,68 @@ def test_c_cont_cfg_params_custom(monkeypatch):
     assert feeder.max_feed_speed == 80.0
     assert feeder.hall1_persist_timeout == 3.0
     assert feeder.buffer_debug_metrics is True
+
+
+# ===========================================================================
+# C-cont T4: SpeedModulator (_compute_target_feed_speed)
+# ===========================================================================
+
+
+def _populate_tracker_to_ready(feeder, *, velocity):
+    """Fake-Helper: 12 ticks mit linearer Position-Steigerung, damit
+    velocity_tracker.is_ready() == True wird."""
+    fake_ext = feeder.printer.objects['extruder']
+    t = 0.0
+    for _ in range(12):
+        fake_ext._position = t * velocity
+        feeder.velocity_tracker.tick(t)
+        t += 0.025
+
+
+def test_c_cont_modulator_hall1_zero(monkeypatch):
+    """HALL1 active -> target_speed = 0 (Notbremse)."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_overflow', True)
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', False)
+    assert feeder._compute_target_feed_speed() == 0.0
+
+
+def test_c_cont_modulator_hall3_max(monkeypatch):
+    """HALL3 active (Buffer leer) -> max_feed_speed."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', True)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    _populate_tracker_to_ready(feeder, velocity=15.0)
+    assert feeder._compute_target_feed_speed() == feeder.max_feed_speed
+
+
+def test_c_cont_modulator_hall2_half(monkeypatch):
+    """HALL2 active (Buffer voll) -> 0.5 * extruder_velocity."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', True)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    _populate_tracker_to_ready(feeder, velocity=20.0)
+    assert feeder._compute_target_feed_speed() == pytest.approx(10.0, abs=0.5)
+
+
+def test_c_cont_modulator_zwischenzone_balance(monkeypatch):
+    """Zwischenzone -> extruder_velocity."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    _populate_tracker_to_ready(feeder, velocity=12.0)
+    assert feeder._compute_target_feed_speed() == pytest.approx(12.0, abs=0.5)
+
+
+def test_c_cont_modulator_tracker_not_ready_fallback(monkeypatch):
+    """Tracker not_ready -> fallback config feed_speed."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    assert not feeder.velocity_tracker.is_ready()
+    assert feeder._compute_target_feed_speed() == feeder.feed_speed
