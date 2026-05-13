@@ -28,6 +28,14 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 EXT_SOURCE="${REPO_DIR}/klipper_extras/buffer_feeder.py"
 EXT_TARGET="${KLIPPER_DIR}/klippy/extras/buffer_feeder.py"
+EXT_DIR="${REPO_DIR}/klipper_extras"
+EXT_TARGET_DIR="${KLIPPER_DIR}/klippy/extras"
+EXT_SUB_MODULES=(
+    "_buffer_common.py"
+    "buffer_modulator.py"
+    "buffer_sensors.py"
+    "buffer_stepper.py"
+)
 CFG_SOURCE="${REPO_DIR}/lll.cfg"
 CFG_TARGET="${PRINTER_CFG_DIR}/lll.cfg"
 
@@ -75,9 +83,17 @@ echo "[update] git fetch + pull --ff-only auf ${BRANCH}"
 git fetch --quiet origin
 git pull --ff-only origin "${BRANCH}"
 
-# ---------- 2) Extension-Symlink ----------
+# ---------- 2) Extension-Symlinks ----------
 echo "[update] Extension-Symlink: ${EXT_TARGET} -> ${EXT_SOURCE}"
 ln -sfn "${EXT_SOURCE}" "${EXT_TARGET}"
+for sub in "${EXT_SUB_MODULES[@]}"; do
+    sub_src="${EXT_DIR}/${sub}"
+    sub_dst="${EXT_TARGET_DIR}/${sub}"
+    if [ -f "${sub_src}" ]; then
+        ln -sfn "${sub_src}" "${sub_dst}"
+        echo "[update] Sub-Modul-Symlink: ${sub_dst} -> ${sub_src}"
+    fi
+done
 
 # ---------- 3) lll.cfg kopieren (mit Rolling-Backup) ----------
 mkdir -p "${PRINTER_CFG_DIR}"

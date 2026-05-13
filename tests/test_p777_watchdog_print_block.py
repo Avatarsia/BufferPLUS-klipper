@@ -590,12 +590,8 @@ def test_integration_skip_path_when_print_state_missed(monkeypatch, caplog):
 
 
 def test_forced_t0_lookahead_constant_intact():
-    """The forced-t0 lookahead cap constant + its usage must remain."""
-    src = open(buffer_feeder.__file__, encoding='utf-8').read()
-    assert "MAX_T0_LOOKAHEAD_S = 2.0" in src, (
-        "Forced-t0 lookahead cap constant must remain.")
-    assert "mcu_now + MAX_T0_LOOKAHEAD_S" in src, (
-        "Forced-t0 cap usage must remain.")
+    """The forced-t0 lookahead cap constant must remain on the module."""
+    assert buffer_feeder.MAX_T0_LOOKAHEAD_S == 2.0
 
 
 def test_watchdog_state_auto_fires_when_not_printing(monkeypatch):

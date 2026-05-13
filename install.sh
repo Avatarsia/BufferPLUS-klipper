@@ -21,6 +21,17 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 EXT_SOURCE="${REPO_DIR}/klipper_extras/buffer_feeder.py"
 EXT_TARGET="${KLIPPER_DIR}/klippy/extras/buffer_feeder.py"
+EXT_DIR="${REPO_DIR}/klipper_extras"
+EXT_TARGET_DIR="${KLIPPER_DIR}/klippy/extras"
+# Hilfsmodule des buffer_feeder-Plugins. Werden in derselben Action
+# wie buffer_feeder.py mit-symlinkt; Klipper laedt sie nicht als
+# eigene Config-Plugins, weil sie kein load_config_prefix exportieren.
+EXT_SUB_MODULES=(
+    "_buffer_common.py"
+    "buffer_modulator.py"
+    "buffer_sensors.py"
+    "buffer_stepper.py"
+)
 CFG_SOURCE="${REPO_DIR}/lll.cfg"
 CFG_TARGET="${PRINTER_CFG_DIR}/lll.cfg"
 PRINTER_CFG="${PRINTER_CFG_DIR}/printer.cfg"
@@ -334,7 +345,21 @@ for ACT in $ACTIONS; do
                 mv "${EXT_TARGET}" "${EXT_TARGET}.bak"
             fi
             ln -sf "${EXT_SOURCE}" "${EXT_TARGET}"
-            ok "Extension-Symlink gesetzt."
+            ok "Extension-Symlink gesetzt: ${EXT_TARGET}"
+            for sub in "${EXT_SUB_MODULES[@]}"; do
+                sub_src="${EXT_DIR}/${sub}"
+                sub_dst="${EXT_TARGET_DIR}/${sub}"
+                if [ ! -f "${sub_src}" ]; then
+                    warn "Sub-Modul fehlt im Repo: ${sub_src} — uebersprungen"
+                    continue
+                fi
+                if [ -e "${sub_dst}" ] && [ ! -L "${sub_dst}" ]; then
+                    warn "${sub_dst} ist eine normale Datei. Backup: ${sub_dst}.bak"
+                    mv "${sub_dst}" "${sub_dst}.bak"
+                fi
+                ln -sf "${sub_src}" "${sub_dst}"
+                ok "Sub-Modul-Symlink gesetzt: ${sub_dst}"
+            done
             ;;
         cfg_copy)
             mkdir -p "${PRINTER_CFG_DIR}"
