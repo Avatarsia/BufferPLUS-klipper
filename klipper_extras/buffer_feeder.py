@@ -1041,6 +1041,12 @@ class BufferFeeder:
         # leichte Vorrats-Reserve aufzubauen.
         self.feed_speed_gain = config.getfloat(
             'feed_speed_gain', 1.10, minval=1.0)
+        # Schmitt-Trigger fuer den Zwischenzonen-Modulator: bei laufender
+        # Foerderung erst dann stoppen wenn `proposed` unter
+        # min_feed_floor * stop_factor faellt. Verhindert on/off-
+        # Oszillation wenn extruder_velocity um den Schwellwert wackelt.
+        self.feed_hysteresis_stop_factor = config.getfloat(
+            'feed_hysteresis_stop_factor', 0.7, minval=0.1, maxval=1.0)
         # P7-70 (Issue #12): Interval after which an IDLE stepper gets a
         # micro-anchor move to refresh stepcompress's last_step_clock.
         # Background: STATE_IDLE has no periodic move activity. After
@@ -1281,6 +1287,9 @@ class BufferFeeder:
             window_size=0.3,
             filament_diameter=config.getfloat(
                 'filament_diameter', 1.75, above=0.))
+        # Schmitt-Trigger State fuer den Zwischenzonen-Modulator.
+        # Ueberbrueckt min_feed_floor-Schwelle mit Hysterese.
+        self._modulator_feeding = False
         # P7-54: After OVERFLOW → IDLE → AUTO the stepcompress cursor
         # is out of sync. _main_tick handles the safe resync (forced_t0=None
         # path → flush_step_generation allowed). _on_mcu_flush skips while
@@ -2800,54 +2809,50 @@ class BufferFeeder:
             pass
 
     def _compute_target_feed_speed(self):
-        """C-cont T4 + Hotfix3/4/5: SpeedModulator.
+        """SpeedModulator — bestimmt target_feed_speed in STATE_AUTO.
 
-        Hotfix5-Update gegen Overshoot-Cycle (Hardware-Beleg
-        klippy_real.log HEAD 2615b96):
-        - HALL2 active (Buffer voll) -> 0.0 (drain via Toolhead,
-          KEIN Push). Alter HALL2-Branch 0.5*v mit MIN_FLOOR=15
-          verursachte Submit @15 mm/s in vollen Buffer wenn
-          tracker_vel=1.6 (Resume-Phase). Strukturell falsch — bei
-          vollem Buffer NIE foerdern.
-        - HALL3 active (Buffer leer) -> feed_speed (lll=70) statt
-          max_feed_speed (100). HALL3-Submit @100 mm/s ueberschoss
-          Arm in 1 Sub-Chunk von HALL3 nach HALL1. feed_speed ist
-          sanfter Initial-Fill.
-        - Zwischenzone proposed < MIN_FLOOR -> 0 (Pipeline-Safe
-          Skip statt force-clamp). Bei tracker=10 -> 1.10*10=11 <
-          15 wurde vorher auf 15 geclampt -> Pipeline-Last bei
-          niedrigem Flow. Stattdessen kein Submit bis tracker_vel
-          hoch genug fuer Pipeline-Safety.
+        HALL-State dominiert; in der Zwischenzone wird die
+        Extruder-Velocity proportional zur Foerder-Rate skaliert mit
+        Schmitt-Trigger-Hysterese gegen on/off-Oszillation.
 
-        Logik:
-          HALL1 (overflow)        -> 0.0 (Notbremse)
-          HALL2 (full)            -> 0.0 (Hotfix5: kein Push in
-                                          vollen Buffer)
-          HALL3 (empty)           -> feed_speed (Hotfix5: sanfter
-                                                 Initial-Fill)
-          tracker not_ready       -> 0.0 (Boot: warten)
-          tracker vel <= 0        -> 0.0 (Toolhead stalled)
-          Zwischenzone proposed
-            < MIN_FLOOR           -> 0.0 (Hotfix5: lieber kein
-                                          Submit als zu langsam)
-            >= MIN_FLOOR          -> extruder_vel * 1.10
+          HALL1 (overflow)  -> 0.0  (Notbremse)
+          HALL2 (full)      -> 0.0  (Buffer voll, nicht weiter pushen)
+          HALL3 (empty)     -> feed_speed  (sanfter Initial-Fill)
+          Tracker not_ready -> 0.0  (Boot: warten auf Sample-Fenster)
+          Tracker vel <= 0  -> 0.0  (Toolhead stalled)
+          Zwischenzone:
+            proposed = extruder_vel * feed_speed_gain
+            Schmitt-Trigger:
+              an  -> bleibt an bis proposed < floor * stop_factor
+              aus -> einschalten ab proposed >= floor
         """
         if self.hall_overflow:
+            self._modulator_feeding = False
             return 0.0
         if self.hall_full:
-            return 0.0  # Hotfix5: HALL2 = stop (Buffer voll)
+            self._modulator_feeding = False
+            return 0.0
         if self.hall_empty:
-            return self.feed_speed  # Hotfix5: feed_speed statt max
-        # Zwischenzone — fluss-proportional, aber kein Force-Clamp
+            self._modulator_feeding = True
+            return self.feed_speed
         if not self.velocity_tracker.is_ready():
-            return 0.0  # Boot: kein Submit, warten auf Tracker
+            self._modulator_feeding = False
+            return 0.0
         extruder_vel = self.velocity_tracker.get_velocity()
         if extruder_vel <= 0.0:
-            return 0.0  # Toolhead stalled — nicht foerdern
+            self._modulator_feeding = False
+            return 0.0
         proposed = extruder_vel * self.feed_speed_gain
-        if proposed < self.min_feed_floor:
-            return 0.0  # Pipeline-safe skip statt force-clamp
-        return proposed
+        stop_threshold = self.min_feed_floor * self.feed_hysteresis_stop_factor
+        if self._modulator_feeding:
+            if proposed >= stop_threshold:
+                return proposed
+            self._modulator_feeding = False
+            return 0.0
+        if proposed >= self.min_feed_floor:
+            self._modulator_feeding = True
+            return proposed
+        return 0.0
 
     def _on_mcu_flush(self, flush_time, step_gen_time):
         """P7-52: Flush-callback driven bang-bang. Klipper's motion_
