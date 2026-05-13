@@ -464,11 +464,14 @@ def test_streaming_anchor_floors_at_mcu_now():
 # ---------------------------------------------------------------------------
 
 def test_interrupt_cap_splits_large_chunk():
-    """P7-66b: flush_callback_chunk_mm=45 + interrupt_chunk_mm=9 →
-    der erste submittierte trapezoid ist 9 mm groß, der Rest landet
-    in _pending_remaining_mm (36 mm) und wird über _tick_pending_-
-    chunk in 4 weitere 9-mm-Sub-Chunks zerlegt. Ohne diesen Cap
-    würde HALL2 erst nach 45 mm overshoot greifen."""
+    """C-cont Hotfix3: _on_mcu_flush submittet nur noch interrupt_-
+    chunk_mm (9), nicht flush_callback_chunk_mm (45). Damit ist nur
+    1 Sub-Chunk in-flight (kein Pending-Pipeline). HALL1-Trigger
+    stoppt die Pipeline sofort beim naechsten flush-callback.
+
+    Vor Hotfix3: 45mm submittet, 36mm pending — Buffer-Arm schoss
+    durch HALL2 in HALL1 (Hardware 2026-05-13 klippy(9), 30/30
+    Cycles HALL1-Overshoot-Storm)."""
     printer, feeder = make_feeder(values={
         'flush_callback_chunk_mm': 45.0,
         'interrupt_chunk_mm': 9.0,
@@ -485,7 +488,7 @@ def test_interrupt_cap_splits_large_chunk():
                    if c[0] is feeder.trapq]
     assert len(new_appends) == 1, "erster sub-chunk fehlt"
 
-    # Submitted distance entspricht dem 9-mm-Sub-Chunk, nicht 45 mm.
+    # Submitted distance entspricht dem 9-mm-Sub-Chunk.
     # trapq_append args: (trapq, t0, accel_t, cruise_t, decel_t,
     # start_pos_x, ..., axes_r_x, ..., 0., cruise_v, accel)
     args = new_appends[0]
@@ -498,12 +501,14 @@ def test_interrupt_cap_splits_large_chunk():
     decel_dist = 0.5 * accel * decel_t * decel_t
     submitted = accel_dist + cruise_dist + decel_dist
     assert submitted == pytest.approx(9.0, abs=0.01), (
-        "erster Sub-Chunk falsche Größe: %.3f mm (erwartet 9 mm). "
-        "interrupt_chunk_mm-Cap greift nicht." % submitted)
+        "Sub-Chunk falsche Groesse: %.3f mm (erwartet 9 mm). "
+        "interrupt_chunk_mm-Submit greift nicht." % submitted)
 
-    # Restdistanz: 45 - 9 = 36 mm, gequeued als pending.
-    assert feeder._pending_remaining_mm == pytest.approx(36.0, abs=0.001)
-    assert feeder._pending_submit_chunk_cap == pytest.approx(9.0, abs=0.001)
+    # Hotfix3: KEIN pending_remaining_mm, da nur 9mm submittet wurde.
+    # Submit-Chunk-Cap bleibt gesetzt fuer Safety-Pfade (HALL2-Mid-
+    # Move-Splitting, falls submit_move spaeter doch in einen Sub-
+    # Chunk-Stream gerinkt).
+    assert feeder._pending_remaining_mm == pytest.approx(0.0, abs=0.001)
 
 
 def test_hall_full_aborts_pending_sub_chunks_in_tick():
@@ -664,11 +669,16 @@ def test_streaming_then_hall2_aborts_in_flight_via_pending_clear():
 # ---------------------------------------------------------------------------
 
 def test_streaming_then_halt_motion_clears_all_pending():
-    """Codex 4.3: Streaming aktiv (Chunk in flight + Lookahead sub-
-    chunks pending), dann wird _halt_motion() gerufen. Verify:
+    """Codex 4.3 + C-cont Hotfix3: Streaming aktiv, dann wird _halt_-
+    motion() gerufen. Verify:
       - _continuous_feed=False
       - _pending_remaining_mm=0
-      - keine weiteren Submits via nachfolgendem flush oder tick."""
+      - keine weiteren Submits via nachfolgendem flush oder tick.
+
+    Hotfix3: _on_mcu_flush submittet nur noch interrupt_chunk_mm —
+    daher KEIN _pending_remaining_mm im Continuous-Mode mehr. Wir
+    setzen es zum Test eines aktiven Sub-Chunk-Streams kuenstlich,
+    um die HALT-Cleanup-Logik zu pruefen."""
     printer, feeder = make_feeder(values={
         'flush_callback_chunk_mm': 45.0,
         'interrupt_chunk_mm': 9.0,
@@ -676,11 +686,15 @@ def test_streaming_then_halt_motion_clears_all_pending():
     motion_q = printer.lookup_object('motion_queuing')
     set_sensor_active(feeder, 'hall_empty', True)
 
-    # Aktiviere Streaming + pending sub-chunks.
+    # Aktiviere Streaming. Hotfix3: nur 1 Sub-Chunk in-flight, kein
+    # _pending_remaining_mm. Wir kuenstlich pendingen, um die _halt_-
+    # motion-Cleanup-Path zu testen (Sub-Chunk-Stream-Cleanup bleibt
+    # relevant fuer Legacy-Pfade ausserhalb Continuous-Streaming).
     feeder.reactor.now = 5.00
     motion_q.trigger_flush(flush_time=5.00, step_gen_time=5.05)
     assert feeder._continuous_feed is True
-    assert feeder._pending_remaining_mm > 0
+    feeder._pending_remaining_mm = 27.0  # Kuenstlich seeden
+    feeder._pending_submit_chunk_cap = 9.0
 
     # HALT: simuliert OVERFLOW/JAM/User-HALT.
     feeder._halt_motion()

@@ -1862,12 +1862,26 @@ class BufferFeeder:
     # -----------------------------------------------------------------------
 
     def _mark_hall1_active(self):
-        """C-cont T5: HALL1-Edge im STATE_AUTO — defer state-transition,
-        nur Timestamp setzen. _main_tick prueft Persist >
-        hall1_persist_timeout fuer echten OVERFLOW-Safety-Trigger.
+        """C-cont T5 + Hotfix3: HALL1-Edge im STATE_AUTO.
+
+        Wenn HALL2 gleichzeitig active (mechanisch eindeutig: Arm
+        bereits in End-Position, kein Sensorblitzer mehr moeglich) ->
+        instant _enter_overflow (kein Persist-Wait). Sonst Soft-Trigger
+        via Timestamp; _main_tick prueft Persist > hall1_persist_-
+        timeout fuer den echten OVERFLOW-Safety-Trigger.
+
+        Begruendung: Hardware-Test 2026-05-13 klippy(9), 30/30 Cycles
+        HALL1-Overshoot-Storm zeigte, dass HALL2+HALL1 simultan
+        ausschliesslich beim Buffer-Arm-Maximalanschlag auftritt — kein
+        Bouncing-Szenario. Soft-Wait waere hier nur Filament-Grind-
+        Verlaengerung.
 
         Idempotent: bereits gesetzten Timestamp NICHT ueberschreiben,
         damit Persist-Dauer korrekt akkumuliert."""
+        if self.hall_full:
+            # Mechanically unambiguous: arm at maximum stop
+            self._enter_overflow()
+            return
         if self._hall1_active_since is None:
             self._hall1_active_since = self.reactor.monotonic()
 
@@ -2732,23 +2746,23 @@ class BufferFeeder:
             pass
 
     def _compute_target_feed_speed(self):
-        """C-cont T4 + Hotfix2: SpeedModulator mit Mindest-Floor.
+        """C-cont T4 + Hotfix3: SpeedModulator mit weichem Floor.
 
-        HALL-Sensoren + ExtruderVelocity -> target feed_speed (mm/s).
-        Mindest-Floor self.feed_speed verhindert sehr lange Sub-Chunk-
-        Trapeze, die zu Pipeline-Backpressure und stepcompress-Crashes
-        (`c=N i=0` Pattern) fuehrten (Hardware-Test 2026-05-13 mit
-        extruder_velocity=13.6 mm/s -> buffer_time=2.76s -> crash).
+        Hotfix2 hatte hartes Floor=feed_speed (=30) — verursacht das der
+        Buffer-Arm durch HALL2 in HALL1 ueberschoss (Hardware 2026-05-13
+        klippy(9), 30/30 Cycles HALL1-Overshoot-Storm). Hotfix3: weicher
+        10%-Vorlauf statt Konstante, plus weiches Mindest 15 mm/s gegen
+        Pipeline-Backpressure-Crash.
 
         Logik:
-          HALL1 (overflow)      -> 0.0 (Notbremse)
-          HALL3 (empty)         -> max_feed_speed (auffuellen)
-          tracker not_ready     -> feed_speed (Fallback)
-          tracker vel == 0      -> feed_speed (Fallback fuer Pause)
-          HALL2 (full)          -> max(feed_speed/2, 0.5*extruder_vel)
-                                   (sanftes Bremsen aber kein Stillstand)
-          Zwischenzone          -> max(feed_speed, extruder_vel)
-                                   (Mindest-Floor gegen lange Trapeze)
+          HALL1 (overflow)        -> 0.0 (Notbremse)
+          HALL3 (empty)           -> max_feed_speed (auffuellen)
+          tracker not_ready       -> feed_speed (Fallback)
+          tracker vel == 0        -> feed_speed (Fallback fuer Pause)
+          HALL2 (full)            -> max(MIN_FLOOR, 0.5 * extruder_vel)
+                                     (langsam, aber kein Stillstand)
+          Zwischenzone            -> max(MIN_FLOOR, extruder_vel * 1.10)
+                                     (10% Vorlauf statt harter Floor)
         """
         if self.hall_overflow:
             return 0.0
@@ -2763,9 +2777,10 @@ class BufferFeeder:
         # Stepper zum Erliegen bringt.
         if extruder_vel <= 0.0:
             return self.feed_speed
+        MIN_FLOOR = 15.0  # mm/s — Pipeline-Backpressure-Mindest
         if self.hall_full:
-            return max(self.feed_speed / 2.0, 0.5 * extruder_vel)
-        return max(self.feed_speed, extruder_vel)
+            return max(MIN_FLOOR, 0.5 * extruder_vel)
+        return max(MIN_FLOOR, extruder_vel * 1.10)
 
     def _on_mcu_flush(self, flush_time, step_gen_time):
         """P7-52: Flush-callback driven bang-bang. Klipper's motion_
@@ -2945,8 +2960,17 @@ class BufferFeeder:
             self._continuous_feed_direction = 1
         self._continuous_feed_speed = target_speed
 
+        # C-cont Hotfix3: Pipeline-Cap auf 1 Sub-Chunk in-flight.
+        # Hotfix2 submittete flush_callback_chunk_mm (45) und split intern
+        # in 5 Sub-Chunks (interrupt_chunk_mm=9) via _pending_remaining_-
+        # mm. Bei HALL1-Trigger waren immer 5 Sub-Chunks queued -> Buffer-
+        # Arm schoss durch HALL2 in HALL1 (Hardware 2026-05-13 klippy(9),
+        # 30/30 Cycles). Jetzt: jeder flush-callback submittet genau einen
+        # interrupt_chunk_mm Chunk -> kein _pending_remaining_mm im
+        # Continuous-Mode, HALL1-Trigger stoppt die Pipeline sofort beim
+        # naechsten flush-callback.
         self._submit_move(
-            self.flush_callback_chunk_mm,
+            self.interrupt_chunk_mm,
             target_speed,
             forced_t0=anchor,
             streaming=move_active,
