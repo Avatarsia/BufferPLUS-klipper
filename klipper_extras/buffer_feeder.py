@@ -2046,6 +2046,32 @@ class BufferFeeder:
             if not self._startup_grace_done:
                 return eventtime + MAIN_TICK_INTERVAL
 
+            # C-cont T6: HALL1-Persist-Check. In STATE_AUTO loest HALL1-
+            # Edge nicht mehr direkt _enter_overflow aus (siehe T5). Erst
+            # wenn HALL1 laenger als hall1_persist_timeout aktiv ist,
+            # eskaliere zu echtem _enter_overflow (Hardware-Safety-State).
+            # In der Zwischenzeit setzt SpeedModulator (T4) bereits
+            # target_speed=0, der Stepper foerdert nicht. Damit ist HALL1
+            # nicht mehr ein 'instant-State-Wechsel' aber bleibt eine
+            # harte Safety-Eskalation bei mechanisch stuck buffer.
+            if (self._state == STATE_AUTO
+                    and self._hall1_active_since is not None):
+                persist_duration = (
+                    self.reactor.monotonic() - self._hall1_active_since)
+                if persist_duration >= self.hall1_persist_timeout:
+                    if self.buffer_debug_metrics:
+                        logging.info(
+                            "buffer_feeder: HALL1-Persist %.2fs >= "
+                            "%.2fs threshold — entering OVERFLOW state "
+                            "(C-cont T6)",
+                            persist_duration, self.hall1_persist_timeout)
+                    self._enter_overflow()
+                    return eventtime + MAIN_TICK_INTERVAL
+                # Persist innerhalb Timeout: HALL1-Sofort-Trigger via
+                # _is_hall1_active('main_tick') unterdruecken. Der naechste
+                # Tick prueft die Persist-Dauer erneut.
+                return eventtime + MAIN_TICK_INTERVAL
+
             # HALL1 has absolute priority — AUSSER bei aktivem Manual-
             # Retract oder einer UNLOAD-Phase: dann lassen wir den
             # Operator/das Macro den Buffer entlasten. Sobald die

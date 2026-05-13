@@ -240,3 +240,48 @@ def test_c_cont_hall1_cleared_resets_timestamp(monkeypatch):
     set_sensor_active(feeder, 'hall_overflow', False)
     _fire_hall1_callback(feeder)
     assert feeder._hall1_active_since is None
+
+
+# ===========================================================================
+# C-cont T6: HALL1-Persist-Check im _main_tick
+# ===========================================================================
+
+
+def test_c_cont_hall1_persist_triggers_overflow_safety(monkeypatch):
+    """HALL1 active > hall1_persist_timeout -> echter _enter_overflow."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    feeder.hall1_persist_timeout = 2.0
+    # HALL1-Edge (Soft-Trigger via T5)
+    set_sensor_active(feeder, 'hall_overflow', True)
+    _fire_hall1_callback(feeder)
+    assert feeder._state == buffer_feeder.STATE_AUTO  # Soft, kein OVERFLOW
+    assert feeder._hall1_active_since is not None
+    # Simuliere Timer-Fortschritt: _hall1_active_since wurde auf jetziges
+    # reactor.monotonic() gesetzt — manipulieren wir reactor.now direkt.
+    feeder._hall1_active_since = 0.0
+    feeder.reactor.now = 1.0  # 1s — noch im Timeout
+    feeder._main_tick(eventtime=1.0)
+    assert feeder._state == buffer_feeder.STATE_AUTO
+    feeder.reactor.now = 2.5  # 2.5s — Persist > timeout
+    feeder._main_tick(eventtime=2.5)
+    assert feeder._state == buffer_feeder.STATE_OVERFLOW
+
+
+def test_c_cont_hall1_short_blip_no_safety(monkeypatch):
+    """HALL1 active < hall1_persist_timeout, dann cleared -> kein OVERFLOW."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    feeder.hall1_persist_timeout = 2.0
+    set_sensor_active(feeder, 'hall_overflow', True)
+    _fire_hall1_callback(feeder)
+    feeder._hall1_active_since = 0.0
+    feeder.reactor.now = 0.5
+    feeder._main_tick(eventtime=0.5)
+    # HALL1 cleared bevor timeout
+    set_sensor_active(feeder, 'hall_overflow', False)
+    _fire_hall1_callback(feeder)
+    assert feeder._hall1_active_since is None
+    feeder.reactor.now = 1.0
+    feeder._main_tick(eventtime=1.0)
+    assert feeder._state == buffer_feeder.STATE_AUTO
