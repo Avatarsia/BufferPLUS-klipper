@@ -2158,147 +2158,98 @@ class BufferFeeder:
         return 0.0
 
     def _on_mcu_flush(self, flush_time, step_gen_time):
-        """P7-52: Flush-callback driven bang-bang. Klipper's motion_
-        queuing module fires this synchronously inside the MCU flush
-        cycle (klippy/extras/motion_queuing.py callback dispatch loop
-        in flush_handler). We have two
-        timing parameters from the caller:
+        """Flush-callback driven continuous-streaming submit.
+
+        Klipper's motion_queuing module fires this synchronously inside
+        the MCU flush cycle (klippy/extras/motion_queuing.py
+        flush_handler dispatch). The caller supplies:
 
           flush_time     — last time steps were sent to the MCU
-          step_gen_time  — last time Klipper generated steps (>= flush_time)
+          step_gen_time  — last time Klipper generated steps
+                           (>= flush_time)
 
-        Anchoring our submit at step_gen_time + lead_time guarantees
-        the move lands in the very next flush iteration without
-        racing against any toolhead-anchor or stale stepcompress
-        cursor. This was the architectural fix needed to make
-        bang-bang reactive during mid-toolhead-moves (P7-50 attempted
-        the same goal via mcu_now-anchor in _submit_single_trapezoid
-        and crashed; the flush-callback path is the safe equivalent
-        because Klipper itself dictates the anchor time).
+        Anchoring submits at step_gen_time + lead_time guarantees the
+        move lands in the very next flush iteration without racing
+        against any toolhead-anchor or stale stepcompress cursor —
+        Klipper itself dictates the anchor time, which is the
+        architectural advantage over the reactor-tick path.
         """
-        # P7-78 (Issue #29): Track flush-callback activity for Print-
-        # Block-Override (Watchdog-Stale-Detection). Set BEFORE early-
-        # returns so even filtered ticks (state != AUTO, suspended,
-        # use_flush_callback_bang_bang=False) keep the timestamp fresh
-        # — what matters is that the LLL_PLUS MCU is generating steps
-        # somewhere, not whether we decided to act on this tick.
+        # Track flush-callback activity for the watchdog stale-
+        # detection in _main_tick. Set BEFORE early-returns so even
+        # filtered ticks (state != AUTO, suspended) keep the timestamp
+        # fresh — what matters is that the LLL_PLUS MCU is generating
+        # steps somewhere, not whether we decided to act on this tick.
         self._last_mcu_flush_time = flush_time
         if not self.use_flush_callback_bang_bang:
             return
         if self._bang_bang_suspended:
             return
         if self._state != STATE_AUTO:
-            # Macros and operator commands own non-AUTO states. Bang-
-            # bang only acts in AUTO. LOAD/UNLOAD-driven SYNC paths
-            # are handled by their own macros, not by us.
+            # Macros and operator commands own non-AUTO states.
             return
-        # P7-79 (Issue #29 Eifel-Joe 2026-05-13 c=14 i=0 Crash):
-        # Defer flush-callback submits when a post-disable reprime
-        # would race with itersolve still processing the pre-disable
-        # move. Crash-Pfad (verifiziert gegen Source):
-        #   1. M1 (z.B. 9mm Streaming-Chunk) submitted, lme = T+0.13s.
-        #   2. HALL1 OVERFLOW -> _enter_overflow -> _halt_motion +
-        #      _schedule_stepper_disable (Z.1719-1720). Deferred weil
-        #      move in flight; _pending_disable=True.
-        #   3. _main_tick mit M1 zeit-basiert vorbei (now > end) ruft
-        #      _disable_stepper -> _stepcompress_primed=False (Z.1915-
-        #      1917 + Z.2949).
-        #   4. KERN: _move_in_flight() ist zeit-basiert (Z.3398:
-        #      now_pt < end_time). Itersolve laeuft jedoch hinterher
-        #      (step_gen_time < lme), pending Steps fuer M1 sind noch
-        #      nicht generiert.
-        #   5. HALL1 cleared -> _resume_after_overflow ->
-        #      _needs_overflow_prime=True (Z.1772).
-        #   6. Naechster _on_mcu_flush mit step_gen_time < lme(M1)
-        #      feuert _submit_move(0.05, forced_t0=step_gen_time+
-        #      lead_time). In _submit_single_trapezoid Z.3138:
-        #      need_reprime=True (not primed). Forced_t0!=None-Pfad
-        #      ueberspringt flush_step_generation(), ruft aber
-        #      stepper.set_position((0,0,0)) (Z.3148) -> itersolve_pos
-        #      = 0 (reset). _commanded_pos = 0.0.
-        #   7. trapq_append(M2 prime: start=0, end=0.05, t0=anchor).
-        #   8. Gleicher _advance_flush_time-Call: itersolve_gen_steps
-        #      prozessiert pending M1 (start=0, end=9) -> itersolve_-
-        #      pos=9, dann M2 (start=0, end=0.05) -> catch-up REVERSE
-        #      9->0 = ~14 Steps auf demselben Clock -> c=14 i=0
-        #      Invalid sequence (Eifel-Hardware-Log 24 mm^3/s,
-        #      print_time=817.590s).
-        # Fix: solange itersolve den pre-disable Move noch nicht
-        # ausgespielt hat (itersolve_end > step_gen_time) UND der
-        # Cursor durch _disable_stepper geclearrt wurde (not primed),
-        # MUSS der naechste Submit deferren — sonst rasen
-        # set_position(0) und das pending M1-Step-Generation
-        # gegeneinander.
-        # Position: vor dem _needs_overflow_prime-Block damit auch
-        # der Overflow-Prime-Submit (Z.2517) deferred wird — das ist
-        # genau der Crash-Pfad. Der _needs_overflow_prime-Flag bleibt
-        # gesetzt, der naechste Tick mit advanced step_gen_time
-        # uebernimmt den Submit. Worst-case Defer ~lead_time +
-        # chunk_duration ~0.5-0.8s, akzeptabel fuer Overflow-
-        # Recovery.
-        # P7-79b (Codex-Verify v1 HIGH 2026-05-13): Anker MUSS
-        # `_current_move['end_time']` sein, NICHT `_last_move_end_-
-        # time`. Begruendung: P7-74 (`_halt_motion`, Z.3513-3514)
-        # clampt `_last_move_end_time` auf `mcu_now` waehrend mid-
-        # flight Overflow, laesst aber `_current_move` intakt
-        # (Z.3452: explizite Doc-Garantie). Wenn nach dem Clamp
-        # ein _on_mcu_flush mit step_gen_time zwischen mcu_now
-        # (= geclamptes lme) und der echten Move-Ende-Zeit
-        # (_current_move['end_time']) feuert, wuerde der alte
-        # Check `_last_move_end_time > step_gen_time` False
-        # liefern und den Defer umgehen — obwohl M1-Steps in
-        # itersolve noch pending sind. Fallback `_last_move_end_-
-        # time` greift wenn `_current_move is None` (nach Move-
-        # Done aber vor neuem Submit / Boot-Anchor / Pre-Sync-
-        # REPRIME-Pfade, die ebenfalls `_on_mcu_flush` mit
-        # `_current_move=None` triggern).
+        if self._flush_should_defer_pending_itersolve(step_gen_time):
+            return
+        if self._needs_overflow_prime:
+            self._handle_overflow_prime_via_flush(step_gen_time)
+            return
+        if self._stepper_synced_to is not None:
+            # Explicit BUFFER_SYNC_TO_EXTRUDER macro path — would queue
+            # trapezoids on the wrong trapq.
+            return
+        if self._is_hall1_active('submit_move'):
+            # Hard-safety: never feed forward into an overfilled buffer.
+            return
+        self._flush_submit_streaming_chunk(step_gen_time)
+
+    def _flush_should_defer_pending_itersolve(self, step_gen_time):
+        """Defer flush-callback submit while itersolve still has pending
+        steps from the pre-disable move.
+
+        Scenario: a streaming chunk is in flight; HALL1 fires; the move
+        is halted + scheduled for stepper-disable; _main_tick runs
+        _disable_stepper (clears _stepcompress_primed) while itersolve
+        still has pending steps for that chunk. If we now submit a new
+        prime-move via the forced_t0 path (set_position(0)), the next
+        _advance_flush_time call processes the pending pre-disable
+        steps AND the new prime in the same batch → reverse step
+        catch-up → "Invalid sequence" MCU shutdown.
+
+        Anchor on `_current_move['end_time']` rather than
+        `_last_move_end_time`, because _halt_motion clamps lme to
+        mcu_now during mid-flight overflow but leaves _current_move
+        intact.
+        """
         itersolve_end = (self._current_move['end_time']
                          if self._current_move is not None
                          else self._last_move_end_time)
-        if (not self._stepcompress_primed
-                and itersolve_end > step_gen_time):
-            return
-        if self._needs_overflow_prime:
-            # P7-60: Post-OVERFLOW prime via flush-callback path.
-            # _main_tick skips the prime when flush-callback bang-bang
-            # is active so we own the anchor here. step_gen_time +
-            # lead_time is the race-free reference point Klipper just
-            # gave us — submitting the 0.05mm prime-move with this
-            # anchor refreshes our stepcompress cursor without ever
-            # calling flush_step_generation (which would mid-print
-            # drain the toolhead and was the original P7-54 reason
-            # to go via _main_tick). The follow-up bang-bang fills
-            # then ride on a synchronised cursor.
-            self._needs_overflow_prime = False
-            anchor = step_gen_time + self.lead_time
-            self._submit_move(ANCHOR_NUDGE_MM, self.feed_speed,
-                              forced_t0=anchor)
-            return
-        if self._stepper_synced_to is not None:
-            # An explicit BUFFER_SYNC_TO_EXTRUDER (macro path) is in
-            # effect. Stay out of the way — submitting our own move
-            # while synced would queue trapezoids on the wrong trapq.
-            return
+        return (not self._stepcompress_primed
+                and itersolve_end > step_gen_time)
 
-        # Hard-safety: HALL1 forward-reject still applies. Without
-        # this, an overfilled buffer would keep getting fed.
-        if self._is_hall1_active('submit_move'):
-            return
+    def _handle_overflow_prime_via_flush(self, step_gen_time):
+        """Post-OVERFLOW prime via the flush-callback path.
 
-        # C-cont T7: Continuous-streaming submit replaces the former
-        # bang-bang block (hall_full / hall_empty / else with
-        # STABLE_DROP_GRACE). Every flush-callback computes target_-
-        # speed via SpeedModulator (_compute_target_feed_speed) from
-        # the HALL-sensor combination + ExtruderVelocityTracker.
-        # Submit only when target_speed > 0; otherwise no move
-        # (emergency brake, or modulator decided no feed demand right
-        # now).
-        #
-        # Lookahead pipeline (P7-66 streaming pattern) is preserved:
-        # a new chunk is only queued when the running move has less
-        # than lead_time remaining; the sub-chunk pipeline
-        # (_pending_remaining_mm) still gates as before (HALL2
-        # interrupt via move splitting).
+        Refreshes the stepcompress cursor with a tiny 0.05mm move
+        anchored at step_gen_time + lead_time — race-free against the
+        toolhead pipeline (no flush_step_generation needed).
+        Follow-up bang-bang fills then ride on the synchronised
+        cursor.
+        """
+        self._needs_overflow_prime = False
+        anchor = step_gen_time + self.lead_time
+        self._submit_move(ANCHOR_NUDGE_MM, self.feed_speed,
+                          forced_t0=anchor)
+
+    def _flush_submit_streaming_chunk(self, step_gen_time):
+        """Continuous-streaming submit driven by the SpeedModulator.
+
+        Every flush callback computes target_speed via
+        _compute_target_feed_speed from the HALL state and the
+        ExtruderVelocityTracker. Submit a single sub-chunk
+        (interrupt_chunk_mm) when target_speed > 0 and no
+        sub-chunk pipeline is already running. Otherwise no move —
+        either HALL1/HALL2 says stop, or the SpeedModulator decided
+        there is no feed demand right now.
+        """
         target_speed = self._compute_target_feed_speed()
         if target_speed <= 0.0:
             if self.buffer_debug_metrics:
@@ -2309,8 +2260,6 @@ class BufferFeeder:
                     self.velocity_tracker.is_ready())
             return
 
-        # Lookahead check: is a move still in flight? P7-66 streaming
-        # pattern.
         move_active = self._move_in_flight()
         if move_active:
             remaining = self._last_move_end_time - step_gen_time
@@ -2319,32 +2268,23 @@ class BufferFeeder:
         if self._pending_remaining_mm > 0:
             return  # sub-chunk pipeline already running
 
-        # Anchor as in bang-bang (P7-66 pattern).
         if move_active:
             anchor = self._last_move_end_time
         else:
             anchor = step_gen_time + self.lead_time
 
-        # C-cont T7: continuous_feed stays structurally True in stream
-        # mode. Reset only on a real inactive->active transition
-        # (P7-57: safety-distance accumulator reset; P7-61b:
-        # _feed_deadline_time reset).
         if not self._continuous_feed:
+            # Real inactive -> active transition: reset safety counters.
             self._feed_distance_accumulator = 0.0
             self._feed_deadline_time = None
             self._continuous_feed = True
             self._continuous_feed_direction = 1
         self._continuous_feed_speed = target_speed
 
-        # C-cont Hotfix3: Pipeline-Cap auf 1 Sub-Chunk in-flight.
-        # Hotfix2 submittete flush_callback_chunk_mm (45) und split intern
-        # in 5 Sub-Chunks (interrupt_chunk_mm=9) via _pending_remaining_-
-        # mm. Bei HALL1-Trigger waren immer 5 Sub-Chunks queued -> Buffer-
-        # Arm schoss durch HALL2 in HALL1 (Hardware 2026-05-13 klippy(9),
-        # 30/30 Cycles). Jetzt: jeder flush-callback submittet genau einen
-        # interrupt_chunk_mm Chunk -> kein _pending_remaining_mm im
-        # Continuous-Mode, HALL1-Trigger stoppt die Pipeline sofort beim
-        # naechsten flush-callback.
+        # Pipeline-Cap: one sub-chunk in-flight at a time so a HALL1/
+        # HALL2 transition can stop the pipeline at the next flush
+        # callback instead of letting an already-queued chunk overrun
+        # the buffer arm.
         self._submit_move(
             self.interrupt_chunk_mm,
             target_speed,
