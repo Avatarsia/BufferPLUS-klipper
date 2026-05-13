@@ -382,6 +382,9 @@ class FakeConfig:
     def get_name(self):
         return self.name
 
+    def error(self, message):
+        return RuntimeError(message)
+
     def get(self, key, default=None):
         return self.values.get(key, default)
 

@@ -12,6 +12,7 @@ from ._buffer_common import (
     STATE_LOADING_PUSH, STATE_MANUAL_RETRACT, STATE_OVERFLOW,
     STATE_UNLOADING,
 )
+from .buffer_types import Hall1Context
 
 
 class FaultManager:
@@ -21,13 +22,14 @@ class FaultManager:
         self.reactor = owner.reactor
 
     def is_hall1_active(self, context):
+        context = Hall1Context.coerce(context)
         owner = self.owner
         if not owner.hall_overflow:
             return False
 
         phase3_overflow_ok = (owner._state == STATE_LOADING_PUSH
                               and owner._load_phase3_overflow_ok)
-        if context == 'sensor_callback':
+        if context is Hall1Context.SENSOR_CALLBACK:
             if phase3_overflow_ok:
                 return False
             if owner._state in (STATE_UNLOADING, STATE_MANUAL_RETRACT):
@@ -35,7 +37,7 @@ class FaultManager:
             if owner._stepper_synced_to is not None:
                 return False
             return True
-        if context == 'main_tick':
+        if context is Hall1Context.MAIN_TICK:
             if owner._state in (STATE_OVERFLOW, STATE_MANUAL_RETRACT,
                                 STATE_UNLOADING):
                 return False
@@ -43,11 +45,7 @@ class FaultManager:
                 return False
             if owner._stepper_synced_to is not None:
                 return False
-            # Fault-overlay: skip re-trigger while overlay flag is set
-            # (state stays LOAD_PHASE_3 in overlay mode, but the main_tick
-            # poll would otherwise re-enter _enter_overflow on every
-            # cycle).
-            if owner.use_fault_overlay and owner._fault_overflow:
+            if owner.use_overflow_overlay and owner._fault_overflow:
                 return False
             # Post-LOAD HALL1-grace: after Phase 3 exit via stable HALL1
             # the buffer is legitimately full — main_tick must not bounce
@@ -56,11 +54,11 @@ class FaultManager:
             if owner._post_load_overflow_grace:
                 return False
             return True
-        if context == 'submit_move':
+        if context is Hall1Context.SUBMIT_MOVE:
             return not phase3_overflow_ok
-        if context in ('auto_on', 'phase3_entry'):
+        if context in (Hall1Context.AUTO_ON, Hall1Context.PHASE3_ENTRY):
             return True
-        raise ValueError("Unknown HALL1 context: %s" % (context,))
+        raise ValueError("Unknown HALL1 context: %s" % (context.value,))
 
     def clear_recovery_flags(self):
         self.owner._jam_active = False
@@ -108,12 +106,12 @@ class FaultManager:
             owner._overflow_resume_mm = 0.0
             return
 
-        # In fault-overlay mode the cmd_BUFFER_LOAD_PHASE3 while-loop is
+        # In overflow-overlay mode the cmd_BUFFER_LOAD_PHASE3 while-loop is
         # still spinning — keep _state=LOAD_PHASE_3 so the loop continues
         # feeding instead of falling through to STATE_AUTO and silently
         # returning success on an aborted phase 3.
         if (interrupted == STATE_LOADING_PUSH
-                and owner.use_fault_overlay
+                and owner.use_overflow_overlay
                 and owner._state == STATE_LOADING_PUSH):
             owner._overflow_resume_mm = 0.0
             owner._enable_stepper()
@@ -146,7 +144,8 @@ class FaultManager:
 
     def check_auto_ready(self, allow_jam=False):
         owner = self.owner
-        if self.is_hall1_active('auto_on') or owner._state == STATE_OVERFLOW:
+        if (self.is_hall1_active(Hall1Context.AUTO_ON)
+                or owner._state == STATE_OVERFLOW):
             return "HALL1 overflow active"
         if not allow_jam and (owner._state == STATE_JAM or owner._jam_active):
             return ("JAM active — inspect and call BUFFER_CLEAR_JAM, "

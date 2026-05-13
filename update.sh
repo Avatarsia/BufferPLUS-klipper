@@ -30,15 +30,26 @@ EXT_SOURCE="${REPO_DIR}/klipper_extras/buffer_feeder.py"
 EXT_TARGET="${KLIPPER_DIR}/klippy/extras/buffer_feeder.py"
 EXT_DIR="${REPO_DIR}/klipper_extras"
 EXT_TARGET_DIR="${KLIPPER_DIR}/klippy/extras"
-EXT_SUB_MODULES=(
-    "_buffer_common.py"
-    "buffer_fault.py"
-    "buffer_modulator.py"
-    "buffer_sensors.py"
-    "buffer_stepper.py"
-)
+ENABLE_SPARSE_CHECKOUT="${ENABLE_SPARSE_CHECKOUT:-0}"
 CFG_SOURCE="${REPO_DIR}/lll.cfg"
 CFG_TARGET="${PRINTER_CFG_DIR}/lll.cfg"
+
+collect_ext_sub_modules() {
+    local sub_path sub_name
+    EXT_SUB_MODULES=()
+    for sub_path in "${EXT_DIR}"/*.py; do
+        [ -e "${sub_path}" ] || continue
+        sub_name="$(basename "${sub_path}")"
+        case "${sub_name}" in
+            buffer_feeder.py|__init__.py)
+                continue
+                ;;
+        esac
+        EXT_SUB_MODULES+=("${sub_name}")
+    done
+}
+
+collect_ext_sub_modules
 
 # ---------- Sanity ----------
 [ -d "${KLIPPER_DIR}/klippy/extras" ] || {
@@ -60,22 +71,24 @@ SUDO=""
 
 cd "${REPO_DIR}"
 
-# ---------- 0) Drucker-Modus: tests/ aus Working-Tree ausblenden ----------
-# Sparse-checkout sorgt dafuer, dass git pull tests/ gar nicht erst auf
-# die Drucker-SD legt. Idempotent: beim ersten Aufruf aktivieren, sonst
-# no-op. Zum Re-Aktivieren von Tests (Dev-Maschine):
-#   git config --unset core.sparseCheckout
-#   git read-tree -m -u HEAD
-SPARSE_FILE=".git/info/sparse-checkout"
-if [ "$(git config --get core.sparseCheckout 2>/dev/null || true)" != "true" ]; then
-    echo "[update] Aktiviere sparse-checkout (Drucker-Modus, ohne tests/)"
-    git config core.sparseCheckout true
-    mkdir -p .git/info
-    cat > "${SPARSE_FILE}" <<'EOF'
+# ---------- 0) Optional: Drucker-Modus ohne tests/ ----------
+# Repo-Mutationen wie sparse-checkout sind opt-in. Default: update.sh
+# veraendert den Git-Checkout des Users NICHT. Aktivierung explizit via:
+#   ENABLE_SPARSE_CHECKOUT=1 ./update.sh
+if [ "${ENABLE_SPARSE_CHECKOUT}" = "1" ]; then
+    SPARSE_FILE=".git/info/sparse-checkout"
+    if [ "$(git config --get core.sparseCheckout 2>/dev/null || true)" != "true" ]; then
+        echo "[update] Aktiviere sparse-checkout (opt-in, ohne tests/)"
+        git config core.sparseCheckout true
+        mkdir -p .git/info
+        cat > "${SPARSE_FILE}" <<'EOF'
 /*
 !/tests/
 EOF
-    git read-tree -m -u HEAD
+        git read-tree -m -u HEAD
+    fi
+else
+    echo "[update] Sparse-checkout bleibt unveraendert (opt-in via ENABLE_SPARSE_CHECKOUT=1)"
 fi
 
 # ---------- 1) git pull ----------
@@ -98,13 +111,18 @@ done
 
 # ---------- 3) lll.cfg kopieren (mit Rolling-Backup) ----------
 mkdir -p "${PRINTER_CFG_DIR}"
-if [ -e "${CFG_TARGET}" ] && ! [ -L "${CFG_TARGET}" ]; then
-    cp "${CFG_TARGET}" "${CFG_TARGET}.dev.bak"
+if [ -e "${CFG_TARGET}" ] || [ -L "${CFG_TARGET}" ]; then
+    CFG_BACKUP="${CFG_TARGET}.dev.bak.$(date +%Y%m%d-%H%M%S)"
+    cp -a "${CFG_TARGET}" "${CFG_BACKUP}"
 fi
 # falls noch alter Symlink: erst entfernen, sonst schreibt cp die Repo-Datei
 [ -L "${CFG_TARGET}" ] && rm "${CFG_TARGET}"
 cp "${CFG_SOURCE}" "${CFG_TARGET}"
-echo "[update] lll.cfg überschrieben: ${CFG_TARGET} (Backup: ${CFG_TARGET}.dev.bak falls vorhanden)"
+if [ -n "${CFG_BACKUP:-}" ]; then
+    echo "[update] lll.cfg überschrieben: ${CFG_TARGET} (Backup: ${CFG_BACKUP})"
+else
+    echo "[update] lll.cfg überschrieben: ${CFG_TARGET}"
+fi
 
 # ---------- 4) Klipper-Restart ----------
 echo "[update] Klipper-Service neustarten (${KLIPPER_SERVICE})"

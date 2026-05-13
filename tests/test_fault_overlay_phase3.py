@@ -7,11 +7,7 @@ state-flip path remains untouched.
 """
 
 from klipper_extras import buffer_feeder
-
-
-def set_sensor_active(feeder, sensor_name, active):
-    polarity_flip = feeder._pin_polarity_flip[sensor_name]
-    feeder._pin_stable_state[sensor_name] = (not active) if polarity_flip else active
+from helpers import set_sensor_active
 
 
 def test_enter_overflow_overlay_keeps_phase3_state(feeder_factory):

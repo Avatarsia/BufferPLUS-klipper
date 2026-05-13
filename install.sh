@@ -23,19 +23,29 @@ EXT_SOURCE="${REPO_DIR}/klipper_extras/buffer_feeder.py"
 EXT_TARGET="${KLIPPER_DIR}/klippy/extras/buffer_feeder.py"
 EXT_DIR="${REPO_DIR}/klipper_extras"
 EXT_TARGET_DIR="${KLIPPER_DIR}/klippy/extras"
-# Hilfsmodule des buffer_feeder-Plugins. Werden in derselben Action
-# wie buffer_feeder.py mit-symlinkt; Klipper laedt sie nicht als
-# eigene Config-Plugins, weil sie kein load_config_prefix exportieren.
-EXT_SUB_MODULES=(
-    "_buffer_common.py"
-    "buffer_fault.py"
-    "buffer_modulator.py"
-    "buffer_sensors.py"
-    "buffer_stepper.py"
-)
 CFG_SOURCE="${REPO_DIR}/lll.cfg"
 CFG_TARGET="${PRINTER_CFG_DIR}/lll.cfg"
 PRINTER_CFG="${PRINTER_CFG_DIR}/printer.cfg"
+
+collect_ext_sub_modules() {
+    # All Python sidecar modules ship next to buffer_feeder.py and are
+    # symlinked flat into klippy/extras/. Exclude the main entry-point and
+    # our local package marker; Klipper already owns klippy/extras/__init__.py.
+    local sub_path sub_name
+    EXT_SUB_MODULES=()
+    for sub_path in "${EXT_DIR}"/*.py; do
+        [ -e "${sub_path}" ] || continue
+        sub_name="$(basename "${sub_path}")"
+        case "${sub_name}" in
+            buffer_feeder.py|__init__.py)
+                continue
+                ;;
+        esac
+        EXT_SUB_MODULES+=("${sub_name}")
+    done
+}
+
+collect_ext_sub_modules
 
 # ---------- Farben / Format ----------
 if [ -t 1 ]; then

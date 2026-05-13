@@ -4,11 +4,7 @@ Migrated from test_smoke.py + test_status_dump.py (2026-05-12).
 """
 
 from klipper_extras import buffer_feeder
-
-
-def set_sensor_active(feeder, sensor_name, active):
-    polarity_flip = feeder._pin_polarity_flip[sensor_name]
-    feeder._pin_stable_state[sensor_name] = (not active) if polarity_flip else active
+from helpers import set_sensor_active
 
 
 # --- Bootstrap (from test_smoke.py) ---
@@ -22,12 +18,10 @@ def test_buffer_feeder_smoke(fake_config):
     assert status["state"] == buffer_feeder.STATE_INIT
     assert "hall_overflow" in status
     assert "fault_overflow" in status
-    assert "fault_runout" in status
-    assert "fault_jam" in status
+    assert "overflow_overlay_enabled" in status
     assert "use_fault_overlay" in status
     assert status["fault_overflow"] is False
-    assert status["fault_runout"] is False
-    assert status["fault_jam"] is False
+    assert status["overflow_overlay_enabled"] is False
     assert status["use_fault_overlay"] is False
 
     gcode.commands["BUFFER_STATE_DUMP"]["handler"](None)
@@ -50,8 +44,6 @@ def test_get_status_exposes_important_flags(feeder_factory):
     set_sensor_active(feeder, "entrance", True)
     feeder._jam_active = True
     feeder._fault_overflow = True
-    feeder._fault_runout = True
-    feeder._fault_jam = True
     feeder._stepper_synced_to = "extruder"
 
     status = feeder.get_status(0.0)
@@ -64,8 +56,7 @@ def test_get_status_exposes_important_flags(feeder_factory):
     assert status["jam_active"] is True
     assert status["synced_to_extruder"] == "extruder"
     assert status["fault_overflow"] is True
-    assert status["fault_runout"] is True
-    assert status["fault_jam"] is True
+    assert status["overflow_overlay_enabled"] is True
     assert status["use_fault_overlay"] is True
 
 
@@ -82,8 +73,6 @@ def test_buffer_state_dump_reports_core_flags(feeder_factory):
     set_sensor_active(feeder, "entrance", True)
     feeder._jam_active = True
     feeder._fault_overflow = True
-    feeder._fault_runout = False
-    feeder._fault_jam = True
     feeder._stepper_synced_to = "extruder"
 
     feeder.cmd_BUFFER_STATE_DUMP(None)
@@ -95,5 +84,5 @@ def test_buffer_state_dump_reports_core_flags(feeder_factory):
     assert "hall_overflow(HALL1)= True" in dump
     assert "entrance_detected  = True" in dump
     assert "jam_active         = True" in dump
-    assert "overlay flags     = overflow=True runout=False jam=True (use=True)" in dump
+    assert "overflow overlay  = active=True enabled=True" in dump
     assert "synced_to_extruder = extruder" in dump

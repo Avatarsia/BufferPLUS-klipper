@@ -49,209 +49,28 @@ from ._buffer_common import (
 # ---------------------------------------------------------------------------
 
 from .buffer_fault import FaultManager
+from .buffer_cleanup import CleanupCoordinator
+from .buffer_config import BufferConfigValues
 from .buffer_modulator import ExtruderVelocityTracker
 from .buffer_sensors import HallSensorMonitor
+from .buffer_state import BufferRuntimeState
 from .buffer_stepper import SyncCoordinator
+from .buffer_types import AnchorPlan, CleanupOptions, Hall1Context
 
 
 class BufferFeeder:
-    # ----------------------------------------------------------------------
-    # TODO(P7-30+): Fault-Overlay Migration (siehe Issue #15 Phase 4)
-    # ----------------------------------------------------------------------
-    # Aktuell sind OVERFLOW, RUNOUT und JAM exklusive _state-Werte. Das ist
-    # eine flache State-Maschine mit Fault-States. Industriestandard fuer
-    # Fault-Handling ist HSM mit Fault-Overlay-Flags: der "normale" State
-    # bleibt erhalten (FILLING/FEEDING/IDLE), Faults sind orthogonale
-    # Overlay-Flags (_fault_overflow, _fault_runout, _fault_jam) plus
-    # Guard-Bedingungen.
-    #
-    # Vorteil: ein Resume-Pfad statt drei separate Mechanismen.
-    #
-    # Migration ist mehrere Tage Arbeit pro State und braucht parallele
-    # Test-Coverage. Status der schrittweisen Umsetzung:
-    #
-    #   ✅ Flag use_fault_overlay + Overlay-Felder eingefuehrt
-    #   ✅ cmd_BUFFER_LOAD_PHASE3 OVERFLOW-Behandlung migriert
-    #          (_enter_overflow laesst state=LOAD_PHASE_3 statt
-    #           STATE_OVERFLOW zu kippen wenn use_fault_overlay=1)
-    #   P7-?? offen: _enter_overflow / _exit_overflow fuer alle anderen
-    #          States auf Overlay umstellen
-    #   P7-?? offen: _trigger_jam / BUFFER_CLEAR_JAM auf Overlay
-    #   P7-?? offen: RUNOUT-Pfade migrieren
-    #   P7-?? offen: LOAD_PHASE_1 + LOAD_PHASE_3 zu LOAD-Substate kollabieren
-    #
-    # Mit use_fault_overlay=1 ist NUR der LOAD_PHASE_3-Pfad migriert.
-    # Alle anderen Fault-Pfade (OVERFLOW ausserhalb Phase 3, RUNOUT,
-    # JAM) laufen weiterhin als state-flip. Migration paused — wird
-    # bei Bedarf einzeln wieder aufgenommen.
+    # This class remains the Klipper-facing entry-point, but the config,
+    # runtime state, guard typing, and cleanup logic now live in
+    # dedicated helper modules so the state machine is easier to reason
+    # about. Fault overlays are explicitly scoped to OVERFLOW handling.
     def __init__(self, config):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         self.name = config.get_name().split()[1]   # "mellow"
-
-        # ----- Config: speeds -----
-        self.feed_speed         = config.getfloat('feed_speed',         30., above=0.)
-        self.manual_speed       = config.getfloat('manual_speed',       15., above=0.)
-        self.burst_speed        = config.getfloat('burst_speed',        50., above=0.)
-        self.load_fast_speed    = config.getfloat('load_fast_speed',    50., above=0.)
-        self.load_slow_speed    = config.getfloat('load_slow_speed',     5., above=0.)
-        self.unload_fast_speed  = config.getfloat('unload_fast_speed',  50., above=0.)
-        # unload_phase3_speed: Geschwindigkeit fuer BUFFER_UNLOAD_PHASE3 (Buffer
-        # allein zieht Filament rueckwaerts bis Eingang frei). Separat von
-        # unload_fast_speed, damit der synced G1 E-{sync_dist} Move langsam
-        # bleiben kann (Extruder-Blockierung bei hoher Geschwindigkeit) waehrend
-        # PHASE3 wieder schnell laeuft. Default = unload_fast_speed (rueckwaerts-
-        # kompatibel: wer keinen Wert setzt, behalt das bisherige Verhalten).
-        self.unload_phase3_speed = config.getfloat('unload_phase3_speed',
-                                                   self.unload_fast_speed,
-                                                   above=0.)
-        self.grip_speed         = config.getfloat('grip_speed',         55., above=0.)
-        self.accel              = config.getfloat('accel',            1000., above=0.)
-
-        # ----- Config: distances / durations -----
-        self.manual_chunk_distance = config.getfloat('manual_chunk_distance', 10.,  above=0.)
-        self.burst_distance        = config.getfloat('burst_distance',       1300., above=0.)
-        self.grip_duration         = config.getfloat('grip_duration',          10., above=0.)
-        self.grip_follow_distance  = config.getfloat('grip_follow_distance',   0., minval=0.)
-        self.grip_follow_speed     = config.getfloat('grip_follow_speed',      30., above=0.)
-        self.load_fast_distance    = config.getfloat('load_fast_distance',   1000., above=0.)
-        self.load_slow_distance    = config.getfloat('load_slow_distance',    180., above=0.)
-        self.load_buffer_max       = config.getfloat('load_buffer_max',      2000., above=0.)
-        self.unload_sync_distance  = config.getfloat('unload_sync_distance',  400., above=0.)
-        self.unload_fast_max       = config.getfloat('unload_fast_max',      5000., above=0.)
-
-        # ----- Config: safety limits -----
-        self.max_feed_time      = config.getfloat('max_feed_time',       60.,  above=0.)
-        self.max_feed_distance  = config.getfloat('max_feed_distance',  3000., above=0.)
-        self.hall_debounce_ms   = config.getint  ('hall_debounce_ms',    50,   minval=0)
-        self.lead_time          = config.getfloat('lead_time',            0.3, above=0.)
-        # Caps pending trapq time for any single move-submit. Long
-        # BUFFER_FEED DISTANCE=1000 style moves get chunked so that
-        # HALT / OVERFLOW can take effect within one chunk instead
-        # of waiting out the full nominal move duration.
-        self.max_move_chunk_mm  = config.getfloat('max_move_chunk_mm',  50.0,  above=0.)
-        # Flush-Callback-Pfad benutzt einen eigenen, kleineren Chunk damit
-        # der Feeder den HALL1-Overflow-Bereich nicht ueberschiesst.
-        # Default 15.0mm = HALL3->HALL2-Pufferweg am Mellow LLL Plus.
-        self.flush_callback_chunk_mm = config.getfloat('flush_callback_chunk_mm', 15.0, above=0.)
-        # Maximum size of a SINGLE submitted trapezoid in the
-        # AUTO bang-bang streaming path. When flush_callback_chunk_mm
-        # exceeds this cap, the chunk is split into sub-chunks via
-        # _pending_remaining_mm so HALL2/HALL1 can abort between
-        # sub-chunks (move-splitting interrupt). Default 9.0 mm gives
-        # ~128 ms sub-chunk duration at 70 mm/s — bounded overshoot.
-        # Hardware-test 2026-05-12: 45 mm without a cap → grinding.
-        # Cap <= max_move_chunk_mm.
-        self.interrupt_chunk_mm = config.getfloat(
-            'interrupt_chunk_mm', 9.0, above=0.)
-        if self.interrupt_chunk_mm > self.max_move_chunk_mm:
-            self.interrupt_chunk_mm = self.max_move_chunk_mm
-        # C-cont T3: max_feed_speed = Cap fuer SpeedModulator-Output.
-        # Bei extruder_velocity * factor sollte das Stepper-Hardware-Limit
-        # nicht ueberschritten werden. Default 100 mm/s (deutlich ueber
-        # Default feed_speed=30, lll.cfg-Wert=70).
-        self.max_feed_speed = config.getfloat(
-            'max_feed_speed', 100.0, above=0.)
-        if self.max_feed_speed < self.feed_speed:
-            raise config.error(
-                "max_feed_speed (%.1f) must be >= feed_speed (%.1f)"
-                % (self.max_feed_speed, self.feed_speed))
-        # C-cont T3: HALL1-Persist-Timeout. HALL1 (Ueberlast) im STATE_AUTO
-        # loest erst nach diesem Timeout den echten OVERFLOW-State aus.
-        # In der Zwischenzeit setzt SpeedModulator nur target_speed=0.
-        self.hall1_persist_timeout = config.getfloat(
-            'hall1_persist_timeout', 2.0, above=0.)
-        # C-cont T3: Diagnostik-Logs (Buffer-Metrics alle 1s, Per-Submit-
-        # DEBUG). Default off fuer Production.
-        self.buffer_debug_metrics = config.getboolean(
-            'buffer_debug_metrics', False)
-        # SpeedModulator-Pipeline-Floor. Bei Zwischenzone proposed unter
-        # diesem Wert wird der Submit ausgesetzt (statt force-clamped) —
-        # sehr langsame Trapeze sind anfaellig fuer stepcompress-Sequenz-
-        # Probleme bei niedrigem Flow.
-        self.min_feed_floor = config.getfloat(
-            'min_feed_floor', 15.0, above=0.)
-        # SpeedModulator-Feedforward-Gain. Buffer-Stepper laeuft in der
-        # Zwischenzone mit `extruder_velocity * feed_speed_gain` um eine
-        # leichte Vorrats-Reserve aufzubauen.
-        self.feed_speed_gain = config.getfloat(
-            'feed_speed_gain', 1.10, minval=1.0)
-        # Schmitt-Trigger fuer den Zwischenzonen-Modulator: bei laufender
-        # Foerderung erst dann stoppen wenn `proposed` unter
-        # min_feed_floor * stop_factor faellt. Verhindert on/off-
-        # Oszillation wenn extruder_velocity um den Schwellwert wackelt.
-        self.feed_hysteresis_stop_factor = config.getfloat(
-            'feed_hysteresis_stop_factor', 0.7, minval=0.1, maxval=1.0)
-        # Interval after which an IDLE stepper gets a
-        # micro-anchor move to refresh stepcompress's last_step_clock.
-        # Background: STATE_IDLE has no periodic move activity. After
-        # UNLOAD → IDLE the stepcompress cursor freezes. Once Klipper's
-        # background flush_handler fires more than CLOCK_DIFF_MAX (~17s
-        # @48MHz) after _last_move_end_time, compress_bisect_add hits a
-        # degenerate sequence ("stepcompress o=X i=0 c=N a=0: Invalid
-        # sequence") and the MCU shuts down. This watchdog matches the
-        # well-tested boot-anchor / SYNC-gap-anchor pattern (a 0.05 mm
-        # move in the safe direction is enough to keep last_step_clock
-        # current). Set above 0 — too small wastes motor wear, too large
-        # risks crossing the 17 s threshold. Default 10 s leaves a
-        # comfortable safety margin.
-        self.idle_anchor_gap = config.getfloat(
-            'idle_anchor_gap', 10.0, above=0.)
-
-        # ----- Config: jam detection -----
-        self.jam_detection_enabled = config.getboolean('jam_detection_enabled', True)
-        self.jam_clog_dwell_time   = config.getfloat('jam_clog_dwell_time',    60.,  above=0.)
-        self.jam_clog_extrude_min  = config.getfloat('jam_clog_extrude_min',   30.,  above=0.)
-        self.jam_supply_dwell_time = config.getfloat('jam_supply_dwell_time', 120.,  above=0.)
-        self.jam_action            = config.get('jam_action', 'PAUSE').strip()
-
-        # ----- Config: runout -----
-        self.runout_pause       = config.getboolean('runout_pause', False)
-        self.runout_follow_mm   = config.getfloat('runout_follow_mm', 100., minval=0.)
-
-        # ----- Config: triple click / misc -----
-        self.triple_click_window  = config.getfloat('triple_click_window',  1.5, above=0.)
-        self.feed_burst_enabled   = config.getboolean('feed_burst_enabled', False)
-        self.reenable_cooldown      = config.getfloat('reenable_cooldown',      1.0, minval=0.)
-        self.reenable_cooldown_fast = config.getfloat('reenable_cooldown_fast', 0.5, minval=0.)
-
-        # ----- Config: behaviour -----
-        self.auto_load_after_follow = config.getboolean('auto_load_after_follow', False)
-        # Bang-bang kommt mit Print-Start automatisch hoch, wenn Filament
-        # am Eingang ist und kein Operator-Lockout aktiv. Auf False setzen,
-        # um Bang-bang nur ueber explizites BUFFER_AUTO_ON zu starten.
-        self.auto_engage_on_print_start = config.getboolean('auto_engage_on_print_start', True)
-        # AUTO direkt beim Klipper-Boot engagen wenn Filament am Eingang
-        # da ist und kein Overflow aktiv. Damit reagiert der Buffer auch
-        # auf manuelle Mainsail-Extrusionen ohne aktiven Print — sonst
-        # wuerde nach ~30 mm manueller Extrusion der Buffer leer laufen
-        # und das Filament im Hauptextruder grinden. Auf False setzen
-        # falls der Buffer beim Boot trotz Filament im IDLE bleiben soll.
-        self.auto_engage_on_boot = config.getboolean('auto_engage_on_boot', True)
-        self.min_temp               = config.getfloat('min_temp', 180., minval=0.)
-        self.use_fault_overlay      = config.getboolean('use_fault_overlay', False)
-        # Flush-driven bang-bang. When enabled, bang-bang feed
-        # decisions ride on Klipper's MCU flush cycle (motion_queuing.
-        # register_flush_callback) rather than the 50ms reactor tick.
-        # Move-submits anchor at step_gen_time + lead_time which is
-        # safe by Klipper-mainline contract — no toolhead-anker race,
-        # no cursor-decay. Default off until hardware-validated.
-        self.use_flush_callback_bang_bang = config.getboolean(
-            'use_flush_callback_bang_bang', False)
-
-        # ----- Helper-shared state (BufferFeeder owns it; helpers
-        # read/write via self.owner.X) -----
-        self._stepper_synced_to = None
-        self._jam_active = False
-        self._hall2_start_time = None
-        self._hall2_start_extruder_pos = 0.0
-        self._hall3_start_time = None
-        self._hall3_drop_since = None
-        self._overflow_interrupted_follow = False
-        self._overflow_resume_mm = 0.0
-        self._overflow_resume_dir = 0
-        self._overflow_resume_spd = 0.0
-        self._overflow_interrupted_state = None
+        self.settings = BufferConfigValues.from_config(config)
+        self.settings.apply(self)
+        self.runtime_state = BufferRuntimeState()
+        self.runtime_state.apply(self)
 
         # ----- Stepper + trapq -----
         self.sync = SyncCoordinator(self)
@@ -263,60 +82,7 @@ class BufferFeeder:
         self.stepper = stepper.PrinterStepper(config, units_in_radians=False)
         self.stepper.setup_itersolve('cartesian_stepper_alloc', b'x')
         self.stepper.set_trapq(self.trapq)
-        # Make motion_queuing recompute step-generation scan windows
-        # with our new stepper. Without this call, the internal
-        # step-gen timing budget doesn't account for our stepper and
-        # the first generated step lands past the MCU deadline,
-        # triggering "Timer too close" on the LLL_PLUS MCU at boot.
-        # Same pattern Klipper's kinematics/extruder.py uses in
-        # sync_to_extruder after changing trapq bindings.
         self.motion_queuing.check_step_generation_scan_windows()
-
-        # Stepper position tracking (mm)
-        self._commanded_pos = 0.0          # head of planned moves (end)
-        self._last_move_end_time = 0.0     # print_time at which current/last move ends
-        self._current_move = None          # dict with end_time, direction, distance_left
-        self._feed_distance_accumulator = 0.0  # for safety max_feed_distance
-        self._accumulated_feed_distance = 0.0  # lifetime counter
-        # stepcompress for a stepper starts with last_step_clock=0 and stays
-        # there until the first step. On a printer that idles for long
-        # enough (>~17s — Klipper's CLOCK_DIFF_MAX), the first step's clock
-        # exceeds uint32_t and stepcompress emits an invalid queue_step
-        # ("stepcompress o=X i=... c=... a=...: Invalid sequence" → MCU
-        # shutdown). Prime the stepper once before the first real move by
-        # calling stepper.set_position — same pattern force_move.manual_move
-        # uses. Flag gates the FIRST boot-prime; it is also reset by
-        # _submit_single_trapezoid's REPRIME path whenever the feeder
-        # has been idle longer than REPRIME_GAP (~5s), so a fresh
-        # flush+set_position runs at every long-idle wakeup.
-        # P7-47 added a separate but related fix in SyncCoordinator.
-        # sync_to_extruder: when binding the stepper to the extruder
-        # trapq, we now seed the position with extruder.last_position
-        # (matching klippy/kinematics/extruder.py: ExtruderStepper.
-        # sync_to_extruder) instead of (0,0,0)
-        # — otherwise itersolve sees a 180mm phase mismatch on the
-        # first synced step and crashes with i=0/c=N invalid sequence.
-        # The flag here is the first-move boot prime; the cursor-fresh
-        # logic for ongoing operation lives in
-        # _submit_single_trapezoid's REPRIME_GAP path.
-        self._stepcompress_primed = False
-        # sync-to-extruder state lebt im SyncCoordinator
-        # (self.sync._stepper_synced_to). BufferFeeder exponiert es als
-        # Bridge-Property weiter unten, damit interner self._stepper_-
-        # synced_to Zugriff weiterhin funktioniert.
-        # Monotonic clock tracker for motor_enable/disable scheduling.
-        # queue_digital_out commands on the same pin MUST be scheduled
-        # with strictly non-decreasing MCU clocks: a disable at clock A
-        # followed by an enable at clock B < A makes the MCU re-schedule
-        # the second toggle in the past ("Timer too close" → shutdown).
-        # This happened in the 2026-04-24 HALL1-during-pause crash, where
-        # _disable_stepper and a subsequent _enable_stepper used slightly
-        # different time bases (est_print_time vs. toolhead print_time)
-        # and clock-sync jitter during the stall caused a regression.
-        self._last_enable_schedule_time = 0.0
-
-        # Stepper enable handle (resolved at connect)
-        self._stepper_enable = None
 
         # ----- Sensors + buttons -----
         self.sensors = HallSensorMonitor(self, config)
@@ -330,232 +96,63 @@ class BufferFeeder:
         self._pending_click_msg = self.sensors._pending_click_msg
         self._click_settle_timer = self.sensors._click_settle_timer
 
-        # ----- Operation flags -----
         self.fault = FaultManager(self)
-        self._state = STATE_INIT
-        # Bang-bang is paused while the printer is in a paused/ended
-        # print context (idle_timeout != printing). The flag is armed
-        # on idle_timeout:ready/idle only if we were actively printing,
-        # and cleared on idle_timeout:printing. Manual BUFFER_AUTO_ON
-        # outside a print stays active — the flag never gets armed.
-        self._bang_bang_suspended = False
-        self._initial_grip_end_time = None
-        self._grip_follow_active = False
-        # redundant overflow-resume init removed — FaultManager
-        # already initializes _overflow_interrupted_follow,
-        # _overflow_resume_mm/dir/spd, _overflow_interrupted_state in
-        # its own __init__ (Z. 566-570). Property setters here would
-        # have just re-set the same backing fields to the same defaults.
-        self._load_phase3_distance = 0.0
-        self._load_phase3_max_distance = 0.0
-        self._load_phase3_speed = 0.0       # per-call feed speed in phase 3
-        # Stable-exit-Tracking fuer Phase 3. STABLE_TIMEOUT=N
-        # bedeutet: HALL2 (oder HALL1 wenn OVERFLOW_OK=1) muss N Sekunden
-        # KONTINUIERLICH aktiv sein, bevor Phase 3 sauber beendet wird.
-        # Reset bei Trigger-Loss faengt das Bowden-Widerstand-Zucken ab,
-        # wo der Arm kurz gegen HALL1/HALL2 schlaegt aber sofort
-        # zurueckfaellt — solche Spikes setzen die Stoppuhr zurueck.
-        # STABLE_TIMEOUT=0 = altes Verhalten (Instant-Exit beim ersten
-        # Trigger). OVERFLOW_OK=1 = HALL1-Stable als legitimer Exit
-        # (Buffer ist ueberfuellt → Filament ist da → Phase 2 fertig).
-        self._load_phase3_stable_timeout = 0.0
-        self._load_phase3_overflow_ok = False
-        self._load_phase3_chunk_distance = 10.0
-        self._load_phase3_hall_full_since = None
-        self._load_phase3_hall_overflow_since = None
-        # Drop-Toleranz: kurze Sensor-Flicker (Bowden-Spring zieht
-        # den Arm fuer wenige ms zurueck) sollen die Stable-Stoppuhr
-        # nicht hart resetten. Stattdessen Grace-Period — wenn der Sensor
-        # innerhalb der Toleranz wieder triggered, faengt die alte Uhr an
-        # weiterzulaufen. Erst wenn er N Sekunden komplett aus bleibt,
-        # zaehlt das als echter Reset.
-        self._load_phase3_hall_full_drop_since = None
-        self._load_phase3_hall_overflow_drop_since = None
-
-        # Pending-chunk streaming for single-shot moves larger than
-        # max_move_chunk_mm. _submit_move submits the first chunk
-        # synchronously and records the remaining distance here;
-        # main_tick submits subsequent chunks as prior ones approach
-        # completion. This keeps _last_move_end_time bounded to
-        # roughly 1.5 chunks ahead, so HALT/OVERFLOW stop remaining
-        # chunks from ever being queued to the MCU.
-        self._pending_remaining_mm = 0.0
-        self._pending_direction = 0.0
-        self._pending_speed = 0.0
-        # per-sub-chunk submit cap propagated to _tick_pending_-
-        # chunk so the HALL-interruptible streaming uses the same small
-        # trapezoid size as the first submit. Default None = legacy
-        # max_move_chunk_mm. AUTO+streaming sets this to
-        # interrupt_chunk_mm; LOAD/UNLOAD/MANUAL paths leave it None.
-        self._pending_submit_chunk_cap = None
-        self._continuous_feed = False       # True = keep submitting moves while active
-        self._continuous_feed_direction = 0 # +1 or -1
-        self._continuous_feed_speed = 0.0
-        # Tracked HALL3-leave grace timer in the legacy bang-bang AUTO
-        # path. C-cont T7 removed the read sites in
-        # _on_mcu_flush — the field is now dead in continuous-streaming
-        # but kept (a) for compatibility with the existing test
-        # surface which still writes/asserts on it as a regression
-        # guard against a future legacy path re-emergence, and (b)
-        # because _halt_motion still clears it for free (defense in
-        # depth on the stop paths).
-        self._auto_between_since = None     # dead in C-cont, see comment
-        self._pending_disable = False       # deferred stepper disable (while move in flight)
-        # timestamp of the last idle-watchdog anchor.
-        # Gates the watchdog so it fires at most every idle_anchor_gap
-        # seconds (not on every reactor tick once gap > threshold). Used
-        # by _main_tick. 0.0 means "never fired yet" — first valid trip
-        # happens once mcu_now - _last_move_end_time > idle_anchor_gap.
-        self._last_idle_anchor_time = 0.0
-        # Timestamp wann _on_mcu_flush zuletzt
-        # aufgerufen wurde (MCU print-time). Genutzt vom A
-        # Print-Block-Override: bei print_stats.state == 'printing'
-        # wird der Watchdog hart geblockt, aber wenn _on_mcu_flush
-        # messbar still ist (HALL2-Hysterese-Zwischenzone in
-        # STATE_AUTO), muss der Watchdog feuern damit stepcompress.
-        # last_step_clock nicht altert und der erste Bang-Bang-Submit
-        # nach Stille nicht c=7 Invalid sequence wirft. 0.0 = "noch nie
-        # ein Flush gesehen" (Boot-Schutz, kein Override moeglich).
-        self._last_mcu_flush_time = 0.0
-        # C-cont T5: HALL1-Persist-Tracking. In STATE_AUTO loest HALL1-Edge
-        # nicht mehr direkt _enter_overflow aus, sondern setzt nur den
-        # Timestamp. _main_tick prueft Persist > hall1_persist_timeout und
-        # eskaliert dann zu echtem OVERFLOW (Hardware-Safety). None = HALL1
-        # inactive, float = reactor.monotonic() zum Edge-Time.
-        self._hall1_active_since = None
-        # C-cont T10: Rate-Limit fuer Metrics-Log (1s).
-        self._last_metrics_log_time = 0.0
-        # C-cont T2: ExtruderVelocityTracker fuer SpeedModulator.
-        # Read-only passiver Observer ueber extruder.get_status. Kein
-        # flush_step_generation, kein SYNC -> kein Druckkopf-Pause-
-        # Risiko. Tick-Driver ist _main_tick (50Hz), Tracker drosselt
-        # intern auf sample_interval=0.025s (40Hz).
+        self.cleanup = CleanupCoordinator(self)
         self.velocity_tracker = ExtruderVelocityTracker(
             owner=self, printer=self.printer,
             sample_interval=0.025,
             window_size=0.3,
-            filament_diameter=config.getfloat(
-                'filament_diameter', 1.75, above=0.))
-        # Schmitt-Trigger State fuer den Zwischenzonen-Modulator.
-        # Ueberbrueckt min_feed_floor-Schwelle mit Hysterese.
-        self._modulator_feeding = False
-        # After OVERFLOW → IDLE → AUTO the stepcompress cursor
-        # is out of sync. _main_tick handles the safe resync (forced_t0=None
-        # path → flush_step_generation allowed). _on_mcu_flush skips while
-        # this flag is set to prevent submitting on an unsynced cursor.
-        self._needs_overflow_prime = False
-        self._feed_deadline_time = None     # max feed deadline (reactor time)
-        self._measure_load_active = False
-        self._measure_load_distance = 0.0
-        # Explicit toggle tracking so the first button click after
-        # MEASURE_LOAD_START always starts the feed, regardless of
-        # whatever _continuous_feed was doing in AUTO before.
-        self._measure_feeding = False
-        self._print_running = False
-        # _jam_active lebt im FaultManager (FaultManager.__init__
-        # initialisiert es); Bridge-Property exponiert self._jam_active.
-        # Fault-overlay migration:
-        # use_fault_overlay=1 enables the LOAD_PHASE_3 overflow overlay
-        # (P7-35 — _enter_overflow leaves state=LOAD_PHASE_3 instead of
-        # flipping to STATE_OVERFLOW). RUNOUT and JAM paths remain on
-        # the legacy state-flip pattern; their overlay-fields below
-        # stay as scaffolding for a future migration step.
-        self._fault_overflow = False
-        self._fault_runout = False
-        self._fault_jam = False
-        # Post-LOAD HALL1-bounce-suppression. Set
-        # when LOAD_PHASE_3 with overflow_ok=1 exits via stable HALL1
-        # (treating as full). Buffer is legitimately overfilled — the
-        # main_tick path would otherwise re-trigger _enter_overflow on
-        # the next cycle and bounce state IDLE/AUTO → OVERFLOW. Cleared
-        # when HALL1 actually falls (sensor_callback) or via operator
-        # cleanup (BUFFER_AUTO_OFF, STOP_BUFFER_FILL, BUFFER_HALT).
-        self._post_load_overflow_grace = False
-
-        # ----- Jam detection state -----
-        # _hall2_start_time / _hall2_start_extruder_pos / _hall3_start_-
-        # time leben im FaultManager (FaultManager.__init__ setzt sie
-        # auf None/0.0). BufferFeeder hat passende Bridge-Properties.
-
-        # ----- Runout follow state -----
-        self._runout_filament_ref = None
-        self._runout_follow_active = False
-        # Armed when STATE_RUNOUT was cleared via entrance-reinsert
-        # during a paused print. Lets _on_idle_printing distinguish
-        # "RESUME after runout_pause=1 reinsert" (trigger grip+fill)
-        # from "any other RESUME with IDLE state" (leave as-is).
-        self._runout_recovery_pending = False
-
-        # ----- Cooldown timer -----
-        self._cooldown_deadline = None    # reactor time after which auto re-enables
-        # When True, the cooldown-after-manual-move flow returns to
-        # IDLE instead of AUTO. Set by BUFFER_AUTO_OFF / STOP_BUFFER_FILL,
-        # cleared by BUFFER_AUTO_ON. Respects the user's explicit
-        # "bang-bang off" choice even after manual calibration moves.
-        self._auto_off_by_user = False
-        self._retract_burst_done = False  # go IDLE after retract burst, not AUTO
-
-        # ----- Startup grace period -----
-        # During the first _startup_grace_seconds after klippy:ready,
-        # sensor callbacks silently update stable_states but do NOT
-        # fire insert/overflow/etc. events. Prevents spurious OVERFLOW
-        # if HALL1's "idle" callback arrives just after main_tick
-        # already called _enter_overflow.
-        self._startup_grace_seconds = 2.0
-        self._startup_grace_done = False
-
-        # Edge-triggered auto-grip on entrance insert.
-        # Time-based grace alone is unreliable here because Klipper's
-        # MCU button query for the entrance pin can land after our
-        # 2s grace window. Instead we gate auto-grip on HAVING SEEN
-        # the entrance-False state at some point first. Boot with
-        # filament already present → only ever True callbacks arrive
-        # → flag stays False → no grip. User pulls filament → False
-        # → flag becomes True → re-insert → grip. Clean edge detect.
-        self._entrance_was_empty = False
-
-        # ----- Macro gcode-state tracking -----
-        # Klipper's SAVE_GCODE_STATE writes a saved_states entry;
-        # RESTORE_GCODE_STATE reads but does NOT delete. Without our
-        # own flag, a successful LOAD/UNLOAD restore leaves a valid
-        # slot behind, and the next _try_restore_gcode_state() (on a
-        # completely unrelated AUTO_OFF or CLEAR_JAM) would re-apply
-        # an ancient state. The flag is set by BUFFER_SAVE_MACRO_STATE
-        # and cleared after any restore succeeds.
-        self._macro_state_saved = False
-
-        # ----- Abort signalling (set by HALT / STOP_BUFFER_FILL) -----
-        # When True, _raise_if_locked_out() raises once, then auto-clears
-        # the flag. Lets HALT propagate through any pending WAIT_IDLE
-        # so calling macros abort cleanly.
-        self._halt_requested = False
-
-        # ----- Timers (created in _handle_ready) -----
-        self._main_timer = None
-        self._jam_timer = None
+            filament_diameter=self.filament_diameter)
 
         # ----- Event handlers -----
         self.printer.register_event_handler('klippy:connect',  self._handle_connect)
         self.printer.register_event_handler('klippy:ready',    self._handle_ready)
         self.printer.register_event_handler('klippy:shutdown', self._handle_shutdown)
 
-        # Flush-driven bang-bang. Registered unconditionally so
-        # we can toggle the feature flag at runtime; the callback
-        # itself is a no-op when the flag is off, falling through to
-        # the legacy reactor-tick path. Mainline Klipper API:
-        # klippy/extras/motion_queuing.py register_flush_callback
-        # fires synchronously inside the MCU flush cycle with
-        # signature (flush_time, step_gen_time). Anchoring submits at
-        # step_gen_time + lead_time bypasses the toolhead.get_last_
-        # move_time anchor that breaks reactive bang-bang during
-        # mid-toolhead-move.
-        if hasattr(self.motion_queuing, 'register_flush_callback'):
-            self.motion_queuing.register_flush_callback(
-                self._on_mcu_flush, can_add_trapq=True)
+        # Flush-driven bang-bang is optional. Older motion_queuing
+        # revisions may lack this callback API or the can_add_trapq
+        # keyword. Keep the legacy reactor-tick path available and
+        # raise a clear config error only when the user explicitly
+        # enables flush-driven bang-bang on an unsupported build.
+        self._register_flush_callback_if_supported(config)
 
         self._register_gcode_commands()
 
         logging.info("buffer_feeder '%s' initialised", self.name)
+
+    @property
+    def use_fault_overlay(self):
+        # Backwards-compatible alias for the legacy config/status name.
+        return self.use_overflow_overlay
+
+    @use_fault_overlay.setter
+    def use_fault_overlay(self, value):
+        self.use_overflow_overlay = bool(value)
+
+    def _register_flush_callback_if_supported(self, config):
+        register_flush = getattr(
+            self.motion_queuing, 'register_flush_callback', None)
+        if register_flush is None:
+            if self.use_flush_callback_bang_bang:
+                raise config.error(
+                    "use_flush_callback_bang_bang requires Klipper's "
+                    "motion_queuing.register_flush_callback() API. "
+                    "Update to a recent mainline Klipper build.")
+            logging.info(
+                "buffer_feeder: motion_queuing has no register_flush_callback; "
+                "flush-driven bang-bang unavailable, legacy reactor-tick path stays active")
+            return
+        try:
+            register_flush(self._on_mcu_flush, can_add_trapq=True)
+        except TypeError:
+            if self.use_flush_callback_bang_bang:
+                raise config.error(
+                    "use_flush_callback_bang_bang requires "
+                    "register_flush_callback(..., can_add_trapq=True). "
+                    "Update to a recent mainline Klipper build.")
+            logging.info(
+                "buffer_feeder: register_flush_callback lacks can_add_trapq support; "
+                "flush-driven bang-bang unavailable, legacy reactor-tick path stays active")
 
     def _register_gcode_commands(self):
         """Register all gcode commands as mux-commands on key 'BUFFER'.
@@ -757,7 +354,7 @@ class BufferFeeder:
         # Praesenz fallen wir auf IDLE zurueck (uebliches Verhalten).
         if (self.auto_engage_on_boot
                 and self.entrance_detected
-                and not self._is_hall1_active('auto_on')):
+                and not self._is_hall1_active(Hall1Context.AUTO_ON)):
             self._set_state(STATE_AUTO)
             self._respond("AUTO engaged on boot — filament at entrance, "
                           "buffer follows extruder demand")
@@ -861,7 +458,7 @@ class BufferFeeder:
                 and self.entrance_detected
                 and not self._auto_off_by_user
                 and not self._halt_requested
-                and not self._is_hall1_active('auto_on')):
+                and not self._is_hall1_active(Hall1Context.AUTO_ON)):
             self._respond("Print start — engaging AUTO")
             self._enable_stepper()
             self._set_state(STATE_AUTO)
@@ -976,7 +573,7 @@ class BufferFeeder:
         return self.sensors.retract_button_pressed
 
     def _is_hall1_active(self, context):
-        return self.fault.is_hall1_active(context)
+        return self.fault.is_hall1_active(Hall1Context.coerce(context))
 
     def _on_stable_sensor_change(self, eventtime, name, raw_state):
         """Dispatch stable sensor change to the right handler."""
@@ -1038,7 +635,7 @@ class BufferFeeder:
         # cmd loop terminates via fault_overflow check, postcheck raises
         # like the legacy STATE_OVERFLOW path.
         self._fault_overflow = True
-        if self.use_fault_overlay and self._state == STATE_LOADING_PUSH:
+        if self.use_overflow_overlay and self._state == STATE_LOADING_PUSH:
             return
         self._set_state(STATE_OVERFLOW)
 
@@ -1066,7 +663,7 @@ class BufferFeeder:
         # P7-35 fault-overlay: clear overlay flag without state change
         # when overlay path is active. _resume_after_overflow handles
         # restarting the interrupted phase3 move via _overflow_resume_*.
-        if (self.use_fault_overlay
+        if (self.use_overflow_overlay
                 and self._fault_overflow
                 and self._state == STATE_LOADING_PUSH):
             self._fault_overflow = False
@@ -1251,7 +848,7 @@ class BufferFeeder:
             # Behandlung mit Soft-Timer-Eskalation. Toter Code (AUTO-
             # Pfad) sichtbar entfernt.
             if (self._state != STATE_AUTO
-                    and self._is_hall1_active('main_tick')):
+                    and self._is_hall1_active(Hall1Context.MAIN_TICK)):
                 self._enter_overflow()
                 return eventtime + MAIN_TICK_INTERVAL
 
@@ -1667,7 +1264,7 @@ class BufferFeeder:
                 return
             self._cooldown_deadline = None
             if (self.entrance_detected
-                    and not self._is_hall1_active('auto_on')
+                    and not self._is_hall1_active(Hall1Context.AUTO_ON)
                     and not self._auto_off_by_user
                     and not self._bang_bang_suspended
                     and not self._retract_burst_done):
@@ -1954,7 +1551,7 @@ class BufferFeeder:
             # Explicit BUFFER_SYNC_TO_EXTRUDER macro path — would queue
             # trapezoids on the wrong trapq.
             return
-        if self._is_hall1_active('submit_move'):
+        if self._is_hall1_active(Hall1Context.SUBMIT_MOVE):
             # Hard-safety: never feed forward into an overfilled buffer.
             return
         self._flush_submit_streaming_chunk(step_gen_time)
@@ -2108,7 +1705,7 @@ class BufferFeeder:
         # gesetzt wurde. Sonst ist der HALL1-Pfad weiterhin via
         # _main_tick → _enter_overflow abgewickelt: legacy-Pfad
         # state=OVERFLOW + raise im cmd_BUFFER_LOAD_PHASE3-Postcheck;
-        # use_fault_overlay=1-Pfad belaesst state=LOAD_PHASE_3 und setzt
+        # use_overflow_overlay-Pfad belaesst state=LOAD_PHASE_3 und setzt
         # nur _fault_overflow=True, raise dann im selben Postcheck via
         # fault_overflow-Flag.
         if self._load_phase3_overflow_ok:
@@ -2150,7 +1747,7 @@ class BufferFeeder:
             # P7-35 fault-overlay: pause move submission while overlay
             # flag is set. _enter_overflow already halted current motion;
             # re-submitting here would immediately re-saturate HALL1.
-            if self.use_fault_overlay and self._fault_overflow:
+            if self.use_overflow_overlay and self._fault_overflow:
                 return
             # if HALL1 is asserted —
             # buffer is already full, the stable-timer is what we want
@@ -2397,7 +1994,7 @@ class BufferFeeder:
         # die Schwelle erreichen, weil der Arm bei jedem Reject zurueck-
         # faellt und HALL1 deaktiviert. _load_phase3_tick beendet die
         # Phase sauber sobald HALL1 stable lange genug ist.
-        if self._is_hall1_active('submit_move') and signed_distance > 0:
+        if self._is_hall1_active(Hall1Context.SUBMIT_MOVE) and signed_distance > 0:
             logging.warning("buffer_feeder: forward move rejected — HALL1 active "
                             "(distance=%.1f speed=%.1f)", signed_distance, speed)
             self._continuous_feed = False
@@ -2533,26 +2130,8 @@ class BufferFeeder:
         self._stepcompress_primed = True
         return True
 
-    def _compute_t0_anchor(self, forced_t0, mcu_now,
-                           was_primed, need_reprime, streaming):
-        """Compute the trapezoid start-time anchor.
-
-        Three branches:
-          forced_t0!=None: caller-supplied (flush-callback), clamped
-            against far-future. Floors: _last_move_end_time, en, mcu_now.
-          forced_t0=None, previous chunk in-flight: streaming-abut.
-            Floors: _last_move_end_time, en.
-          forced_t0=None, first chunk after idle: toolhead anchor.
-            Skipped (return None) when th_time is so far ahead that
-            clamping it to mcu_now would race a forward-moved
-            stepcompress cursor and produce a negative-interval crash.
-
-        en-floor: t0 must be >= _last_enable_schedule_time so motor-
-        enable fires before the first step. Dropped only when ALL
-        of the following hold: streaming AND was_primed on entry AND
-        no reprime ran AND _last_move_end_time is still ahead of
-        mcu_now (anchor not stale).
-        """
+    def _plan_t0_anchor(self, forced_t0, mcu_now,
+                        was_primed, need_reprime, streaming):
         stale_anchor = (self._last_move_end_time <= mcu_now)
         en = (0.0
               if (streaming and was_primed and not need_reprime
@@ -2571,11 +2150,17 @@ class BufferFeeder:
                     "ahead of mcu_now (far-future flush guard)",
                     forced_t0 - mcu_now)
                 forced_t0 = mcu_now + self.lead_time
-            return max(forced_t0, self._last_move_end_time, en, mcu_now)
+            return AnchorPlan(
+                t0=max(forced_t0, self._last_move_end_time, en, mcu_now),
+                enable_floor=en,
+            )
 
         if self._last_move_end_time > mcu_now + self.lead_time:
             # Streaming abut path: previous chunk is still in the future.
-            return max(self._last_move_end_time, en)
+            return AnchorPlan(
+                t0=max(self._last_move_end_time, en),
+                enable_floor=en,
+            )
 
         # First chunk / gap recovery: anchor on toolhead print_time.
         toolhead = self.printer.lookup_object('toolhead')
@@ -2594,11 +2179,41 @@ class BufferFeeder:
                 "(th_time=%.3f lme=%.3f en=%.3f mcu_now=%.3f)",
                 t0 - mcu_now, th_time, self._last_move_end_time,
                 en, mcu_now)
-            self._last_idle_anchor_time = mcu_now  # rate-limit watchdog
-            if self._last_move_end_time > mcu_now + MAX_T0_LOOKAHEAD_S:
-                self._last_move_end_time = mcu_now
-            return None
-        return t0
+            return AnchorPlan(
+                t0=None,
+                skip_reason="far_future_toolhead_anchor",
+                rate_limit_idle_anchor=True,
+                clamp_last_move_end_time=(
+                    mcu_now
+                    if self._last_move_end_time > mcu_now + MAX_T0_LOOKAHEAD_S
+                    else None
+                ),
+                toolhead_time=th_time,
+                enable_floor=en,
+            )
+        return AnchorPlan(t0=t0, toolhead_time=th_time, enable_floor=en)
+
+    def _compute_t0_anchor(self, forced_t0, mcu_now,
+                           was_primed, need_reprime, streaming):
+        """Compute the trapezoid start-time anchor and apply the
+        side-effects needed for skipped far-future toolhead anchors."""
+        plan = self._plan_t0_anchor(
+            forced_t0, mcu_now, was_primed, need_reprime, streaming)
+        if plan.t0 is not None:
+            return plan.t0
+        if plan.skip_reason == "far_future_toolhead_anchor":
+            logging.warning(
+                "buffer_feeder: anchor skipped — th_time %.2fs "
+                "ahead, would corrupt last_step_clock "
+                "(th_time=%.3f lme=%.3f en=%.3f mcu_now=%.3f)",
+                max(0.0, plan.toolhead_time + self.lead_time - mcu_now),
+                plan.toolhead_time, self._last_move_end_time,
+                plan.enable_floor, mcu_now)
+        if plan.rate_limit_idle_anchor:
+            self._last_idle_anchor_time = mcu_now
+        if plan.clamp_last_move_end_time is not None:
+            self._last_move_end_time = plan.clamp_last_move_end_time
+        return None
 
     def _append_trapezoid_and_record(self, t0, signed_distance, speed):
         """Compute the trapezoid profile, append to trapq, update state."""
@@ -2869,48 +2484,12 @@ class BufferFeeder:
                             full=False,
                             sticky_auto_off=False,
                             preserve_lockout=False):
-        """Common cleanup pattern shared by HALT / AUTO_OFF / STOP_BUFFER_FILL.
-
-        Always done: unsync (with caller-prefixed respond), halt motion,
-        clear runout-follow + cooldown + post_load_grace, set
-        _halt_requested so any pending WAIT_IDLE in a macro propagates
-        the abort.
-
-        label: prefix for the unsync respond message ("HALT", "AUTO_OFF" ...)
-        full: AUTO_OFF/STOP-style — also clears _clear_recovery_flags,
-              measure flags, _pending_remaining_mm, _bang_bang_suspended;
-              calls _try_restore_gcode_state at end (E-mode-recovery for
-              failed LOAD/UNLOAD).
-        sticky_auto_off: sets _auto_off_by_user=True so a later auto-engage
-              hook stays blocked until the operator explicitly re-enables.
-        preserve_lockout: HALT-style — skip the STATE_IDLE transition if
-              state is OVERFLOW/JAM (safety lockout supersedes user halt).
-        """
-        if self._unsync_if_synced():
-            self._respond(label + " — also unsynced from extruder")
-        self._continuous_feed = False
-        self._halt_motion()
-        if full:
-            self._pending_remaining_mm = 0.0
-            self._clear_recovery_flags()
-        self._runout_follow_active = False
-        self._runout_filament_ref = None
-        if full:
-            self._measure_load_active = False
-            self._measure_feeding = False
-        self._cooldown_deadline = None
-        if full:
-            self._bang_bang_suspended = False
-        if sticky_auto_off:
-            self._auto_off_by_user = True
-        self._runout_recovery_pending = False
-        self._halt_requested = True
-        self._post_load_overflow_grace = False
-        if preserve_lockout and self._state in (STATE_OVERFLOW, STATE_JAM):
-            return
-        self._set_state(STATE_IDLE)
-        if full:
-            self._try_restore_gcode_state(from_command=True)
+        return self.cleanup.full_reset_to_idle(CleanupOptions(
+            label=label,
+            full=full,
+            sticky_auto_off=sticky_auto_off,
+            preserve_lockout=preserve_lockout,
+        ))
 
     def _measure_report(self):
         self._respond("MEASURE_LOAD result: %.1f mm" % self._measure_load_distance)
@@ -3205,7 +2784,7 @@ class BufferFeeder:
         self._raise_if_jam()
         if not overflow_ok:
             if (self._state == STATE_OVERFLOW
-                    or self._is_hall1_active('phase3_entry')):
+                    or self._is_hall1_active(Hall1Context.PHASE3_ENTRY)):
                 raise self._cmd_error(
                     "BufferFeeder: HALL1 OVERFLOW active — aborting. "
                     "Clear overflow, then retry. (UNLOAD is allowed; "
@@ -3259,7 +2838,7 @@ class BufferFeeder:
         # condition. _exit_overflow clears it; postcheck below raises if
         # HALL1 is still asserted.
         while (self._state == STATE_LOADING_PUSH
-               and not (self.use_fault_overlay and self._fault_overflow)):
+               and not (self.use_overflow_overlay and self._fault_overflow)):
             self.reactor.pause(self.reactor.monotonic() + 0.1)
         # Postcheck: JAM bleibt absolut. Bei overflow_ok haben wir den
         # HALL1-Stable-Exit selbst gemacht — sonst alte Lockout-Logik.
@@ -3564,9 +3143,8 @@ class BufferFeeder:
             "cooldown_deadline  = %s" % (self._cooldown_deadline,),
             "halt_requested     = %s" % self._halt_requested,
             "jam_active         = %s" % self._jam_active,
-            "overlay flags     = overflow=%s runout=%s jam=%s (use=%s)" % (
-                self._fault_overflow, self._fault_runout,
-                self._fault_jam, self.use_fault_overlay),
+            "overflow overlay  = active=%s enabled=%s" % (
+                self._fault_overflow, self.use_overflow_overlay),
             "runout_follow      = %s ref=%s" % (self._runout_follow_active,
                                                 self._runout_filament_ref),
             "runout_recov_pending= %s (RESUME will grip+fill if armed)" % self._runout_recovery_pending,
@@ -3738,23 +3316,8 @@ class BufferFeeder:
         self._respond("print_running=0 (runout PAUSE suppressed)")
 
     def _try_restore_gcode_state(self, from_command=False):
-        """Best-effort: restore the 'buffer_feeder_op' gcode state if
-        a LOAD/UNLOAD macro saved one and we haven't already consumed
-        it. Klipper's RESTORE_GCODE_STATE doesn't delete the slot,
-        so without our own _macro_state_saved flag any later call
-        would re-apply a stale state. Idempotent across cleanup paths.
-        """
-        if not self._macro_state_saved:
-            return False
-        try:
-            self._gcode_run_script(
-                "RESTORE_GCODE_STATE NAME=buffer_feeder_op MOVE=0",
-                from_command=from_command)
-            self._macro_state_saved = False
-            return True
-        except Exception:
-            logging.exception("buffer_feeder: gcode-state restore failed")
-            return False
+        return self.cleanup.try_restore_gcode_state(
+            from_command=from_command)
 
     def cmd_BUFFER_RESTORE_STATE(self, gcmd):
         if self._try_restore_gcode_state(from_command=True):
@@ -3785,30 +3348,7 @@ class BufferFeeder:
         self._macro_state_saved = False
 
     def cmd_BUFFER_CLEAR_JAM(self, gcmd):
-        if self._state != STATE_JAM:
-            raise self._cmd_error("Not in JAM state (state=%s)" % self._state)
-        self._clear_recovery_flags()
-        self._halt_requested = False
-        # Best-effort restore of any LOAD/UNLOAD gcode-state that was
-        # saved before the jam fired. Otherwise the operator would
-        # end up back in AUTO with the E-mode still flipped to M83
-        # from the failed macro.
-        self._try_restore_gcode_state(from_command=True)
-        # vor dem Auto-Sprung dieselben Guards pruefen, die
-        # BUFFER_AUTO_ON anwendet (HALL1, Pause-Suspend, Busy-Phase).
-        # Ohne diese Angleichung konnte CLEAR_JAM AUTO aktivieren in
-        # Situationen, wo AUTO_ON verweigert (z.B. Print pausiert).
-        # Bei verweigerten Voraussetzungen bleibt der Buffer in IDLE —
-        # der Operator/RESUME engagiert dann selbst AUTO.
-        target = STATE_IDLE
-        if self.entrance_detected:
-            block_reason = self._check_auto_ready(allow_jam=True)
-            if block_reason is None and not self._auto_off_by_user:
-                target = STATE_AUTO
-            elif block_reason is not None:
-                self._respond("JAM cleared — staying IDLE: " + block_reason)
-        self._set_state(target)
-        self._respond("JAM cleared — state=%s" % self._state)
+        return self.cleanup.clear_jam()
 
     # -----------------------------------------------------------------------
     # Utilities
@@ -3878,8 +3418,7 @@ class BufferFeeder:
             'print_running':            self._print_running,
             'jam_active':               self._jam_active,
             'fault_overflow':           self._fault_overflow,
-            'fault_runout':             self._fault_runout,
-            'fault_jam':                self._fault_jam,
+            'overflow_overlay_enabled': self.use_overflow_overlay,
             'post_load_overflow_grace': self._post_load_overflow_grace,
             'bang_bang_suspended':      self._bang_bang_suspended,
             'halt_requested':           self._halt_requested,

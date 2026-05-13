@@ -20,7 +20,26 @@ class SyncCoordinator:
         self.trapq_append = None
 
     def setup_trapq(self, config):
-        self.motion_queuing = self.printer.load_object(config, 'motion_queuing')
+        try:
+            self.motion_queuing = self.printer.load_object(config, 'motion_queuing')
+        except Exception:
+            raise config.error(
+                "buffer_feeder requires Klipper's motion_queuing module. "
+                "Install a recent mainline Klipper build that provides "
+                "'motion_queuing' before loading [buffer_feeder].")
+        required = (
+            'allocate_trapq',
+            'lookup_trapq_append',
+            'check_step_generation_scan_windows',
+            'note_mcu_movequeue_activity',
+        )
+        missing = [name for name in required
+                   if not hasattr(self.motion_queuing, name)]
+        if missing:
+            raise config.error(
+                "buffer_feeder requires a newer motion_queuing API. "
+                "Missing: %s. Update Klipper mainline before loading "
+                "[buffer_feeder]." % ", ".join(sorted(missing)))
         self.trapq = self.motion_queuing.allocate_trapq()
         self.trapq_append = self.motion_queuing.lookup_trapq_append()
 

@@ -10,6 +10,7 @@ from ._buffer_common import (
     STATE_MANUAL_RETRACT, STATE_OVERFLOW, STATE_RUNOUT,
     STATE_UNLOADING,
 )
+from .buffer_types import Hall1Context
 
 
 class HallSensorMonitor:
@@ -166,7 +167,7 @@ class HallSensorMonitor:
         if not owner._startup_grace_done:
             return
         if name == 'hall_overflow':
-            if owner._is_hall1_active('sensor_callback'):
+            if owner._is_hall1_active(Hall1Context.SENSOR_CALLBACK):
                 # In STATE_AUTO defer immediate _enter_overflow to
                 # _main_tick (which checks for hall1_persist_timeout).
                 # In other states (LOAD, MANUAL, UNLOAD) keep the immediate
