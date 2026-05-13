@@ -612,6 +612,121 @@ def test_c_cont_hotfix7_tracker_lag_documents_tradeoff(monkeypatch):
         f"folgen: erwartet {expected_target}")
 
 
+# ---------------------------------------------------------------------------
+# C-cont Hotfix 9 (Hardware 2026-05-14 klippy.log Z.250: MCU 'LLL_PLUS'
+# shutdown: Timer too close beim Druckstart nach laengerer Klipper-Idle).
+# DIAG-Beleg (Hotfix 8 Z.16-17): gap=36.676s zwischen _last_move_end_time
+# und mcu_now, _stepcompress_primed=True -> need_reprime=False im
+# forced_t0-Pfad -> kein Cursor-Reset -> CLOCK_DIFF_MAX (16.78s @ 48MHz)
+# ueberschritten -> MCU shutdown. Fix: gap-basierter Reprime-Trigger auch
+# im forced_t0-Pfad.
+# Siehe specs/2026-05-14-c-cont-hotfix9-forced-t0-reprime-gap.md
+# ---------------------------------------------------------------------------
+
+
+def _capture_set_position_calls(feeder, monkeypatch):
+    """Helper: monkeypatch stepper.set_position um Aufrufe abzufangen.
+    Returns list of position-tuples uebergeben an set_position."""
+    calls = []
+    orig = feeder.stepper.set_position
+    def capture(pos):
+        calls.append(pos)
+        return orig(pos)
+    monkeypatch.setattr(feeder.stepper, 'set_position', capture)
+    return calls
+
+
+def test_c_cont_hotfix9_forced_t0_large_gap_triggers_reprime(monkeypatch):
+    """Hotfix9: forced_t0-Pfad mit gap > REPRIME_GAP=5s triggert
+    set_position(0,0,0) Cursor-Reset. Schliesst Luecke vom Klipper-
+    Idle-Crash 2026-05-14 (DIAG-Beleg gap=36.676s, primed=True,
+    need_reprime=False -> Timer too close)."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    feeder._last_move_end_time = 12.7  # Alt: Boot-Anchor lange her
+    feeder._stepcompress_primed = True
+    feeder._commanded_pos = 0.05  # boot_feed (initial-Push)
+    feeder._last_enable_schedule_time = 12.56  # nicht aktuell
+
+    # mcu_now=49.4 (gap=36.7s)
+    feeder.reactor.now = 49.4
+
+    set_pos_calls = _capture_set_position_calls(feeder, monkeypatch)
+
+    # forced_t0 in Vergangenheit (wie Klipper sie nach Idle liefert)
+    feeder._submit_single_trapezoid(5.0, 15.0, forced_t0=13.086)
+
+    # Hotfix9: set_position muss aufgerufen worden sein (Cursor-Reset)
+    assert len(set_pos_calls) == 1, (
+        f"Reprime muesste set_position aufrufen bei gap>5s, "
+        f"aber set_position-Aufrufe: {set_pos_calls}")
+    assert set_pos_calls[0] == (0., 0., 0.)
+    # _commanded_pos: nach Reset auf 0 + Move-Distance 5 = 5
+    assert feeder._commanded_pos == pytest.approx(5.0, abs=0.01)
+    # Primed-Flag bleibt True
+    assert feeder._stepcompress_primed is True
+    # Reviewer I-2: Crash-Prevention-Property verifizieren:
+    # _last_move_end_time muss nach Submit ueber mcu_now liegen
+    # (= sauberer Anchor, NICHT mehr stale). Genau das verhindert
+    # den CLOCK_DIFF_MAX-Crash. Vorher (Hotfix8): lme blieb bei 12.7
+    # waehrend t0=49.5 geschedulet wurde -> stepcompress-Korruption.
+    # Jetzt (Hotfix9): lme = neuer t0 + Trapezoid-Dauer >= mcu_now.
+    assert feeder._last_move_end_time >= feeder.reactor.now, (
+        f"Post-Submit _last_move_end_time={feeder._last_move_end_time} "
+        f"muss >= mcu_now={feeder.reactor.now} sein "
+        f"(stale-anchor-Prevention)")
+
+
+def test_c_cont_hotfix9_forced_t0_small_gap_no_reprime(monkeypatch):
+    """Hotfix9 Regression: forced_t0 + gap<REPRIME_GAP=5s -> KEIN
+    Reprime. Normale Submit-Logik unveraendert, kein Cursor-Reset."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    feeder._last_move_end_time = 48.0  # gap=1.4s
+    feeder._stepcompress_primed = True
+    feeder._commanded_pos = 100.0
+    feeder._last_enable_schedule_time = 48.5
+
+    feeder.reactor.now = 49.4
+
+    set_pos_calls = _capture_set_position_calls(feeder, monkeypatch)
+
+    feeder._submit_single_trapezoid(5.0, 15.0, forced_t0=49.0)
+
+    # KEIN Reprime (gap<5s)
+    assert len(set_pos_calls) == 0, (
+        f"Bei gap<5s darf KEIN set_position aufgerufen werden. "
+        f"Aufrufe: {set_pos_calls}")
+    # _commanded_pos addiert ohne Reset: 100 + 5 = 105
+    assert feeder._commanded_pos == pytest.approx(105.0, abs=0.01)
+
+
+def test_c_cont_hotfix9_forced_t0_not_primed_still_reprimes(monkeypatch):
+    """Hotfix9 Regression: forced_t0 + not_primed (z.B. nach OVERFLOW
+    Stepper-Disable) -> Reprime feuert wie vorher (gap unabhaengig).
+    Stellt sicher dass der ursprüngliche P7-67 Reprime-Pfad nicht
+    gebrochen wird durch die Hotfix9-Vereinheitlichung."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    feeder._last_move_end_time = 49.0  # gap=0.4s (klein)
+    feeder._stepcompress_primed = False  # NOT primed
+    feeder._commanded_pos = 100.0
+    feeder._last_enable_schedule_time = 49.0
+
+    feeder.reactor.now = 49.4
+
+    set_pos_calls = _capture_set_position_calls(feeder, monkeypatch)
+
+    feeder._submit_single_trapezoid(5.0, 15.0, forced_t0=49.5)
+
+    # Reprime weil not_primed (gap-unabhaengig, unveraendert von Hotfix9)
+    assert len(set_pos_calls) == 1
+    assert set_pos_calls[0] == (0., 0., 0.)
+    # Reset setzt _commanded_pos auf 0, dann +5 fuer den Move
+    assert feeder._commanded_pos == pytest.approx(5.0, abs=0.01)
+    assert feeder._stepcompress_primed is True
+
+
 # ===========================================================================
 # C-cont T5: HALL1 Soft-Trigger im STATE_AUTO
 # ===========================================================================

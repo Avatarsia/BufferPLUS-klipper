@@ -3515,7 +3515,7 @@ class BufferFeeder:
         mcu = self.stepper.get_mcu()
         mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
         gap = mcu_now - self._last_move_end_time
-        # Reprime-Logik unterscheidet zwei Pfade:
+        # Reprime-Logik (vereinheitlicht in Hotfix9 — siehe Block unten):
         #
         # Alter Pfad (forced_t0=None, Reactor-Tick):
         #   flush_step_generation() + set_position() bei not-primed ODER gap>5s.
@@ -3523,11 +3523,20 @@ class BufferFeeder:
         # Flush-Callback-Pfad (forced_t0 gesetzt):
         #   - flush_step_generation() NIEMALS aufrufen (ReactorError, weil
         #     reactor.pause() innerhalb von assert_no_pause verboten ist).
-        #   - set_position() NUR wenn not-primed (d.h. nach Stepper-Disable,
-        #     z.B. nach OVERFLOW). Einmaliger Cursor-Reset ist sicher und
-        #     noetig. Bei primed=True: kein Aufruf (Schutz gegen rapide
-        #     SET_VELOCITY_LIMIT-Flush-Callbacks die Cursor korrumpieren).
-        #   - Gap-basierter Reprime entfaellt: step_gen_time ist der Anker.
+        #   - set_position(): UPDATED durch Hotfix9 (2026-05-14):
+        #     Vorher (P7-52 Original): NUR wenn not-primed. Bei primed=True
+        #     kein Aufruf — Schutz gegen rapide SET_VELOCITY_LIMIT-Flush-
+        #     Callbacks die Cursor korrumpieren (sub-Sekunden-Cadence,
+        #     in-flight chunks).
+        #     Hotfix9: ZUSAETZLICH wenn primed=True AND gap>REPRIME_GAP=5s.
+        #     Sicher weil gap>5s impliziert move_in_flight=False (kein
+        #     in-flight Chunk mehr im trapq, da _last_move_end_time>5s in
+        #     der Vergangenheit). Die P7-52-Sorge um "rapide SET_VELOCITY_-
+        #     LIMIT-Cursor-Korruption" ist per Konstruktion ausgeschlossen
+        #     (kann gap>5s nie erfuellen). Notwendig weil Klipper-Idle vor
+        #     Druckstart einen veralteten step_gen_time liefert -> ohne
+        #     Cursor-Reset crasht MCU mit "Timer too close" (Hardware
+        #     2026-05-14 klippy.log Z.250).
         # P7-67: snapshot the primed-flag BEFORE the reprime block
         # rewrites it. The en-floor decision further down depends on
         # whether the stepcompress cursor was primed on ENTRY, not on
@@ -3536,10 +3545,32 @@ class BufferFeeder:
         # would always be True and the new en-floor branch would
         # never trigger — defeating the point of the patch.
         was_primed = self._stepcompress_primed
-        if forced_t0 is None:
-            need_reprime = (not self._stepcompress_primed) or (gap > REPRIME_GAP)
-        else:
-            need_reprime = not self._stepcompress_primed
+        # Hotfix9 (Hardware 2026-05-14 klippy.log Z.250 + DIAG-Beleg
+        # Hotfix8 Z.16-17: gap=36.676s, primed=True, need_reprime=False
+        # -> MCU 'Timer too close' shutdown). Wurzel: forced_t0-Pfad
+        # ignorierte den gap-basierten Reprime-Trigger mit der Annahme
+        # "step_gen_time ist der Anker". Diese Annahme versagt wenn
+        # Klipper's motion_queuing zwischen Boot-Anchor und Druckstart
+        # nicht flusht — step_gen_time bleibt beim Boot-Wert (~13s),
+        # erster Print-Submit kommt mit step_gen_time 10-60s alt.
+        # Stepcompress-Cursor (last_step_clock) bei alter Position,
+        # neuer Step bei mcu_now -> CLOCK_DIFF_MAX (~16.78s @ 48MHz)
+        # ueberschritten -> MCU shutdown.
+        #
+        # Fix: gap-basierter Reprime-Trigger jetzt in BEIDEN Pfaden.
+        # Im forced_t0-Pfad bleibt flush_step_generation() weiterhin
+        # gegated (siehe Block unten, kein Reactor-Pause-Risiko).
+        # set_position(0,0,0) ist im forced_t0-Pfad sicher: Cursor wird
+        # auf 0 reset, naechster Move startet sauber bei konsistenter
+        # Position. Bei normalem Betrieb (gap<5s) keine Verhaltens-
+        # aenderung. Siehe test_c_cont_hotfix9_* in test_c_cont_-
+        # streaming.py.
+        #
+        # User-Beobachtung 2026-05-14: Problem besteht schon vor C-cont-
+        # Serie, sporadisch beim Druckstart nach laengerer Klipper-
+        # Idle-Zeit. Klipper-Restart half temporaer (frischer motion_-
+        # queuing-Anchor). Hotfix 9 schliesst die Luecke strukturell.
+        need_reprime = (not self._stepcompress_primed) or (gap > REPRIME_GAP)
         if need_reprime:
             if forced_t0 is None:
                 try:
@@ -3549,6 +3580,13 @@ class BufferFeeder:
                                  "flush_step_generation (gap=%.1fs)", gap)
                 except Exception:
                     logging.exception("buffer_feeder: flush_step_generation failed")
+            else:
+                # Hotfix9: flush_step_generation() im forced_t0-Pfad
+                # verboten (Reactor-Pause-Risiko). Nur set_position-
+                # Cursor-Reset. Log fuer Diagnostik bei grossen Gaps.
+                logging.info("buffer_feeder: stepcompress cursor reset "
+                             "via set_position (forced_t0 path, gap=%.1fs, "
+                             "Hotfix9)", gap)
             self.stepper.set_position((0., 0., 0.))
             self._commanded_pos = 0.0
             self._stepcompress_primed = True
