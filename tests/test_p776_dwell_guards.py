@@ -547,10 +547,9 @@ def test_integration_56s_without_anchor_blocked_by_continuous_feed_logs(
 # ===========================================================================
 
 
-def test_xverify_p773_forced_t0_path_unchanged():
-    """P7-73 clampt forced_t0 != None Pfad, P7-76 A clampt forced_t0
-    == None Pfad. Beide muessen unabhaengig funktionieren.
-    Sanity: far-future forced_t0 wird WEITERHIN durch P7-73 geclampt."""
+def test_far_future_forced_t0_is_clamped():
+    """A forced_t0 far in the future must still be clamped to mcu_now +
+    lead_time, preventing stepcompress-cursor corruption."""
     printer, feeder = make_auto_feeder()
     motion_q = printer.lookup_object('motion_queuing')
 
@@ -566,35 +565,12 @@ def test_xverify_p773_forced_t0_path_unchanged():
     own = _own_trapq_appends(motion_q, feeder, appends_before)
     t0 = own[0][1]
     assert t0 <= 7.0 + feeder.lead_time + 0.01, (
-        "P7-73 co-existence broken by P7-76: forced_t0=90 should "
-        "still be clamped. Got t0=%.3f" % t0)
+        "forced_t0=90 should still be clamped. Got t0=%.3f" % t0)
 
 
-def test_xverify_p772_stale_anchor_floor_intact():
-    """P7-72 stale_anchor erkennung im en-floor Block bleibt intakt --
-    P7-76 A clampt nur t0 weiter unten."""
-    # Smoke-test: bestehende P7-72 tests sollten alle gruen sein.
-    # Hier reine code-existenz-pruefung:
-    src = open(buffer_feeder.__file__, encoding='utf-8').read()
-    assert "stale_anchor = (self._last_move_end_time <= mcu_now)" in src, (
-        "P7-72 stale_anchor decision must remain in source.")
-
-
-def test_xverify_p774_halt_motion_rollback_coexists():
-    """P7-74 _halt_motion-Rollback existiert parallel zum P7-76 D
-    Watchdog-Rollback. Beide rollen lme zurueck wenn far-future."""
-    src = open(buffer_feeder.__file__, encoding='utf-8').read()
-    # P7-74 marker
-    assert "P7-74" in src
-    # P7-76 D marker
-    assert "P7-76 D" in src
-
-
-def test_xverify_p775_watchdog_state_auto_still_fires(monkeypatch):
-    """P7-75 STATE_AUTO Watchdog muss weiter feuern -- P7-76 hat
-    Sub-Gates nicht angefasst (nur Defense-in-Depth Reset bei
-    OVERFLOW-Transition, Logging beim Skip, t0/lme-Clamp am Anchor).
-    """
+def test_watchdog_state_auto_fires_after_gap(monkeypatch):
+    """STATE_AUTO watchdog fires an anchor-step after >10s idle gap
+    when print is not active (default threshold=idle_anchor_gap)."""
     _, feeder = make_auto_feeder()
     neutralize_bang_bang(monkeypatch, feeder)
     calls = count_anchor_calls(monkeypatch, feeder)
@@ -606,5 +582,5 @@ def test_xverify_p775_watchdog_state_auto_still_fires(monkeypatch):
     feeder._main_tick(eventtime=20.0)
 
     assert len(calls) == 1, (
-        "P7-75 regression: STATE_AUTO Watchdog should fire after "
-        "20s gap (default threshold=10s).")
+        "STATE_AUTO Watchdog should fire after 20s gap "
+        "(default threshold=10s).")

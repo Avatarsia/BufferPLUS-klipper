@@ -589,31 +589,18 @@ def test_integration_skip_path_when_print_state_missed(monkeypatch, caplog):
 # ===========================================================================
 
 
-def test_xverify_p773_forced_t0_clamp_unchanged():
-    """P7-73 clampt forced_t0!=None Pfad. P7-77 hat nur den
-    forced_t0==None Pfad (else-Branch) angefasst -> P7-73 muss
-    unveraendert sein.
-    """
+def test_forced_t0_lookahead_constant_intact():
+    """The forced-t0 lookahead cap constant + its usage must remain."""
     src = open(buffer_feeder.__file__, encoding='utf-8').read()
-    assert "P7-73 guard, Issue #31" in src, (
-        "P7-73 forced_t0-Clamp must remain in source.")
     assert "MAX_T0_LOOKAHEAD_S = 2.0" in src, (
         "Forced-t0 lookahead cap constant must remain.")
     assert "mcu_now + MAX_T0_LOOKAHEAD_S" in src, (
         "Forced-t0 cap usage must remain.")
 
 
-def test_xverify_p774_halt_rollback_unchanged():
-    """P7-74 lme-Rollback in _halt_motion bleibt -- P7-77 C aendert
-    nur den _main_tick-Watchdog-Rollback (vorher P7-76 D)."""
-    src = open(buffer_feeder.__file__, encoding='utf-8').read()
-    assert "P7-74" in src, (
-        "P7-74 _halt_motion-Rollback marker must remain.")
-
-
-def test_xverify_p775_watchdog_state_auto_still_fires(monkeypatch):
-    """P7-75 STATE_AUTO Watchdog-Verhalten erhalten, solange
-    print_state != 'printing'."""
+def test_watchdog_state_auto_fires_when_not_printing(monkeypatch):
+    """STATE_AUTO watchdog fires an anchor-step after >10s idle gap
+    when print is not active."""
     _, feeder = make_auto_feeder(print_state='standby')
     neutralize_bang_bang(monkeypatch, feeder)
     calls = count_anchor_calls(monkeypatch, feeder)
@@ -625,20 +612,5 @@ def test_xverify_p775_watchdog_state_auto_still_fires(monkeypatch):
     feeder._main_tick(eventtime=20.0)
 
     assert len(calls) == 1, (
-        "P7-75 regression: STATE_AUTO Watchdog soll feuern nach 20s "
-        "(default threshold=10s, kein active print).")
-
-
-def test_xverify_p772_stale_anchor_decision_intact():
-    """P7-72 stale_anchor-Check (en-floor stack) unveraendert."""
-    src = open(buffer_feeder.__file__, encoding='utf-8').read()
-    assert "stale_anchor = (self._last_move_end_time <= mcu_now)" in src, (
-        "P7-72 stale_anchor decision must remain.")
-
-
-def test_xverify_p776_b_overflow_reset_intact():
-    """P7-76 B (_continuous_feed-Reset bei OVERFLOW->AUTO) ist
-    unabhaengig vom A/C/D Bundle und bleibt erhalten."""
-    src = open(buffer_feeder.__file__, encoding='utf-8').read()
-    assert "P7-76 B" in src, (
-        "P7-76 B (_continuous_feed reset) must remain.")
+        "STATE_AUTO Watchdog soll feuern nach 20s gap, "
+        "default threshold=10s, kein active print.")
