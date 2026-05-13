@@ -74,12 +74,27 @@ JAM_WATCH_STATES = {STATE_AUTO, STATE_LOAD_PHASE_3}
 # Main reactor tick interval (sensor polling, bang-bang decisions).
 MAIN_TICK_INTERVAL = 0.02            # 50 Hz
 JAM_TICK_INTERVAL  = 1.0             # 1 Hz
-# Stable-Tracking Drop-Toleranz (P7-11): kurze Sensor-Flicker waehrend
+# Stable-Tracking Drop-Toleranz: kurze Sensor-Flicker waehrend
 # LOAD_PHASE_3 stable-exit tracking werden bis zu dieser Dauer
 # toleriert. Sobald der Sensor innerhalb der Toleranz wieder aktiv ist,
 # laeuft die Stable-Uhr weiter. Erst nach N Sekunden komplett-aus
 # zaehlt das als echter Reset.
 STABLE_DROP_GRACE  = 0.5             # s
+
+# Anchor-step Distanz fuer Stepcompress-Cursor-Refresh (boot anchor,
+# pre-SYNC REPRIME, post-OVERFLOW prime). 0.05mm = ~250 Steps bei
+# 5000 steps/mm — physisch kaum spuerbar.
+ANCHOR_NUDGE_MM = 0.05
+
+# Stepcompress-Cursor verfaellt nach CLOCK_DIFF_MAX (~16.7s) auf dem
+# MCU. Wenn der Feeder laenger idle war, muss vor dem naechsten Submit
+# ein Anchor-Step die Cursor-Lage aktualisieren.
+REPRIME_GAP_S = 5.0
+
+# Cap fuer forced_t0 / t0 Lookahead bei _submit_single_trapezoid.
+# Submits weiter in der Zukunft als mcu_now + diesen Wert werden
+# als stale verworfen.
+MAX_T0_LOOKAHEAD_S = 2.0
 
 # Triple-click action kinds.
 CLICK_SINGLE = 1
@@ -520,7 +535,8 @@ class SyncCoordinator:
         owner = self.owner
         owner._enable_stepper()
         anchor_dir = -1.0 if owner.hall_overflow else 1.0
-        owner._submit_move(anchor_dir * 0.05, 10.0, forced_t0=forced_t0)
+        owner._submit_move(anchor_dir * ANCHOR_NUDGE_MM, 10.0,
+                           forced_t0=forced_t0)
         owner._wait_for_move_done(direction=int(anchor_dir))
         return anchor_dir
 
@@ -548,11 +564,10 @@ class SyncCoordinator:
         # anchor-step (0.05mm, direction follows HALL1 to avoid
         # forward-feed when buffer is overfilled) so the swap finds
         # an up-to-date last_step_clock.
-        REPRIME_GAP = 5.0
         mcu = owner.stepper.get_mcu()
         mcu_now = mcu.estimated_print_time(owner.reactor.monotonic())
         gap = mcu_now - owner._last_move_end_time
-        if gap > REPRIME_GAP:
+        if gap > REPRIME_GAP_S:
             anchor_dir = self._submit_anchor_move()
             owner._respond("Sync prep: own-trapq cursor refreshed "
                           "(idle %.1fs, anchor %s 0.05mm)"
@@ -986,6 +1001,17 @@ class BufferFeeder:
         # DEBUG). Default off fuer Production.
         self.buffer_debug_metrics = config.getboolean(
             'buffer_debug_metrics', False)
+        # SpeedModulator-Pipeline-Floor. Bei Zwischenzone proposed unter
+        # diesem Wert wird der Submit ausgesetzt (statt force-clamped) —
+        # sehr langsame Trapeze sind anfaellig fuer stepcompress-Sequenz-
+        # Probleme bei niedrigem Flow.
+        self.min_feed_floor = config.getfloat(
+            'min_feed_floor', 15.0, above=0.)
+        # SpeedModulator-Feedforward-Gain. Buffer-Stepper laeuft in der
+        # Zwischenzone mit `extruder_velocity * feed_speed_gain` um eine
+        # leichte Vorrats-Reserve aufzubauen.
+        self.feed_speed_gain = config.getfloat(
+            'feed_speed_gain', 1.10, minval=1.0)
         # P7-70 (Issue #12): Interval after which an IDLE stepper gets a
         # micro-anchor move to refresh stepcompress's last_step_clock.
         # Background: STATE_IDLE has no periodic move activity. After
@@ -2364,11 +2390,10 @@ class BufferFeeder:
                             # gesetzter lead_time > 2.0s den forced_t0
                             # nicht in den P7-73 Clamp-Pfad zieht. Im
                             # Default-Fall (lead_time=0.3s) no-op.
-                            _MAX_FORCED_T0_LOOKAHEAD = 2.0  # s
                             _p778_forced_t0 = (
                                 mcu_now
                                 + min(self.lead_time,
-                                      _MAX_FORCED_T0_LOOKAHEAD))
+                                      MAX_T0_LOOKAHEAD_S))
                             self.sync._submit_anchor_move(
                                 forced_t0=_p778_forced_t0)
                         else:
@@ -2412,7 +2437,7 @@ class BufferFeeder:
                 if self._needs_overflow_prime:
                     if not self.use_flush_callback_bang_bang:
                         self._needs_overflow_prime = False
-                        self._submit_move(0.05, self.feed_speed,
+                        self._submit_move(ANCHOR_NUDGE_MM, self.feed_speed,
                                           forced_t0=None)
                     # else: leave the flag set — _on_mcu_flush picks
                     # it up on the next flush-cycle and submits with
@@ -2790,10 +2815,9 @@ class BufferFeeder:
         extruder_vel = self.velocity_tracker.get_velocity()
         if extruder_vel <= 0.0:
             return 0.0  # Toolhead stalled — nicht foerdern
-        MIN_FLOOR = 15.0  # mm/s — Pipeline-Backpressure-Mindest
-        proposed = extruder_vel * 1.10
-        if proposed < MIN_FLOOR:
-            return 0.0  # Hotfix5: lieber kein Submit als zu langsam
+        proposed = extruder_vel * self.feed_speed_gain
+        if proposed < self.min_feed_floor:
+            return 0.0  # Pipeline-safe skip statt force-clamp
         return proposed
 
     def _on_mcu_flush(self, flush_time, step_gen_time):
@@ -2910,7 +2934,8 @@ class BufferFeeder:
             # then ride on a synchronised cursor.
             self._needs_overflow_prime = False
             anchor = step_gen_time + self.lead_time
-            self._submit_move(0.05, self.feed_speed, forced_t0=anchor)
+            self._submit_move(ANCHOR_NUDGE_MM, self.feed_speed,
+                              forced_t0=anchor)
             return
         if self._stepper_synced_to is not None:
             # An explicit BUFFER_SYNC_TO_EXTRUDER (macro path) is in
@@ -3435,7 +3460,6 @@ class BufferFeeder:
         # mid-print, Bang-bang nach Heater-Warmup). Mid-print-Stall durch
         # flush_step_generation ist ein paar Millisekunden, bei UNLOAD/
         # erstem Buffer-Move kaum spuerbar — Crash-Vermeidung wiegt schwerer.
-        REPRIME_GAP = 5.0
         mcu = self.stepper.get_mcu()
         mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
         gap = mcu_now - self._last_move_end_time
@@ -3461,7 +3485,7 @@ class BufferFeeder:
         # never trigger — defeating the point of the patch.
         was_primed = self._stepcompress_primed
         if forced_t0 is None:
-            need_reprime = (not self._stepcompress_primed) or (gap > REPRIME_GAP)
+            need_reprime = (not self._stepcompress_primed) or (gap > REPRIME_GAP_S)
         else:
             need_reprime = not self._stepcompress_primed
         if need_reprime:
@@ -3611,8 +3635,7 @@ class BufferFeeder:
             # des Cap. Greift NUR im degenerate far-future Print-Start
             # Fall. Fallback-Anker = mcu_now + lead_time entspricht
             # dem normalen "Erst-Chunk"-Anker (else-Branch unten).
-            MAX_FORCED_T0_LOOKAHEAD = 2.0  # s
-            if forced_t0 > mcu_now + MAX_FORCED_T0_LOOKAHEAD:
+            if forced_t0 > mcu_now + MAX_T0_LOOKAHEAD_S:
                 logging.warning(
                     "buffer_feeder: forced_t0 clamped — was %.2fs "
                     "ahead of mcu_now (P7-73 guard, Issue #31 "
@@ -3649,8 +3672,7 @@ class BufferFeeder:
             # tick) — wenn Patch A wegen einer Race / paused / einer
             # nicht-printing-State greift, faengt B den degenerate Submit
             # noch in _submit_single_trapezoid ab.
-            MAX_T0_LOOKAHEAD = 2.0  # s
-            if t0 > mcu_now + MAX_T0_LOOKAHEAD:
+            if t0 > mcu_now + MAX_T0_LOOKAHEAD_S:
                 logging.warning(
                     "buffer_feeder: anchor skipped — th_time %.2fs "
                     "ahead, would corrupt last_step_clock (P7-77 B; "
@@ -3664,7 +3686,7 @@ class BufferFeeder:
                 # _last_move_end_time mitziehen falls stale-future,
                 # damit nachfolgende Submits nicht erneut den ELSE-
                 # Branch durch falschen abut-Check verfehlen.
-                if self._last_move_end_time > mcu_now + MAX_T0_LOOKAHEAD:
+                if self._last_move_end_time > mcu_now + MAX_T0_LOOKAHEAD_S:
                     self._last_move_end_time = mcu_now
                 return
 

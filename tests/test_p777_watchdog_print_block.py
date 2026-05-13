@@ -597,8 +597,10 @@ def test_xverify_p773_forced_t0_clamp_unchanged():
     src = open(buffer_feeder.__file__, encoding='utf-8').read()
     assert "P7-73 guard, Issue #31" in src, (
         "P7-73 forced_t0-Clamp must remain in source.")
-    assert "MAX_FORCED_T0_LOOKAHEAD = 2.0" in src, (
-        "P7-73 cap constant must remain.")
+    assert "MAX_T0_LOOKAHEAD_S = 2.0" in src, (
+        "Forced-t0 lookahead cap constant must remain.")
+    assert "mcu_now + MAX_T0_LOOKAHEAD_S" in src, (
+        "Forced-t0 cap usage must remain.")
 
 
 def test_xverify_p774_halt_rollback_unchanged():
