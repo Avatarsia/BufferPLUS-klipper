@@ -28,6 +28,7 @@ EXT_TARGET_DIR="${KLIPPER_DIR}/klippy/extras"
 # eigene Config-Plugins, weil sie kein load_config_prefix exportieren.
 EXT_SUB_MODULES=(
     "_buffer_common.py"
+    "buffer_fault.py"
     "buffer_modulator.py"
     "buffer_sensors.py"
     "buffer_stepper.py"

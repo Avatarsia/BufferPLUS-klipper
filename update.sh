@@ -32,6 +32,7 @@ EXT_DIR="${REPO_DIR}/klipper_extras"
 EXT_TARGET_DIR="${KLIPPER_DIR}/klippy/extras"
 EXT_SUB_MODULES=(
     "_buffer_common.py"
+    "buffer_fault.py"
     "buffer_modulator.py"
     "buffer_sensors.py"
     "buffer_stepper.py"
