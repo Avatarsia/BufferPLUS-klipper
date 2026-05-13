@@ -98,17 +98,41 @@ fi
 # ---------- Status ermitteln ----------
 
 status_extension() {
+    local link sub sub_src sub_dst sidecar_issues
     if [ -L "${EXT_TARGET}" ]; then
-        local link; link="$(readlink "${EXT_TARGET}")"
-        if [ "${link}" = "${EXT_SOURCE}" ]; then
-            echo "installed"
-        else
+        link="$(readlink "${EXT_TARGET}")"
+        if [ "${link}" != "${EXT_SOURCE}" ]; then
             echo "wrong_symlink:${link}"
+            return
         fi
     elif [ -e "${EXT_TARGET}" ]; then
         echo "regular_file"
+        return
     else
         echo "missing"
+        return
+    fi
+
+    sidecar_issues=""
+    for sub in "${EXT_SUB_MODULES[@]}"; do
+        sub_src="${EXT_DIR}/${sub}"
+        sub_dst="${EXT_TARGET_DIR}/${sub}"
+        if [ -L "${sub_dst}" ]; then
+            link="$(readlink "${sub_dst}")"
+            if [ "${link}" != "${sub_src}" ]; then
+                sidecar_issues="${sidecar_issues:+${sidecar_issues}, }${sub} -> ${link}"
+            fi
+        elif [ -e "${sub_dst}" ]; then
+            sidecar_issues="${sidecar_issues:+${sidecar_issues}, }${sub} (regular file)"
+        else
+            sidecar_issues="${sidecar_issues:+${sidecar_issues}, }${sub} (missing)"
+        fi
+    done
+
+    if [ -n "${sidecar_issues}" ]; then
+        echo "sidecars:${sidecar_issues}"
+    else
+        echo "installed"
     fi
 }
 
@@ -185,6 +209,7 @@ case "${S_EXT}" in
     installed)  ok "Extension-Symlink: ${EXT_TARGET}" ;;
     missing)    miss "Extension-Symlink fehlt: ${EXT_TARGET}" ;;
     wrong_symlink:*) warn "Extension-Symlink zeigt auf ${S_EXT#wrong_symlink:} (nicht auf Repo)" ;;
+    sidecars:*) warn "Extension-Symlink ok, aber Sub-Modul-Symlinks fehlen/abweichen: ${S_EXT#sidecars:}" ;;
     regular_file)    warn "${EXT_TARGET} existiert als normale Datei (kein Symlink)" ;;
 esac
 

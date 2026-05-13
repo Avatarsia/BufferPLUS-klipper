@@ -2292,6 +2292,10 @@ class BufferFeeder:
         self._continuous_feed = False
         self._continuous_feed_direction = 0
         self._continuous_feed_speed = 0.0
+        # Clear the Schmitt-trigger latch on every hard stop so the
+        # next AUTO session re-arms from live sensor/tracker state,
+        # not from a stale "was feeding" hysteresis decision.
+        self._modulator_feeding = False
         # Reset accumulator on every halt. After a halt the
         # accumulator is stale — leaving it set would cause a false
         # JAM_SAFETY_DISTANCE on the very first chunk of the next

@@ -171,6 +171,31 @@ def test_halt_motion_anchor_equal_mcu_now_unchanged():
 
 
 # ---------------------------------------------------------------------------
+# Test 2b: Halt resets Schmitt-trigger hysteresis latch
+# ---------------------------------------------------------------------------
+
+def test_halt_motion_resets_modulator_hysteresis_latch():
+    """A hard stop must clear the Schmitt-trigger feeding latch.
+
+    Otherwise the next AUTO resume could inherit a stale "was
+    feeding" state across OVERFLOW / JAM / PAUSE / CLEAR_JAM and use
+    the stop-threshold path before the tracker/sensors have re-armed
+    the modulator from live state.
+    """
+    printer, feeder = make_feeder()
+
+    feeder._modulator_feeding = True
+    feeder._continuous_feed = True
+    feeder._continuous_feed_direction = 1
+    feeder._continuous_feed_speed = feeder.feed_speed
+    feeder._pending_remaining_mm = 12.0
+
+    feeder._halt_motion()
+
+    assert feeder._modulator_feeding is False
+
+
+# ---------------------------------------------------------------------------
 # Test 3: Eifel-Joe rapid AUTO→OVERFLOW→AUTO cycle pattern
 # ---------------------------------------------------------------------------
 
