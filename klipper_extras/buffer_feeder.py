@@ -1108,6 +1108,13 @@ class BufferFeeder:
         # and clock-sync jitter during the stall caused a regression.
         self._last_enable_schedule_time = 0.0
 
+        # Hotfix8 Diagnostic (KEIN Fix, reine Instrumentation):
+        # Track previous target_speed um pause-resume-edge zu erkennen
+        # (target=0 -> target>0). An genau dieser Stelle crasht
+        # stepcompress c=3 i=0 (Hardware 2026-05-14, Hotfix 7 HW-Test).
+        # Defense-Patches P7-72/73/77B greifen nicht weil Gap<5s.
+        self._last_target_speed = 0.0
+
         # Stepper enable handle (resolved at connect)
         self._stepper_enable = None
 
@@ -2980,6 +2987,33 @@ class BufferFeeder:
         # (_pending_remaining_mm) still gates as before (HALL2
         # interrupt via move splitting).
         target_speed = self._compute_target_feed_speed()
+
+        # Hotfix8 Diagnostic (KEIN Fix, reine Instrumentation): log full
+        # state am pause-resume-edge (target_speed 0 -> >0). Genau hier
+        # crasht stepcompress c=3 i=0 nach 1-3s Pause (Hardware 2026-05-14,
+        # Hotfix 7 HW-Test klippy.log Z.3840). Defense-Patches P7-72/73/77B
+        # greifen nicht weil Gap<REPRIME_GAP=5s. DIAG sammelt Evidenz fuer
+        # spaeteren gezielten Hotfix 9.
+        if target_speed > 0.0 and self._last_target_speed == 0.0:
+            mcu = self.stepper.get_mcu()
+            mcu_now_diag = mcu.estimated_print_time(self.reactor.monotonic())
+            gap_diag = mcu_now_diag - self._last_move_end_time
+            vel_ready_diag = self.velocity_tracker.is_ready()
+            vel_diag = (self.velocity_tracker.get_velocity()
+                        if vel_ready_diag else 0.0)
+            logging.info(
+                "buffer_feeder DIAG resume-edge: target=%.2f "
+                "last_target=%.2f mcu_now=%.3f lme=%.3f gap=%.3fs "
+                "en_sched=%.3f primed=%s step_gen=%.3f flush=%.3f "
+                "move_in_flight=%s pending_mm=%.2f vel_ready=%s vel=%.2f",
+                target_speed, self._last_target_speed,
+                mcu_now_diag, self._last_move_end_time, gap_diag,
+                self._last_enable_schedule_time,
+                self._stepcompress_primed,
+                step_gen_time, flush_time, self._move_in_flight(),
+                self._pending_remaining_mm, vel_ready_diag, vel_diag)
+        self._last_target_speed = target_speed
+
         if target_speed <= 0.0:
             if self.buffer_debug_metrics:
                 logging.debug(
@@ -3709,6 +3743,23 @@ class BufferFeeder:
                 if self._last_move_end_time > mcu_now + MAX_T0_LOOKAHEAD:
                     self._last_move_end_time = mcu_now
                 return
+
+        # Hotfix8 Diagnostic (KEIN Fix, reine Instrumentation): log
+        # resolved anchor decision fuer forced_t0-Pfad (Crash-Pfad ueber
+        # _on_mcu_flush). Liefert exakten State zum Submit-Zeitpunkt um
+        # c=3 i=0 Crash-Wurzel zu identifizieren. Gated auf
+        # buffer_debug_metrics um Log-Spam in nicht-Debug-Sessions zu
+        # vermeiden — auf Drucker ist das Flag aktiv (buffer_metrics-
+        # Zeilen sichtbar in klippy.log).
+        if forced_t0 is not None and self.buffer_debug_metrics:
+            logging.info(
+                "buffer_feeder DIAG submit: forced_t0=%.3f t0=%.3f "
+                "mcu_now=%.3f lme=%.3f en=%.3f was_primed=%s "
+                "stale_anchor=%s need_reprime=%s streaming=%s "
+                "dist=%.2f speed=%.2f cmd_pos=%.2f",
+                forced_t0, t0, mcu_now, self._last_move_end_time, en,
+                was_primed, stale_anchor, need_reprime, streaming,
+                signed_distance, speed, self._commanded_pos)
 
         distance = abs(signed_distance)
         direction = 1.0 if signed_distance > 0 else -1.0
