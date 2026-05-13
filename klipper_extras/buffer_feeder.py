@@ -249,11 +249,20 @@ class HallSensorMonitor:
             return
         if name == 'hall_overflow':
             if owner._is_hall1_active('sensor_callback'):
-                owner._enter_overflow()
+                # C-cont T5: In STATE_AUTO defer immediate _enter_overflow
+                # to _main_tick (which checks for hall1_persist_timeout).
+                # In other states (LOAD, MANUAL, UNLOAD) keep the immediate
+                # trigger — those paths have their own safety semantics and
+                # need synchronous overflow-handling.
+                if owner._state == STATE_AUTO:
+                    owner._mark_hall1_active()
+                else:
+                    owner._enter_overflow()
             else:
                 # P7-46 (Issue #16): clear post-LOAD grace on HALL1-fall.
                 # Buffer-Arm has dropped, normal sensor regime resumes.
                 owner._post_load_overflow_grace = False
+                owner._mark_hall1_cleared()
                 owner._exit_overflow()
         elif name == 'hall_full':
             pass
@@ -1172,6 +1181,12 @@ class BufferFeeder:
         # nach Stille nicht c=7 Invalid sequence wirft. 0.0 = "noch nie
         # ein Flush gesehen" (Boot-Schutz, kein Override moeglich).
         self._last_mcu_flush_time = 0.0
+        # C-cont T5: HALL1-Persist-Tracking. In STATE_AUTO loest HALL1-Edge
+        # nicht mehr direkt _enter_overflow aus, sondern setzt nur den
+        # Timestamp. _main_tick prueft Persist > hall1_persist_timeout und
+        # eskaliert dann zu echtem OVERFLOW (Hardware-Safety). None = HALL1
+        # inactive, float = reactor.monotonic() zum Edge-Time.
+        self._hall1_active_since = None
         # C-cont T2: ExtruderVelocityTracker fuer SpeedModulator.
         # Read-only passiver Observer ueber extruder.get_status. Kein
         # flush_step_generation, kein SYNC -> kein Druckkopf-Pause-
@@ -1817,6 +1832,23 @@ class BufferFeeder:
     # -----------------------------------------------------------------------
     # Overflow (HALL1) — hard priority
     # -----------------------------------------------------------------------
+
+    def _mark_hall1_active(self):
+        """C-cont T5: HALL1-Edge im STATE_AUTO — defer state-transition,
+        nur Timestamp setzen. _main_tick prueft Persist >
+        hall1_persist_timeout fuer echten OVERFLOW-Safety-Trigger.
+
+        Idempotent: bereits gesetzten Timestamp NICHT ueberschreiben,
+        damit Persist-Dauer korrekt akkumuliert."""
+        if self._hall1_active_since is None:
+            self._hall1_active_since = self.reactor.monotonic()
+
+    def _mark_hall1_cleared(self):
+        """C-cont T5: HALL1 falling-edge — Timestamp loeschen, Persist-
+        Counter zurueck auf None. Auch bei _exit_overflow muss diese
+        Methode gerufen werden damit ein neuer HALL1-Edge sauber tracked
+        wird."""
+        self._hall1_active_since = None
 
     def _enter_overflow(self):
         self._respond("*** HALL1 OVERFLOW — Feeder disabled, lockout engaged ***")

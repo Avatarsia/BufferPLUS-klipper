@@ -191,3 +191,52 @@ def test_c_cont_modulator_tracker_not_ready_fallback(monkeypatch):
     set_sensor_active(feeder, 'hall_overflow', False)
     assert not feeder.velocity_tracker.is_ready()
     assert feeder._compute_target_feed_speed() == feeder.feed_speed
+
+
+# ===========================================================================
+# C-cont T5: HALL1 Soft-Trigger im STATE_AUTO
+# ===========================================================================
+
+
+def _fire_hall1_callback(feeder, eventtime=0.0):
+    """Fire the stable-sensor callback after set_sensor_active has set the
+    _pin_stable_state. In production this is fired via check_debounce; in
+    tests we invoke it directly to bypass the debounce-timer ceremony."""
+    raw = feeder._pin_stable_state['hall_overflow']
+    feeder.sensors.on_stable_sensor_change(eventtime, 'hall_overflow', raw)
+
+
+def test_c_cont_hall1_in_auto_defers_no_state_change(monkeypatch):
+    """STATE_AUTO + HALL1-Edge -> KEINE state-transition zu OVERFLOW."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    assert feeder._state == buffer_feeder.STATE_AUTO
+    # HALL1 active triggern via set_sensor_active + callback fire
+    set_sensor_active(feeder, 'hall_overflow', True)
+    _fire_hall1_callback(feeder)
+    # State sollte AUTO bleiben (kein OVERFLOW)
+    assert feeder._state == buffer_feeder.STATE_AUTO
+    # _hall1_active_since muss gesetzt sein
+    assert feeder._hall1_active_since is not None
+
+
+def test_c_cont_hall1_in_load_keeps_immediate_overflow(monkeypatch):
+    """Nicht-AUTO-State + HALL1-Edge -> sofortiger OVERFLOW."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_LOAD_PHASE_1
+    set_sensor_active(feeder, 'hall_overflow', True)
+    _fire_hall1_callback(feeder)
+    # In LOAD-Phase soll HALL1 sofort OVERFLOW triggern
+    assert feeder._state == buffer_feeder.STATE_OVERFLOW
+
+
+def test_c_cont_hall1_cleared_resets_timestamp(monkeypatch):
+    """HALL1 cleared (falling edge) -> _hall1_active_since = None."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder, 'hall_overflow', True)
+    _fire_hall1_callback(feeder)
+    assert feeder._hall1_active_since is not None
+    set_sensor_active(feeder, 'hall_overflow', False)
+    _fire_hall1_callback(feeder)
+    assert feeder._hall1_active_since is None
