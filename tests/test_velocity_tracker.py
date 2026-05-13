@@ -16,14 +16,16 @@ from klipper_extras import buffer_feeder
 
 @pytest.fixture
 def fake_extruder_printer():
-    """FakePrinter mit FakeExtruder (lookup_object('extruder') returns
-    Object with get_status returning dict with 'position' key)."""
+    """FakePrinter mit FakeExtruder (Mainline-API: last_position-Attribut).
+
+    Hotfix 2026-05-13: ExtruderVelocityTracker liest extruder.last_position
+    direkt (Mainline-Klipper-API), KEIN get_status['position']. get_status
+    bleibt als leeres dict zur Doku, dass Mainline keinen 'position'-Key
+    hat."""
     printer = FakePrinter()
     fake_ext = types.SimpleNamespace()
-    fake_ext._position = 0.0
-    def get_status(eventtime):
-        return {'position': fake_ext._position}
-    fake_ext.get_status = get_status
+    fake_ext.last_position = 0.0  # Mainline-API
+    fake_ext.get_status = lambda eventtime: {}  # Mainline hat KEIN 'position'
     printer.objects['extruder'] = fake_ext
     return printer, fake_ext
 
@@ -47,7 +49,7 @@ def test_tracker_steady_state(fake_extruder_printer):
         filament_diameter=1.75)
     t = 0.0
     for _ in range(12):
-        ext._position = t * 10.0
+        ext.last_position = t * 10.0
         tracker.tick(t)
         t += 0.025
     assert tracker.is_ready()
@@ -62,13 +64,13 @@ def test_tracker_velocity_step_lag(fake_extruder_printer):
         filament_diameter=1.75)
     t = 0.0
     for _ in range(6):
-        ext._position = 0.0
+        ext.last_position = 0.0
         tracker.tick(t)
         t += 0.025
     pos = 0.0
     for _ in range(6):
         pos += 10.0 * 0.025
-        ext._position = pos
+        ext.last_position = pos
         tracker.tick(t)
         t += 0.025
     assert 3.0 < tracker.get_velocity() < 7.0
@@ -83,7 +85,7 @@ def test_tracker_retract_clamped(fake_extruder_printer):
     t = 0.0
     pos = 100.0
     for _ in range(12):
-        ext._position = pos
+        ext.last_position = pos
         tracker.tick(t)
         pos -= 1.0
         t += 0.025
@@ -98,7 +100,7 @@ def test_tracker_volumetric_calc(fake_extruder_printer):
         filament_diameter=1.75)
     t = 0.0
     for _ in range(12):
-        ext._position = t * 10.0
+        ext.last_position = t * 10.0
         tracker.tick(t)
         t += 0.025
     cross_section = math.pi * (1.75 / 2.0) ** 2
@@ -114,7 +116,7 @@ def test_tracker_is_ready_threshold(fake_extruder_printer):
         filament_diameter=1.75)
     t = 0.0
     for i in range(12):
-        ext._position = t * 5.0
+        ext.last_position = t * 5.0
         tracker.tick(t)
         t += 0.025
         if i < 11:

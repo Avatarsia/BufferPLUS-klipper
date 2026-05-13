@@ -834,11 +834,14 @@ class ExtruderVelocityTracker:
         if ext is None:
             return
         try:
-            status = ext.get_status(eventtime)
-        except Exception:
+            # Mainline-API: PrinterExtruder.last_position wird in
+            # move() auf move.end_pos[3] gesetzt. get_status() enthaelt
+            # KEINEN 'position'-Key (T1 hatte fehlerhafte FakeExtruder-
+            # Mock-API). Bei Stepper-Objekten ohne last_position-Attribut
+            # (z.B. PrinterDummyExtruder): Fallback 0.0.
+            position = float(getattr(ext, 'last_position', 0.0))
+        except (AttributeError, TypeError):
             return
-        position = status.get('position', 0.0) if isinstance(
-            status, dict) else 0.0
         self._samples.append((eventtime, position))
         self._last_sample_time = eventtime
 
@@ -2748,6 +2751,12 @@ class BufferFeeder:
         if not self.velocity_tracker.is_ready():
             return self.feed_speed
         extruder_vel = self.velocity_tracker.get_velocity()
+        # C-cont Hotfix: extruder_vel kann 0.0 sein wenn Toolhead
+        # gerade pausiert (kein move command). Fallback auf
+        # config feed_speed verhindert 0-Output das den Buffer-
+        # Stepper zum Erliegen bringt.
+        if extruder_vel <= 0.0:
+            return self.feed_speed
         if self.hall_full:
             return 0.5 * extruder_vel
         return extruder_vel

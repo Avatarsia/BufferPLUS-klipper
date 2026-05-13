@@ -1,8 +1,11 @@
 """Integration-Tests fuer C-cont Continuous-Streaming.
 
-Test-Pattern wie test_p778_print_block_stale_override mit zusaetzlichem
-FakeExtruder-Patch (get_status statt last_position) fuer den passiven
-ExtruderVelocityTracker.
+Test-Pattern wie test_p778_print_block_stale_override; nutzt FakePrinter
+FakeExtruder.last_position-Attribut (Mainline-Klipper-API) fuer den
+passiven ExtruderVelocityTracker.
+
+Hotfix 2026-05-13: Tracker liest jetzt extruder.last_position direkt
+(zuvor: get_status['position'] — Mainline hat KEINEN solchen Key).
 """
 
 import types
@@ -38,9 +41,9 @@ def make_c_cont_feeder(monkeypatch, *, print_state='printing',
       - print_stats(state=print_state)
       - Sensoren quiescent (HALL2-Hysterese-Zwischenzone)
 
-    Zusatz fuer C-cont: aktualisiert FakePrinter.objects['extruder'] so
-    dass es ein get_status(eventtime) hat (ExtruderVelocityTracker
-    benoetigt get_status(eventtime)['position']).
+    Zusatz fuer C-cont: FakePrinter.objects['extruder'] hat bereits
+    last_position=0.0 (Mainline-Klipper-API); ExtruderVelocityTracker
+    liest dieses Attribut direkt.
 
     cfg_overrides: dict optional, ueberschreibt einzelne config-Werte.
     """
@@ -50,18 +53,13 @@ def make_c_cont_feeder(monkeypatch, *, print_state='printing',
     printer = FakePrinter()
     printer.objects['print_stats'] = FakePrintStats(state=print_state)
 
-    # FakeExtruder mit get_status fuer ExtruderVelocityTracker.
-    # FakePrinter setzt bereits einen FakeExtruder mit last_position,
-    # aber kein get_status. Wir patchen ihn mit einem zusaetzlichen
-    # Attribut _position und einer get_status-Methode (Pattern aus
-    # tests/test_velocity_tracker.py fixture).
+    # Hotfix 2026-05-13: ExtruderVelocityTracker liest jetzt
+    # extruder.last_position direkt (Mainline-Klipper-API). FakePrinter
+    # setzt FakeExtruder bereits mit last_position=0.0 (siehe
+    # fakes_klipper.py FakeExtruder, Z.187). Wir muessen hier nichts
+    # patchen — die Tests aktualisieren last_position direkt.
     fake_ext = printer.objects['extruder']
-    fake_ext._position = 0.0
-
-    def get_status(eventtime, _ext=fake_ext):
-        return {'position': _ext._position}
-
-    fake_ext.get_status = get_status
+    fake_ext.last_position = 0.0
 
     config = FakeConfig(printer=printer, values=base)
     feeder = buffer_feeder.BufferFeeder(config)
@@ -139,7 +137,7 @@ def _populate_tracker_to_ready(feeder, *, velocity):
     fake_ext = feeder.printer.objects['extruder']
     t = 0.0
     for _ in range(12):
-        fake_ext._position = t * velocity
+        fake_ext.last_position = t * velocity
         feeder.velocity_tracker.tick(t)
         t += 0.025
 
@@ -190,6 +188,27 @@ def test_c_cont_modulator_tracker_not_ready_fallback(monkeypatch):
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
     assert not feeder.velocity_tracker.is_ready()
+    assert feeder._compute_target_feed_speed() == feeder.feed_speed
+
+
+def test_c_cont_modulator_extruder_vel_zero_fallback(monkeypatch):
+    """Toolhead pausiert (extruder_vel=0) trotz tracker ready ->
+    Fallback auf feed_speed (verhindert 0-Speed-Stuck).
+    Hotfix nach Hardware-Log-Befund 2026-05-13."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    # Tracker ready aber alle Positions gleich -> vel=0
+    fake_ext = feeder.printer.objects['extruder']
+    t = 0.0
+    for _ in range(12):
+        fake_ext.last_position = 100.0  # konstant
+        feeder.velocity_tracker.tick(t)
+        t += 0.025
+    assert feeder.velocity_tracker.is_ready()
+    assert feeder.velocity_tracker.get_velocity() == 0.0
+    # Modulator: Zwischenzone + vel=0 -> Fallback feed_speed
     assert feeder._compute_target_feed_speed() == feeder.feed_speed
 
 
