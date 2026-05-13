@@ -298,7 +298,7 @@ def test_b_anchor_skip_when_th_time_far_future(caplog):
 
     # 2. Warning emitted.
     b_warns = [r for r in caplog.records
-               if "P7-77 B" in r.getMessage()]
+               if "anchor skipped" in r.getMessage()]
     assert b_warns, (
         "P7-77 B: skip-warning must be emitted. Got 0.")
 
@@ -579,7 +579,7 @@ def test_integration_skip_path_when_print_state_missed(monkeypatch, caplog):
         "P7-77 B integration: th_time 10s ahead MUSS skip. Got %d "
         "submits." % len(own))
     b_warns = [r for r in caplog.records
-               if "P7-77 B" in r.getMessage()]
+               if "anchor skipped" in r.getMessage()]
     assert b_warns, (
         "P7-77 B integration: warning must emit on skip.")
 

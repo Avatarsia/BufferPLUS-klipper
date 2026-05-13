@@ -2749,284 +2749,161 @@ class BufferFeeder:
 
     def _submit_single_trapezoid(self, signed_distance, speed,
                                   forced_t0=None, streaming=False):
-        """Append one trapezoid to our trapq. Low-level primitive.
+        """Append one trapezoid to the buffer-stepper's own trapq.
 
-        forced_t0 (P7-52): when not None, overrides the t0 anchor with
-        the explicit value. Used by the flush-callback bang-bang path
-        which receives step_gen_time from Klipper and can compute a
-        race-free anchor at step_gen_time + lead_time. The default
-        (None) keeps the existing toolhead-anchor logic for the
-        legacy reactor-tick path.
+        forced_t0: when not None, overrides the t0 anchor. Used by the
+        flush-callback path, which receives step_gen_time from Klipper
+        and computes a race-free anchor at step_gen_time + lead_time.
+        Default (None) keeps the toolhead-anchor logic for the reactor-
+        tick path.
 
-        streaming (P7-66 R1): set by lookahead-submits during a still-
-        in-flight previous chunk. Suppresses _enable_stepper() (motor
-        is already on) and drops the _last_enable_schedule_time floor
-        from the t0 max(). Without this, _enable_stepper() bumps
-        _last_enable_schedule_time forward by lead_time → en becomes
-        the binding floor → abuttend-anchor breaks → inter-chunk gap
-        regrows to lead_time despite the lookahead path firing.
+        streaming: set by lookahead-submits during a still-in-flight
+        previous chunk. Suppresses _enable_stepper() (motor already on)
+        and drops the _last_enable_schedule_time floor from the t0 max,
+        so chunks abut without an inter-chunk lead_time gap.
+
+        Returns None on success; returns early (without queuing) when
+        the stepper is synced to an extruder trapq or when the
+        computed anchor is far-future stale.
         """
-        # P7-69 (Issue #18): innermost defense-in-depth sync guard.
-        # _bang_bang_tick / _on_mcu_flush / _submit_move already guard,
-        # but this primitive is the actual site of the dangerous side-
-        # effects flagged in Issue #18: when forced_t0 is None AND
-        # gap > REPRIME_GAP, the legacy reprime path calls
-        # toolhead.flush_step_generation() + stepper.set_position(0)
-        # mid-print, which drains the toolhead queue and stops the
-        # extruder while it is actively driving the synced stepper.
-        # _tick_pending_chunk (P7-66 streaming) and other future call-
-        # sites would bypass the upstream guards; this final gate makes
-        # the invariant "no own-trapq submit while synced" robust.
+        # Innermost defense-in-depth sync guard. Upstream paths already
+        # guard, but the dangerous side-effects (flush_step_generation
+        # + set_position(0) mid-print) live here, so this final gate
+        # makes "no own-trapq submit while synced" robust against any
+        # future caller.
         if self._stepper_synced_to is not None:
             return
-        # Prime/re-prime stepcompress nach Idle-Pause die laenger ist als
-        # CLOCK_DIFF_MAX (Klipper: 3<<28 ticks = ~16.7s @ 48MHz). Dahinter
-        # laeuft compress_bisect_add in degenerierte Sequenzen ein
-        # ("stepcompress o=X i=0 c=N a=0: Invalid sequence" → MCU shutdown).
-        #
-        # Loesung: toolhead.flush_step_generation() drainiert alle pending
-        # Toolhead-Bewegungen und syncted last_step_gen_time fuer ALLE
-        # Syncemitter (inkl. unserem Buffer-Feeder-Stepper). set_position
-        # danach setzt _commanded_pos und itersolve's commanded_pos auf 0,
-        # damit der naechste trapq_append einen sauberen start_pos_x hat.
-        #
-        # KEIN _print_running-Guard: der Re-Prime muss IMMER laufen, auch
-        # mid-print. Drei Iterationen Detach/Reattach (P7-2 bis P7-5)
-        # haben versucht das mid-print elegant zu vermeiden, aber alle
-        # crashten an genau dem Pfad wo _print_running=True war (UNLOAD
-        # mid-print, Bang-bang nach Heater-Warmup). Mid-print-Stall durch
-        # flush_step_generation ist ein paar Millisekunden, bei UNLOAD/
-        # erstem Buffer-Move kaum spuerbar — Crash-Vermeidung wiegt schwerer.
+
         mcu = self.stepper.get_mcu()
         mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
         gap = mcu_now - self._last_move_end_time
-        # Reprime-Logik unterscheidet zwei Pfade:
-        #
-        # Alter Pfad (forced_t0=None, Reactor-Tick):
-        #   flush_step_generation() + set_position() bei not-primed ODER gap>5s.
-        #
-        # Flush-Callback-Pfad (forced_t0 gesetzt):
-        #   - flush_step_generation() NIEMALS aufrufen (ReactorError, weil
-        #     reactor.pause() innerhalb von assert_no_pause verboten ist).
-        #   - set_position() NUR wenn not-primed (d.h. nach Stepper-Disable,
-        #     z.B. nach OVERFLOW). Einmaliger Cursor-Reset ist sicher und
-        #     noetig. Bei primed=True: kein Aufruf (Schutz gegen rapide
-        #     SET_VELOCITY_LIMIT-Flush-Callbacks die Cursor korrumpieren).
-        #   - Gap-basierter Reprime entfaellt: step_gen_time ist der Anker.
-        # P7-67: snapshot the primed-flag BEFORE the reprime block
-        # rewrites it. The en-floor decision further down depends on
-        # whether the stepcompress cursor was primed on ENTRY, not on
-        # whether the reprime path just set it True. Without this
-        # snapshot, the post-reprime read of _stepcompress_primed
-        # would always be True and the new en-floor branch would
-        # never trigger — defeating the point of the patch.
-        was_primed = self._stepcompress_primed
-        if forced_t0 is None:
-            need_reprime = (not self._stepcompress_primed) or (gap > REPRIME_GAP_S)
-        else:
-            need_reprime = not self._stepcompress_primed
-        if need_reprime:
-            if forced_t0 is None:
-                try:
-                    toolhead = self.printer.lookup_object('toolhead')
-                    toolhead.flush_step_generation()
-                    logging.info("buffer_feeder: stepcompress re-primed via "
-                                 "flush_step_generation (gap=%.1fs)", gap)
-                except Exception:
-                    logging.exception("buffer_feeder: flush_step_generation failed")
-            self.stepper.set_position((0., 0., 0.))
-            self._commanded_pos = 0.0
-            self._stepcompress_primed = True
 
-        # P7-66 R1: skip _enable_stepper() in streaming-lookahead path.
-        # The previous (still in-flight) chunk has already enabled the
-        # motor and pushed _last_enable_schedule_time forward by lead_-
-        # time. A re-enable here would push it ANOTHER lead_time into
-        # the future → en floor wins below → abuttend-anchor broken.
-        # Safe to skip: streaming=True only when _move_in_flight() was
-        # True on entry, so the motor is energised through end_time of
-        # the prior chunk, which equals our t0 floor.
+        was_primed = self._stepcompress_primed
+        need_reprime = self._reprime_stepcompress_if_needed(forced_t0, gap)
+
+        # Skip motor-enable in streaming lookahead — previous chunk
+        # already enabled the motor and pushed _last_enable_schedule_-
+        # time forward.
         if not streaming:
             self._enable_stepper()
 
-        # Time base selection:
-        # For streaming chunks (previous chunk still in the future):
-        #   use _last_move_end_time directly so chunks abut without
-        #   gap. Calling get_last_move_time() here would include queued
-        #   toolhead/extruder moves (e.g. LOAD Phase 2 G1 E180) which
-        #   push t0 tens of seconds into the future — feeder stops mid-
-        #   phase while the extruder runs alone.
-        # For the first chunk after idle (or gap recovery):
-        #   use toolhead.get_last_move_time() to anchor to the MCU's
-        #   step-gen cursor. Without this, estimated_print_time drifts
-        #   during long idle and the first step lands at a clock the MCU
-        #   has no baseline for → "Invalid sequence" shutdown.
-        # mcu/mcu_now sind oben fuer den Re-Prime-Gap-Check schon
-        # berechnet — wiederverwenden statt neu fetchen.
-        # _enable_stepper() oben hat _last_enable_schedule_time via
-        # _schedule_time_for_enable_toggle() weiter in die Zukunft
-        # geschoben. t0 muss in ALLEN Pfaden >= diesem neuen Wert sein,
-        # damit der Motor-Enable vor dem ersten Step feuert.
-        # Ohne diesen Floor: t0 = _last_move_end_time < enable_pt →
-        # enable NACH Steps → "Invalid sequence" MCU-Shutdown (Hardware
-        # 2026-04-29, c=22 i=0).
-        # P7-66 R1: when streaming, en floor is DROPPED — see comment
-        # at the _enable_stepper() guard above.
-        # P7-67 (post-overflow resume primed=False edge case): the R1
-        # drop-en-floor optimisation is only safe when the stepcompress
-        # cursor was already primed on entry. If was_primed=False
-        # (typical resume path: _disable_stepper → _enable_stepper
-        # zyklus cleared _stepcompress_primed), the reprime above just
-        # rewrote stepcompress with set_position((0,0,0)) and the
-        # regular en floor must keep the lead_time margin — otherwise
-        # t0 lands at _last_move_end_time with no enable-vs-step lead
-        # → MCU "stepcompress Invalid sequence" shutdown (Issue #29,
-        # LOAD_PHASE_1 post-OVERFLOW regression of P7-66).
-        #
-        # P7-71 (Issue #29 Eifel-Joe Update — AUTO-Rapid-Cycle):
-        # P7-67 only covers the SLOW-cycle path where _disable_stepper
-        # actually ran and flipped _stepcompress_primed=False between
-        # OVERFLOW and resume. The RAPID-cycle bypasses that: HALL1
-        # flickers so fast that _schedule_stepper_disable only ever
-        # sets _pending_disable=True (move-in-flight), and the
-        # subsequent _resume_after_overflow → _enable_stepper cancels
-        # _pending_disable=False (line 2697). _disable_stepper NEVER
-        # runs → _stepcompress_primed stays True over the entire
-        # cycle → was_primed=True on the next submit. Same scenario
-        # via a different path: any forced_t0=None submit after
-        # gap > REPRIME_GAP (5s) with primed=True triggers the
-        # reprime branch (need_reprime=True). In BOTH cases the
-        # reprime block has just called stepper.set_position((0,0,0))
-        # — which makes _last_move_end_time semantically dead
-        # (cursor reset to zero, old end_time no longer consistent
-        # with the new stepcompress base). Without en-floor t0
-        # would land at the stale _last_move_end_time, again with
-        # no enable-vs-step lead → "Invalid sequence" shutdown
-        # (rapid-cycle reproduction from Eifel-Joe hardware log).
-        #
-        # Third guard `not need_reprime`: en-floor is dropped ONLY if
-        # the cursor was primed on entry AND the reprime block did
-        # not just rewrite it. When need_reprime=True the reprime ran
-        # → en-floor is mandatory, even if was_primed=True.
-        #
-        # P7-72 (Issue #29 Eifel-Joe — defense-in-depth stale-anchor
-        # guard): the three existing guards above
-        # (`streaming` + `was_primed` + `not need_reprime`) all check
-        # state at submit-entry. They do NOT see whether
-        # `_last_move_end_time` itself is still a meaningful anchor.
-        # _enter_overflow → _halt_motion mid-flight does not touch
-        # `_last_move_end_time` — it stays parked at the in-flight
-        # chunk's end_time. If the rapid-cycle then drains that chunk
-        # without queuing a successor (HALL1 flicker, HALT, JAM
-        # recovery, etc.) and wall-clock advances past it, the next
-        # streaming-lookahead submit would carry a `_last_move_end_-
-        # time` that lies in the past relative to mcu_now. The
-        # `forced_t0`-branch below already floors against mcu_now,
-        # but the legacy `forced_t0=None + streaming + was_primed +
-        # gap <= REPRIME_GAP` corner combines a stale anchor with the
-        # dropped en-floor — t0 lands at the stale `_last_move_end_-
-        # time`, no enable-vs-step lead, MCU "Invalid sequence"
-        # shutdown (Eifel-Joe 22-cycle AUTO-Bang-Bang reproduction,
-        # follow-up to P7-71 which only covered the gap>5s reprime
-        # corner). Marker `mcu_now >= _last_move_end_time` catches
-        # exactly this dead-anchor case — when a real streaming
-        # chunk is in flight, `_last_move_end_time` is strictly in
-        # the future (chunk end_time > mcu_now) so the guard is
-        # inert. Perf-impact: zero on healthy streaming, the guard
-        # only triggers when the abuttment anchor is already dead.
+        t0 = self._compute_t0_anchor(
+            forced_t0, mcu_now, was_primed, need_reprime, streaming)
+        if t0 is None:
+            return  # anchor skipped (far-future), nothing queued
+
+        self._append_trapezoid_and_record(t0, signed_distance, speed)
+
+    def _reprime_stepcompress_if_needed(self, forced_t0, gap):
+        """Re-prime stepcompress when the MCU step-gen cursor is stale.
+
+        Klipper's stepcompress maintains a last_step_clock; once
+        wall-clock moves more than CLOCK_DIFF_MAX (~16.7s @ 48 MHz)
+        beyond it, compress_bisect_add hits a degenerate sequence and
+        the MCU shuts down. Re-prime via toolhead.flush_step_generation
+        + set_position(0).
+
+        Two code-paths:
+          forced_t0=None (reactor-tick): reprime on not-primed OR
+            gap > REPRIME_GAP_S. Allowed to call flush_step_generation.
+          forced_t0!=None (flush-callback): reprime only on not-primed;
+            MUST NOT call flush_step_generation (raises ReactorError
+            inside the flush callback context).
+
+        Returns True when a reprime occurred (caller uses this as a
+        signal to keep the en-floor even if was_primed=True).
+        """
+        if forced_t0 is None:
+            need_reprime = (
+                not self._stepcompress_primed or gap > REPRIME_GAP_S)
+        else:
+            need_reprime = not self._stepcompress_primed
+        if not need_reprime:
+            return False
+        if forced_t0 is None:
+            try:
+                toolhead = self.printer.lookup_object('toolhead')
+                toolhead.flush_step_generation()
+                logging.info(
+                    "buffer_feeder: stepcompress re-primed via "
+                    "flush_step_generation (gap=%.1fs)", gap)
+            except Exception:
+                logging.exception(
+                    "buffer_feeder: flush_step_generation failed")
+        self.stepper.set_position((0., 0., 0.))
+        self._commanded_pos = 0.0
+        self._stepcompress_primed = True
+        return True
+
+    def _compute_t0_anchor(self, forced_t0, mcu_now,
+                           was_primed, need_reprime, streaming):
+        """Compute the trapezoid start-time anchor.
+
+        Three branches:
+          forced_t0!=None: caller-supplied (flush-callback), clamped
+            against far-future. Floors: _last_move_end_time, en, mcu_now.
+          forced_t0=None, previous chunk in-flight: streaming-abut.
+            Floors: _last_move_end_time, en.
+          forced_t0=None, first chunk after idle: toolhead anchor.
+            Skipped (return None) when th_time is so far ahead that
+            clamping it to mcu_now would race a forward-moved
+            stepcompress cursor and produce a negative-interval crash.
+
+        en-floor: t0 must be >= _last_enable_schedule_time so motor-
+        enable fires before the first step. Dropped only when ALL
+        of the following hold: streaming AND was_primed on entry AND
+        no reprime ran AND _last_move_end_time is still ahead of
+        mcu_now (anchor not stale).
+        """
         stale_anchor = (self._last_move_end_time <= mcu_now)
         en = (0.0
               if (streaming and was_primed and not need_reprime
                   and not stale_anchor)
               else self._last_enable_schedule_time)
+
         if forced_t0 is not None:
-            # P7-52 flush-callback path: caller provides a step_gen_
-            # time-based anchor that is race-free against Klipper's
-            # MCU flush cycle. Honor _last_move_end_time as the floor
-            # so streaming chunks still abut without gap.
-            # P7-66 R1b: mcu_now as additional floor — if a previous
-            # streamed move ended slightly before step_gen_time (clock
-            # drift, queue underrun race), forced_t0=_last_move_end_-
-            # time would land in the past → "Timer too close". mcu_now
-            # is the safe rebase anchor for that degenerate case.
-            #
-            # P7-73 (Issue #31): defensive clamp gegen far-future
-            # forced_t0. motion_queuing.flush_all_steps() kann beim
-            # Print-Start einen `step_gen_time = need_step_gen_time`
-            # (= Toolhead-Queue-Ende, 60-100s weit in der Zukunft) an
-            # die Flush-Callbacks durchreichen. `_on_mcu_flush` baut
-            # daraus `anchor = step_gen_time + lead_time` und reicht
-            # das als forced_t0 weiter; im max() unten dominiert es
-            # _last_move_end_time/en/mcu_now. last_step_clock im
-            # Stepcompress (aus Boot-Anchor, ~7s alt) bleibt zurück,
-            # queue_step-Intervall wächst auf 60-100s und überschreitet
-            # int32 signed (44.7s @ 48 MHz signed) bzw. uint32 (89.5s)
-            # → MCU "Timer too close"-Shutdown. Hardware-Reproduktion
-            # Eifel-Joe 2026-05-12: P7-70 interval=48.76s, P7-71
-            # interval=86.8s — beides far-future-anchor-Crashes vom
-            # Print-Start mit print_time-Spitze 59-100s.
-            #
-            # Cap auf mcu_now + MAX_FORCED_T0_LOOKAHEAD: im gesunden
-            # flush-callback-Betrieb ist step_gen_time ≈ mcu_now +
-            # ~0.25s, anchor ≈ mcu_now + 0.55s — also weit unterhalb
-            # des Cap. Greift NUR im degenerate far-future Print-Start
-            # Fall. Fallback-Anker = mcu_now + lead_time entspricht
-            # dem normalen "Erst-Chunk"-Anker (else-Branch unten).
+            # Clamp far-future forced_t0. motion_queuing.flush_all_steps
+            # can hand a step_gen_time = need_step_gen_time (toolhead
+            # queue end, tens of seconds in the future) at print-start.
+            # Letting it through grows queue_step intervals past int32
+            # signed (44.7s @ 48 MHz) → "Timer too close" MCU shutdown.
             if forced_t0 > mcu_now + MAX_T0_LOOKAHEAD_S:
                 logging.warning(
                     "buffer_feeder: forced_t0 clamped — was %.2fs "
-                    "ahead of mcu_now (P7-73 guard, Issue #31 "
-                    "far-future flush)", forced_t0 - mcu_now)
+                    "ahead of mcu_now (far-future flush guard)",
+                    forced_t0 - mcu_now)
                 forced_t0 = mcu_now + self.lead_time
-            t0 = max(forced_t0, self._last_move_end_time, en, mcu_now)
-        elif self._last_move_end_time > mcu_now + self.lead_time:
-            # Streaming: previous chunk is still in the future — abut.
-            t0 = max(self._last_move_end_time, en)
-        else:
-            # First chunk / gap: anchor to toolhead print_time.
-            toolhead = self.printer.lookup_object('toolhead')
-            th_time = toolhead.get_last_move_time()
-            t0 = max(th_time + self.lead_time, self._last_move_end_time, en)
-            # P7-77 B (Issue #32 Crash unter P7-76, Eifel-Joe 2026-05-12
-            # klippy.log "(2).txt"): wenn th_time strukturell weit voraus
-            # ist (aktiver Print mit gefuellter Toolhead-Queue), MUSS
-            # der Submit SKIP statt CLAMP. Begruendung:
-            #   - P7-76 A clampte t0 auf mcu_now + lead_time
-            #   - Aber stepcompress.last_step_clock wurde durch einen
-            #     vorigen Submit/Anchor bereits weiter vorgerueckt (z.B.
-            #     ein legitimer Watchdog-Anchor auf 551.18s)
-            #   - Geclampte t0 ~ mcu_now + 0.3 = 551.13s < last_step_clock
-            #     -> interval = -10.4ms -> stepcompress-Crash i=-500471
-            # Einen Step bei `mcu_now + lead_time` zu submitten waehrend
-            # `last_step_clock` schon weiter vorgerueckt ist MUSS zu
-            # negativem interval fuehren. Sicheres Verhalten: nicht
-            # submitten. Setze `_last_idle_anchor_time = mcu_now` damit
-            # der Watchdog-Rate-Limit weiterhin greift; der naechste
-            # _on_mcu_flush (forced_t0!=None Pfad) liefert ohnehin einen
-            # race-freien step_gen_time-Anchor und uebernimmt die
-            # Cursor-Pflege.
-            # Komplementaer zu P7-77 A (Watchdog-Print-Block im _main_-
-            # tick) — wenn Patch A wegen einer Race / paused / einer
-            # nicht-printing-State greift, faengt B den degenerate Submit
-            # noch in _submit_single_trapezoid ab.
-            if t0 > mcu_now + MAX_T0_LOOKAHEAD_S:
-                logging.warning(
-                    "buffer_feeder: anchor skipped — th_time %.2fs "
-                    "ahead, would corrupt last_step_clock (P7-77 B; "
-                    "th_time=%.3f lme=%.3f en=%.3f mcu_now=%.3f)",
-                    t0 - mcu_now, th_time, self._last_move_end_time,
-                    en, mcu_now)
-                # Rate-limit watchdog so the skip doesn't spin once per
-                # tick — analog zum erfolgreichen Anchor-Submit, der
-                # `_last_idle_anchor_time = mcu_now` setzt.
-                self._last_idle_anchor_time = mcu_now
-                # _last_move_end_time mitziehen falls stale-future,
-                # damit nachfolgende Submits nicht erneut den ELSE-
-                # Branch durch falschen abut-Check verfehlen.
-                if self._last_move_end_time > mcu_now + MAX_T0_LOOKAHEAD_S:
-                    self._last_move_end_time = mcu_now
-                return
+            return max(forced_t0, self._last_move_end_time, en, mcu_now)
 
+        if self._last_move_end_time > mcu_now + self.lead_time:
+            # Streaming abut path: previous chunk is still in the future.
+            return max(self._last_move_end_time, en)
+
+        # First chunk / gap recovery: anchor on toolhead print_time.
+        toolhead = self.printer.lookup_object('toolhead')
+        th_time = toolhead.get_last_move_time()
+        t0 = max(th_time + self.lead_time, self._last_move_end_time, en)
+        if t0 > mcu_now + MAX_T0_LOOKAHEAD_S:
+            # th_time is far ahead (active print with filled toolhead
+            # queue). Clamping to mcu_now would land BEFORE
+            # stepcompress.last_step_clock (already advanced by an
+            # earlier anchor) → negative interval crash. The next
+            # flush-callback submit will supply a race-free
+            # step_gen_time anchor and take over cursor maintenance.
+            logging.warning(
+                "buffer_feeder: anchor skipped — th_time %.2fs "
+                "ahead, would corrupt last_step_clock "
+                "(th_time=%.3f lme=%.3f en=%.3f mcu_now=%.3f)",
+                t0 - mcu_now, th_time, self._last_move_end_time,
+                en, mcu_now)
+            self._last_idle_anchor_time = mcu_now  # rate-limit watchdog
+            if self._last_move_end_time > mcu_now + MAX_T0_LOOKAHEAD_S:
+                self._last_move_end_time = mcu_now
+            return None
+        return t0
+
+    def _append_trapezoid_and_record(self, t0, signed_distance, speed):
+        """Compute the trapezoid profile, append to trapq, update state."""
         distance = abs(signed_distance)
         direction = 1.0 if signed_distance > 0 else -1.0
 
@@ -3036,29 +2913,24 @@ class BufferFeeder:
         accel_dist = 0.5 * accel_time * cruise_v
 
         if distance < 2. * accel_dist:
-            # Triangular profile — reduce peak velocity.
+            # Triangular profile — peak velocity is reduced so the move
+            # exactly fits accel + decel.
             cruise_v = math.sqrt(distance * accel)
             accel_time = cruise_v / accel
-            accel_dist = 0.5 * accel_time * cruise_v
             cruise_time = 0.0
             decel_time = accel_time
-            cruise_dist = 0.0
         else:
             cruise_dist = distance - 2. * accel_dist
             cruise_time = cruise_dist / cruise_v
             decel_time = accel_time
 
-        start_pos_x = self._commanded_pos
-        axes_r_x = direction
-
         self.trapq_append(self.trapq, t0,
                           accel_time, cruise_time, decel_time,
-                          start_pos_x, 0., 0.,
-                          axes_r_x, 0., 0.,
+                          self._commanded_pos, 0., 0.,
+                          direction, 0., 0.,
                           0., cruise_v, accel)
 
-        total_time = accel_time + cruise_time + decel_time
-        end_time = t0 + total_time
+        end_time = t0 + accel_time + cruise_time + decel_time
         self._last_move_end_time = end_time
         self._commanded_pos += direction * distance
 
@@ -3068,10 +2940,8 @@ class BufferFeeder:
             'distance': distance,
             'speed': cruise_v,
         }
-
         self._feed_distance_accumulator += distance
         self._accumulated_feed_distance += distance
-
         if self._measure_load_active and direction > 0:
             self._measure_load_distance += distance
 

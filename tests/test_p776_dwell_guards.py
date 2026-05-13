@@ -505,7 +505,7 @@ def test_integration_eifel_crash3_pattern(monkeypatch, caplog):
 
     # P7-77 B warning emittiert.
     b_warns = [r for r in caplog.records
-               if "P7-77 B" in r.getMessage()]
+               if "anchor skipped" in r.getMessage()]
     assert b_warns, (
         "P7-77 B: skip-warning must be emitted when toolhead.last_"
         "move_time pushes t0 > mcu_now + MAX_T0_LOOKAHEAD")

@@ -430,7 +430,7 @@ def test_p778v2_forced_t0_branch_bypasses_p777_b_skip(monkeypatch, caplog):
         "th_time MUSS durch P7-77 B SKIP abgefangen werden. "
         "Got %d trapq.appends." % len(own_v1))
     skip_warns = [r for r in caplog.records
-                  if "P7-77 B" in r.getMessage()
+                  if "anchor skipped" in r.getMessage()
                   and "anchor skipped" in r.getMessage()]
     assert skip_warns, (
         "P7-78 v1 baseline: P7-77 B SKIP-warning MUSS emittiert "
@@ -450,7 +450,7 @@ def test_p778v2_forced_t0_branch_bypasses_p777_b_skip(monkeypatch, caplog):
         "realen trapq.append produzieren (kein P7-77 B SKIP). "
         "Got %d." % len(own_v2))
     skip_warns_v2 = [r for r in caplog.records
-                     if "P7-77 B" in r.getMessage()
+                     if "anchor skipped" in r.getMessage()
                      and "anchor skipped" in r.getMessage()]
     assert not skip_warns_v2, (
         "P7-78v2 fix: forced_t0-Pfad darf KEIN P7-77 B SKIP "
