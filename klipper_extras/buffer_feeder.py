@@ -2501,6 +2501,72 @@ class BufferFeeder:
             # bang only acts in AUTO. LOAD/UNLOAD-driven SYNC paths
             # are handled by their own macros, not by us.
             return
+        # P7-79 (Issue #29 Eifel-Joe 2026-05-13 c=14 i=0 Crash):
+        # Defer flush-callback submits when a post-disable reprime
+        # would race with itersolve still processing the pre-disable
+        # move. Crash-Pfad (verifiziert gegen Source):
+        #   1. M1 (z.B. 9mm Streaming-Chunk) submitted, lme = T+0.13s.
+        #   2. HALL1 OVERFLOW -> _enter_overflow -> _halt_motion +
+        #      _schedule_stepper_disable (Z.1719-1720). Deferred weil
+        #      move in flight; _pending_disable=True.
+        #   3. _main_tick mit M1 zeit-basiert vorbei (now > end) ruft
+        #      _disable_stepper -> _stepcompress_primed=False (Z.1915-
+        #      1917 + Z.2949).
+        #   4. KERN: _move_in_flight() ist zeit-basiert (Z.3398:
+        #      now_pt < end_time). Itersolve laeuft jedoch hinterher
+        #      (step_gen_time < lme), pending Steps fuer M1 sind noch
+        #      nicht generiert.
+        #   5. HALL1 cleared -> _resume_after_overflow ->
+        #      _needs_overflow_prime=True (Z.1772).
+        #   6. Naechster _on_mcu_flush mit step_gen_time < lme(M1)
+        #      feuert _submit_move(0.05, forced_t0=step_gen_time+
+        #      lead_time). In _submit_single_trapezoid Z.3138:
+        #      need_reprime=True (not primed). Forced_t0!=None-Pfad
+        #      ueberspringt flush_step_generation(), ruft aber
+        #      stepper.set_position((0,0,0)) (Z.3148) -> itersolve_pos
+        #      = 0 (reset). _commanded_pos = 0.0.
+        #   7. trapq_append(M2 prime: start=0, end=0.05, t0=anchor).
+        #   8. Gleicher _advance_flush_time-Call: itersolve_gen_steps
+        #      prozessiert pending M1 (start=0, end=9) -> itersolve_-
+        #      pos=9, dann M2 (start=0, end=0.05) -> catch-up REVERSE
+        #      9->0 = ~14 Steps auf demselben Clock -> c=14 i=0
+        #      Invalid sequence (Eifel-Hardware-Log 24 mm^3/s,
+        #      print_time=817.590s).
+        # Fix: solange itersolve den pre-disable Move noch nicht
+        # ausgespielt hat (itersolve_end > step_gen_time) UND der
+        # Cursor durch _disable_stepper geclearrt wurde (not primed),
+        # MUSS der naechste Submit deferren — sonst rasen
+        # set_position(0) und das pending M1-Step-Generation
+        # gegeneinander.
+        # Position: vor dem _needs_overflow_prime-Block damit auch
+        # der Overflow-Prime-Submit (Z.2517) deferred wird — das ist
+        # genau der Crash-Pfad. Der _needs_overflow_prime-Flag bleibt
+        # gesetzt, der naechste Tick mit advanced step_gen_time
+        # uebernimmt den Submit. Worst-case Defer ~lead_time +
+        # chunk_duration ~0.5-0.8s, akzeptabel fuer Overflow-
+        # Recovery.
+        # P7-79b (Codex-Verify v1 HIGH 2026-05-13): Anker MUSS
+        # `_current_move['end_time']` sein, NICHT `_last_move_end_-
+        # time`. Begruendung: P7-74 (`_halt_motion`, Z.3513-3514)
+        # clampt `_last_move_end_time` auf `mcu_now` waehrend mid-
+        # flight Overflow, laesst aber `_current_move` intakt
+        # (Z.3452: explizite Doc-Garantie). Wenn nach dem Clamp
+        # ein _on_mcu_flush mit step_gen_time zwischen mcu_now
+        # (= geclamptes lme) und der echten Move-Ende-Zeit
+        # (_current_move['end_time']) feuert, wuerde der alte
+        # Check `_last_move_end_time > step_gen_time` False
+        # liefern und den Defer umgehen — obwohl M1-Steps in
+        # itersolve noch pending sind. Fallback `_last_move_end_-
+        # time` greift wenn `_current_move is None` (nach Move-
+        # Done aber vor neuem Submit / Boot-Anchor / Pre-Sync-
+        # REPRIME-Pfade, die ebenfalls `_on_mcu_flush` mit
+        # `_current_move=None` triggern).
+        itersolve_end = (self._current_move['end_time']
+                         if self._current_move is not None
+                         else self._last_move_end_time)
+        if (not self._stepcompress_primed
+                and itersolve_end > step_gen_time):
+            return
         if self._needs_overflow_prime:
             # P7-60: Post-OVERFLOW prime via flush-callback path.
             # _main_tick skips the prime when flush-callback bang-bang
