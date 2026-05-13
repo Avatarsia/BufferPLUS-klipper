@@ -222,7 +222,7 @@ def test_auto_resume_after_overflow_with_pending_disable_cancelled():
     feeder.reactor.now = 5.10  # still in-flight (end_time=5.20)
     enable_handle = feeder._stepper_enable
     feeder._state = buffer_feeder.STATE_OVERFLOW
-    feeder.fault._overflow_interrupted_state = buffer_feeder.STATE_AUTO
+    feeder._overflow_interrupted_state = buffer_feeder.STATE_AUTO
     set_sensor_active(feeder, 'entrance', True)
     feeder._auto_off_by_user = False
     feeder._bang_bang_suspended = False

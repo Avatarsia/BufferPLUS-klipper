@@ -55,16 +55,6 @@ class FaultManager:
         self.owner = owner
         self.printer = owner.printer
         self.reactor = owner.reactor
-        self._overflow_interrupted_follow = False
-        self._overflow_resume_mm = 0.0
-        self._overflow_resume_dir = 0
-        self._overflow_resume_spd = 0.0
-        self._overflow_interrupted_state = None
-        self._jam_active = False
-        self._hall2_start_time = None
-        self._hall2_start_extruder_pos = 0.0
-        self._hall3_start_time = None
-        self._hall3_drop_since = None
 
     def is_hall1_active(self, context):
         owner = self.owner
@@ -110,10 +100,10 @@ class FaultManager:
         raise ValueError("Unknown HALL1 context: %s" % (context,))
 
     def clear_recovery_flags(self):
-        self._jam_active = False
-        self._hall2_start_time = None
-        self._hall3_start_time = None
-        self._hall3_drop_since = None
+        self.owner._jam_active = False
+        self.owner._hall2_start_time = None
+        self.owner._hall3_start_time = None
+        self.owner._hall3_drop_since = None
 
     def resume_after_overflow(self):
         owner = self.owner
@@ -127,32 +117,32 @@ class FaultManager:
         # unsync, corrupting the stepcompress cursor.
         if owner._stepper_synced_to is not None:
             return
-        interrupted = self._overflow_interrupted_state
-        self._overflow_interrupted_state = None
+        interrupted = self.owner._overflow_interrupted_state
+        self.owner._overflow_interrupted_state = None
 
         if (interrupted == STATE_INITIAL_GRIP
-                and self._overflow_interrupted_follow):
-            self._overflow_interrupted_follow = False
-            if self._overflow_resume_mm > 0:
+                and self.owner._overflow_interrupted_follow):
+            self.owner._overflow_interrupted_follow = False
+            if self.owner._overflow_resume_mm > 0:
                 owner._grip_follow_active = True
                 owner._enable_stepper()
                 owner._set_state(STATE_INITIAL_GRIP)
                 owner._submit_move(
-                    self._overflow_resume_dir * self._overflow_resume_mm,
-                    self._overflow_resume_spd)
-                self._overflow_resume_mm = 0.0
+                    self.owner._overflow_resume_dir * self.owner._overflow_resume_mm,
+                    self.owner._overflow_resume_spd)
+                self.owner._overflow_resume_mm = 0.0
                 return
-            self._overflow_resume_mm = 0.0
+            self.owner._overflow_resume_mm = 0.0
             owner._maybe_auto_load()
             return
 
-        if interrupted == STATE_LOAD_PHASE_1 and self._overflow_resume_mm > 0:
+        if interrupted == STATE_LOAD_PHASE_1 and self.owner._overflow_resume_mm > 0:
             owner._enable_stepper()
             owner._set_state(STATE_LOAD_PHASE_1)
-            owner._pending_remaining_mm = self._overflow_resume_mm
-            owner._pending_direction = self._overflow_resume_dir
-            owner._pending_speed = self._overflow_resume_spd
-            self._overflow_resume_mm = 0.0
+            owner._pending_remaining_mm = self.owner._overflow_resume_mm
+            owner._pending_direction = self.owner._overflow_resume_dir
+            owner._pending_speed = self.owner._overflow_resume_spd
+            self.owner._overflow_resume_mm = 0.0
             return
 
         # P7-36: in fault-overlay mode the cmd_BUFFER_LOAD_PHASE3 while-
@@ -162,11 +152,11 @@ class FaultManager:
         if (interrupted == STATE_LOAD_PHASE_3
                 and owner.use_fault_overlay
                 and owner._state == STATE_LOAD_PHASE_3):
-            self._overflow_resume_mm = 0.0
+            self.owner._overflow_resume_mm = 0.0
             owner._enable_stepper()
             return
 
-        self._overflow_resume_mm = 0.0
+        self.owner._overflow_resume_mm = 0.0
         if (owner.entrance_detected
                 and not owner._auto_off_by_user
                 and not owner._bang_bang_suspended
@@ -198,7 +188,7 @@ class FaultManager:
         owner = self.owner
         if self.is_hall1_active('auto_on') or owner._state == STATE_OVERFLOW:
             return "HALL1 overflow active"
-        if not allow_jam and (owner._state == STATE_JAM or self._jam_active):
+        if not allow_jam and (owner._state == STATE_JAM or self.owner._jam_active):
             return ("JAM active — inspect and call BUFFER_CLEAR_JAM, "
                     "or BUFFER_AUTO_OFF first.")
         if owner._state in BUSY_PHASE_STATES:
@@ -406,6 +396,20 @@ class BufferFeeder:
         # no cursor-decay. Default off until hardware-validated.
         self.use_flush_callback_bang_bang = config.getboolean(
             'use_flush_callback_bang_bang', False)
+
+        # ----- Helper-shared state (BufferFeeder owns it; helpers
+        # read/write via self.owner.X) -----
+        self._stepper_synced_to = None
+        self._jam_active = False
+        self._hall2_start_time = None
+        self._hall2_start_extruder_pos = 0.0
+        self._hall3_start_time = None
+        self._hall3_drop_since = None
+        self._overflow_interrupted_follow = False
+        self._overflow_resume_mm = 0.0
+        self._overflow_resume_dir = 0
+        self._overflow_resume_spd = 0.0
+        self._overflow_interrupted_state = None
 
         # ----- Stepper + trapq -----
         self.sync = SyncCoordinator(self)
@@ -1128,94 +1132,6 @@ class BufferFeeder:
     @property
     def retract_button_pressed(self):
         return self.sensors.retract_button_pressed
-
-    @property
-    def _stepper_synced_to(self):
-        return self.sync._stepper_synced_to
-
-    @_stepper_synced_to.setter
-    def _stepper_synced_to(self, value):
-        self.sync._stepper_synced_to = value
-
-    @property
-    def _jam_active(self):
-        return self.fault._jam_active
-
-    @_jam_active.setter
-    def _jam_active(self, value):
-        self.fault._jam_active = value
-
-    @property
-    def _hall2_start_time(self):
-        return self.fault._hall2_start_time
-
-    @_hall2_start_time.setter
-    def _hall2_start_time(self, value):
-        self.fault._hall2_start_time = value
-
-    @property
-    def _hall2_start_extruder_pos(self):
-        return self.fault._hall2_start_extruder_pos
-
-    @_hall2_start_extruder_pos.setter
-    def _hall2_start_extruder_pos(self, value):
-        self.fault._hall2_start_extruder_pos = value
-
-    @property
-    def _hall3_start_time(self):
-        return self.fault._hall3_start_time
-
-    @_hall3_start_time.setter
-    def _hall3_start_time(self, value):
-        self.fault._hall3_start_time = value
-
-    @property
-    def _hall3_drop_since(self):
-        return self.fault._hall3_drop_since
-
-    @_hall3_drop_since.setter
-    def _hall3_drop_since(self, value):
-        self.fault._hall3_drop_since = value
-
-    @property
-    def _overflow_interrupted_follow(self):
-        return self.fault._overflow_interrupted_follow
-
-    @_overflow_interrupted_follow.setter
-    def _overflow_interrupted_follow(self, value):
-        self.fault._overflow_interrupted_follow = value
-
-    @property
-    def _overflow_resume_mm(self):
-        return self.fault._overflow_resume_mm
-
-    @_overflow_resume_mm.setter
-    def _overflow_resume_mm(self, value):
-        self.fault._overflow_resume_mm = value
-
-    @property
-    def _overflow_resume_dir(self):
-        return self.fault._overflow_resume_dir
-
-    @_overflow_resume_dir.setter
-    def _overflow_resume_dir(self, value):
-        self.fault._overflow_resume_dir = value
-
-    @property
-    def _overflow_resume_spd(self):
-        return self.fault._overflow_resume_spd
-
-    @_overflow_resume_spd.setter
-    def _overflow_resume_spd(self, value):
-        self.fault._overflow_resume_spd = value
-
-    @property
-    def _overflow_interrupted_state(self):
-        return self.fault._overflow_interrupted_state
-
-    @_overflow_interrupted_state.setter
-    def _overflow_interrupted_state(self, value):
-        self.fault._overflow_interrupted_state = value
 
     def _is_hall1_active(self, context):
         return self.fault.is_hall1_active(context)

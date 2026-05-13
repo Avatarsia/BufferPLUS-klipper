@@ -189,7 +189,7 @@ def test_sync_active_blocks_anchor(monkeypatch):
     and rip itersolve out under in-flight steps."""
     _, feeder = make_idle_feeder()
     # Simulate an active sync binding.
-    feeder.sync._stepper_synced_to = "extruder"
+    feeder._stepper_synced_to = "extruder"
 
     calls = count_anchor_calls(monkeypatch, feeder)
 

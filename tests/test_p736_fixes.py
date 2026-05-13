@@ -53,15 +53,15 @@ def test_resume_after_overflow_phase3_overlay_branch(feeder_factory):
     of falling through to STATE_AUTO and silently returning success."""
     _, feeder = feeder_factory(values={"use_fault_overlay": True}, grace_done=False)
     feeder._state = buffer_feeder.STATE_LOAD_PHASE_3
-    feeder.fault._overflow_interrupted_state = buffer_feeder.STATE_LOAD_PHASE_3
-    feeder.fault._overflow_resume_mm = 50.0
+    feeder._overflow_interrupted_state = buffer_feeder.STATE_LOAD_PHASE_3
+    feeder._overflow_resume_mm = 50.0
     feeder._entrance_pin_polarity_flip = False
     feeder._pin_stable_state['entrance'] = True
 
     feeder._resume_after_overflow()
 
     assert feeder._state == buffer_feeder.STATE_LOAD_PHASE_3
-    assert feeder.fault._overflow_resume_mm == 0.0
+    assert feeder._overflow_resume_mm == 0.0
 
 
 def test_resume_after_overflow_legacy_phase3_falls_to_auto(feeder_factory):
@@ -69,8 +69,8 @@ def test_resume_after_overflow_legacy_phase3_falls_to_auto(feeder_factory):
     NOT trigger — old default-fallthrough path stays untouched."""
     _, feeder = feeder_factory(values={"use_fault_overlay": False}, grace_done=False)
     feeder._state = buffer_feeder.STATE_IDLE
-    feeder.fault._overflow_interrupted_state = buffer_feeder.STATE_LOAD_PHASE_3
-    feeder.fault._overflow_resume_mm = 50.0
+    feeder._overflow_interrupted_state = buffer_feeder.STATE_LOAD_PHASE_3
+    feeder._overflow_resume_mm = 50.0
     feeder._pin_stable_state['entrance'] = True
 
     feeder._resume_after_overflow()

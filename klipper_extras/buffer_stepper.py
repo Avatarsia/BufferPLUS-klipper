@@ -18,7 +18,6 @@ class SyncCoordinator:
         self.motion_queuing = None
         self.trapq = None
         self.trapq_append = None
-        self._stepper_synced_to = None
 
     def setup_trapq(self, config):
         self.motion_queuing = self.printer.load_object(config, 'motion_queuing')
@@ -105,16 +104,16 @@ class SyncCoordinator:
                 self.motion_queuing.check_step_generation_scan_windows()
             except Exception:
                 pass
-            self._stepper_synced_to = None
+            self.owner._stepper_synced_to = None
             raise
-        self._stepper_synced_to = extruder_name
+        self.owner._stepper_synced_to = extruder_name
         owner._stepcompress_primed = True
         owner._enable_stepper()
         owner._respond("Buffer-Feeder synced to '%s' — follows extruder moves"
                       % extruder_name)
 
     def unsync_if_synced(self):
-        if self._stepper_synced_to is None:
+        if self.owner._stepper_synced_to is None:
             return False
         owner = self.owner
         toolhead = owner.printer.lookup_object('toolhead')
@@ -122,7 +121,7 @@ class SyncCoordinator:
         owner.stepper.set_position((0., 0., 0.))
         owner.stepper.set_trapq(self.trapq)
         self.motion_queuing.check_step_generation_scan_windows()
-        self._stepper_synced_to = None
+        self.owner._stepper_synced_to = None
         owner._commanded_pos = 0.0
         mcu = owner.stepper.get_mcu()
         now_pt = mcu.estimated_print_time(owner.reactor.monotonic())

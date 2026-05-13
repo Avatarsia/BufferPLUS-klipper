@@ -59,7 +59,7 @@ def test_exit_overflow_must_not_leave_synced_state_in_auto():
     # state=IDLE. Then macro called BUFFER_SYNC_TO_EXTRUDER, setting
     # _stepper_synced_to='extruder'. Now HALL1 falls.
     feeder._state = buffer_feeder.STATE_OVERFLOW
-    feeder.fault._overflow_interrupted_state = buffer_feeder.STATE_IDLE
+    feeder._overflow_interrupted_state = buffer_feeder.STATE_IDLE
     feeder._stepper_synced_to = 'extruder'
     set_sensor_active(feeder, 'hall_overflow', False)
     set_sensor_active(feeder, 'entrance', True)
@@ -95,7 +95,7 @@ def test_resume_after_overflow_does_not_strand_synced_in_auto():
     early and state stays in STATE_OVERFLOW until UNSYNC fires."""
     _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_OVERFLOW
-    feeder.fault._overflow_interrupted_state = buffer_feeder.STATE_IDLE
+    feeder._overflow_interrupted_state = buffer_feeder.STATE_IDLE
     feeder._stepper_synced_to = 'extruder'
     set_sensor_active(feeder, 'entrance', True)
 
@@ -126,7 +126,7 @@ def test_no_own_trapq_append_while_synced_during_overflow_recovery():
     baseline_appends = len(motion_q.append_calls)
 
     feeder._state = buffer_feeder.STATE_OVERFLOW
-    feeder.fault._overflow_interrupted_state = buffer_feeder.STATE_IDLE
+    feeder._overflow_interrupted_state = buffer_feeder.STATE_IDLE
     feeder._stepper_synced_to = 'extruder'
     set_sensor_active(feeder, 'hall_overflow', False)
     set_sensor_active(feeder, 'entrance', True)
@@ -165,7 +165,7 @@ def test_unsync_runs_deferred_exit_overflow_when_hall1_already_clear():
       → unsync_if_synced re-runs _exit_overflow → state=IDLE/AUTO."""
     _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_OVERFLOW
-    feeder.fault._overflow_interrupted_state = buffer_feeder.STATE_IDLE
+    feeder._overflow_interrupted_state = buffer_feeder.STATE_IDLE
     feeder._stepper_synced_to = 'extruder'
     set_sensor_active(feeder, 'entrance', True)
 
@@ -193,7 +193,7 @@ def test_unsync_does_not_re_enter_exit_overflow_if_hall1_still_active():
     hardware condition."""
     _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_OVERFLOW
-    feeder.fault._overflow_interrupted_state = buffer_feeder.STATE_IDLE
+    feeder._overflow_interrupted_state = buffer_feeder.STATE_IDLE
     feeder._stepper_synced_to = 'extruder'
     set_sensor_active(feeder, 'hall_overflow', True)
     set_sensor_active(feeder, 'entrance', True)

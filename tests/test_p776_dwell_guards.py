@@ -230,8 +230,8 @@ def test_b_continuous_feed_reset_at_overflow_to_auto_transition():
 
     # Direct call to resume_after_overflow (FaultManager method).
     # No interrupted state -> falls through to STATE_AUTO branch.
-    feeder.fault._overflow_interrupted_state = None
-    feeder.fault._overflow_resume_mm = 0.0
+    feeder._overflow_interrupted_state = None
+    feeder._overflow_resume_mm = 0.0
     feeder.fault.resume_after_overflow()
 
     assert feeder._state == buffer_feeder.STATE_AUTO, (
@@ -255,8 +255,8 @@ def test_b_needs_overflow_prime_NOT_reset_at_idle_to_auto():
     # _exit_overflow sets _needs_overflow_prime=True before transitioning.
     feeder._needs_overflow_prime = True
 
-    feeder.fault._overflow_interrupted_state = None
-    feeder.fault._overflow_resume_mm = 0.0
+    feeder._overflow_interrupted_state = None
+    feeder._overflow_resume_mm = 0.0
     feeder.fault.resume_after_overflow()
 
     assert feeder._state == buffer_feeder.STATE_AUTO
@@ -274,8 +274,8 @@ def test_b_hall_states_unchanged_at_transition():
     feeder._state = buffer_feeder.STATE_OVERFLOW
     feeder._continuous_feed = True
 
-    feeder.fault._overflow_interrupted_state = None
-    feeder.fault._overflow_resume_mm = 0.0
+    feeder._overflow_interrupted_state = None
+    feeder._overflow_resume_mm = 0.0
     feeder.fault.resume_after_overflow()
 
     # _continuous_feed reset, hall_full untouched.
