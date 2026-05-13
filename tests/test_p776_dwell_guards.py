@@ -102,12 +102,15 @@ def neutralize_bang_bang(monkeypatch, feeder):
 def test_a_pre_fix_baseline_far_future_th_time_creates_huge_t0():
     """PRE-FIX Charakterisierung: ohne Clamp wuerde der forced_t0=None
     Pfad bei far-future toolhead.get_last_move_time() ein t0 weit in
-    der Zukunft erzeugen. Diese Baseline-Aussage soll nach dem Fix
-    explizit dokumentieren WAS der Clamp verhindert.
+    der Zukunft erzeugen.
 
-    Im Mock: th_time=9s, lead_time=0.3 -> ohne Clamp t0=9.3, mit
-    Clamp t0=mcu_now+lead_time ~= mcu_now+0.3. Wir messen den
-    POST-FIX-State; der pre-fix-state ist als Kommentar dokumentiert.
+    P7-77 B ersetzt den P7-76 A Clamp durch einen SKIP — bei
+    th_time-Lookahead > MAX_T0_LOOKAHEAD wird NICHT submittet, weil
+    ein bei `mcu_now + lead_time` geclampter Submit gegen einen
+    bereits weiter vorgerueckten stepcompress.last_step_clock einen
+    negativen Step-Intervall produziert (Eifel-Joe i=-500471, Issue
+    #32 Crash unter P7-76). Stattdessen: log + _last_idle_anchor_time
+    advance + lme-Rollback + return.
     """
     printer, feeder = make_auto_feeder()
     motion_q = printer.lookup_object('motion_queuing')
@@ -125,17 +128,17 @@ def test_a_pre_fix_baseline_far_future_th_time_creates_huge_t0():
     appends_before = len(motion_q.append_calls)
     feeder._submit_single_trapezoid(0.05, 10.0, forced_t0=None)
 
+    # P7-77 B POST-FIX: NO submit (was: clamp + submit in P7-76).
     own = _own_trapq_appends(motion_q, feeder, appends_before)
-    assert own, "expected submit"
-    t0 = own[0][1]
-
-    # P7-76 A POST-FIX: t0 must be clamped to mcu_now + lead_time,
-    # NOT to th_time + lead_time = 9.3s.
-    mcu_now = 2.0
-    assert t0 <= mcu_now + feeder.lead_time + 0.01, (
-        "P7-76 A broken: th_time=9.0 (7s ahead of mcu_now) should "
-        "trigger else-branch t0-clamp. Got t0=%.3f, expected <= %.3f"
-        % (t0, mcu_now + feeder.lead_time))
+    assert not own, (
+        "P7-77 B: far-future th_time (7s ahead) must SKIP submit, "
+        "not clamp-submit. Got %d submits." % len(own))
+    # Watchdog rate-limit advanced so next tick doesn't immediately
+    # retry (and spam-log).
+    assert feeder._last_idle_anchor_time == pytest.approx(2.0, abs=0.01), (
+        "P7-77 B: _last_idle_anchor_time must advance to mcu_now "
+        "after skip. Got %.3f, expected ~2.0"
+        % feeder._last_idle_anchor_time)
 
 
 def test_a_healthy_th_time_passes_through_unclamped():
@@ -176,20 +179,19 @@ def test_a_healthy_th_time_passes_through_unclamped():
 
 
 def test_a_t0_clamped_when_forced_t0_none_and_th_time_far_future():
-    """Direkter A-Test: th_time 9s voraus -> Clamp aktiv.
+    """Direkter A-Test umgewidmet auf P7-77 B SKIP-Semantik.
     Voraussetzung fuer den ELSE-Branch ist `_last_move_end_time <=
     mcu_now + lead_time` (sonst greift der ELIF-Streaming-abut-Branch).
-    Eifel-Joe Crash #3 Bedingung: nach _halt_motion-Rollback (P7-74)
-    ist lme bereits auf mcu_now zurueckgezogen, der naechste Watchdog-
-    Submit erreicht den ELSE-Branch und P7-76 A clampt th_time-Lookahead.
+
+    Post-P7-77 B Verhalten: bei th_time 9s voraus wird NICHT
+    submittet (Skip); P7-76 A Clamp ist obsolet, weil der Clamp
+    gegen stepcompress.last_step_clock blind war.
     """
     printer, feeder = make_auto_feeder()
     motion_q = printer.lookup_object('motion_queuing')
     toolhead = printer.lookup_object('toolhead')
 
     feeder.reactor.now = 2.0
-    # ELSE-Branch erfordert lme <= mcu_now + lead_time. Wir simulieren
-    # post-P7-74-Rollback: lme = mcu_now (ist nicht stale-future).
     feeder._last_move_end_time = 2.0
     feeder._last_enable_schedule_time = 0.0
     feeder._stepcompress_primed = True
@@ -200,12 +202,10 @@ def test_a_t0_clamped_when_forced_t0_none_and_th_time_far_future():
     feeder._submit_single_trapezoid(0.05, 10.0, forced_t0=None)
 
     own = _own_trapq_appends(motion_q, feeder, appends_before)
-    t0 = own[0][1]
-    mcu_now = 2.0
-
-    # P7-76 A clampt: t0 = th_time + lead_time = 9.3 -> mcu_now + lead_time
-    assert t0 <= mcu_now + feeder.lead_time + 0.01, (
-        "P7-76 A: t0 must be clamped, got t0=%.3f" % t0)
+    # P7-77 B: skip statt clamp -> KEIN submit.
+    assert not own, (
+        "P7-77 B: th_time 7s ahead must skip submit. Got %d submits."
+        % len(own))
 
 
 # ===========================================================================
@@ -453,25 +453,22 @@ def test_integration_eifel_crash3_pattern(monkeypatch, caplog):
       - 56.6s ohne Anchor vor Crash
       - Toolhead-M204-Welle erzeugt far-future Toolhead-queue
 
-    P7-76 Bundle Effekte:
-      (A) far-future t0 wird auf mcu_now + lead_time geclampt
-      (D) stale lme wird auf mcu_now zurueckgerollt
-      (C) wenn ein Sub-Gate haengt, wird das geloggt (Diagnose fuer
-          spaetere Hardware-Logs)
-
-    Wichtig: P7-71 Reprime greift bei gap > REPRIME_GAP (5s) BEVOR
-    P7-76 A zum Tragen kommt. Reprime ruft stepper.set_position(0)
-    + setzt _last_move_end_time = 0 -> der gleichzeitig refreshte
-    stepcompress-Cursor passt zum geclampten t0. Das verhindert den
-    Far-Future-queue_step-Crash zusammen mit P7-76 A.
+    P7-77 ueberarbeitet das P7-76 Bundle:
+      (A) Watchdog wird durch print_stats.state=='printing' geblockt
+          -> hier nicht print_stats=printing, also Watchdog feuert.
+      (B) Wenn _submit_anchor_move trotzdem den else-Branch mit
+          far-future th_time trifft (z.B. paused-State oder anderer
+          non-printing State): SKIP statt CLAMP.
+      (C) lme-Rollback nur direkt vor Submit, nicht bei jedem Tick.
 
     Dieser Test verifiziert:
-      - Watchdog feuert nach 56s
-      - t0 wird auf mcu_now + lead_time geclampt (P7-76 A)
-      - WICHTIG: Reprime cleart stepcompress-Cursor; ohne Reprime
-        wuerde queue_step-Intervall trotz Clamp die int32-Grenze
-        reissen. Die "post-clamp interval"-Pruefung ist deshalb
-        relativ zum POST-Reprime lme (0), nicht zum stale 3.4.
+      - Watchdog laeuft (print_stats=standby default, kein Block).
+      - SyncCoordinator._submit_anchor_move ruft _submit_move, der
+        landet ueber _submit_single_trapezoid im else-Branch.
+        Mit toolhead.last_move_time=70 und mcu_now=60 ist t0 voraus
+        -> P7-77 B SKIP greift.
+      - kein submit in motion_q (Skip-Pfad).
+      - P7-77 B warning emittiert.
     """
     printer, feeder = make_auto_feeder()
     motion_q = printer.lookup_object('motion_queuing')
@@ -498,38 +495,26 @@ def test_integration_eifel_crash3_pattern(monkeypatch, caplog):
     with caplog.at_level(logging.DEBUG, logger=""):
         feeder._main_tick(eventtime=60.0)
 
-    # 1. Watchdog feuerte (gap_moves=56.6 > threshold=10).
+    # P7-77 B: Watchdog versuchte den Anchor, _submit_single_trapezoid
+    # else-Branch erkannte th_time-Lookahead > 2s und SKIPpte. Es
+    # darf KEIN trapq-append entstehen.
     own = _own_trapq_appends(motion_q, feeder, appends_before)
-    assert own, (
-        "Eifel-Repro: Watchdog must fire after 56.6s without anchor")
+    assert not own, (
+        "P7-77 B integration: far-future th_time must skip submit. "
+        "Got %d submits." % len(own))
 
-    # 2. t0 nicht far-future trotz toolhead.last_move_time = 70.0.
-    t0 = own[0][1]
-    mcu_now = 60.0
-    assert t0 <= mcu_now + feeder.lead_time + 0.5, (
-        "P7-76 A integration: anchor t0 must be clamped against "
-        "far-future toolhead.last_move_time. Got t0=%.3f, expected "
-        "<= %.3f" % (t0, mcu_now + feeder.lead_time + 0.5))
+    # P7-77 B warning emittiert.
+    b_warns = [r for r in caplog.records
+               if "P7-77 B" in r.getMessage()]
+    assert b_warns, (
+        "P7-77 B: skip-warning must be emitted when toolhead.last_"
+        "move_time pushes t0 > mcu_now + MAX_T0_LOOKAHEAD")
 
-    # 3. P7-76 A Warning-Log emittiert.
-    a_warns = [r for r in caplog.records
-               if "P7-76 A" in r.getMessage()]
-    assert a_warns, (
-        "P7-76 A: clamp-warning must be emitted when toolhead.last_"
-        "move_time pushes t0 > mcu_now + 2.0")
-
-    # 4. queue_step interval RELATIV ZUM REPRIMED Cursor:
-    #    P7-71 reprime ruft set_position(0) bei gap > REPRIME_GAP (5s)
-    #    -> stepcompress-Cursor wird mit der naechsten Submit neu
-    #    angelegt. last_step_clock referenziert dann die Submit-Zeit,
-    #    nicht den stale 3.4s-Anchor. Mit clamped t0 = mcu_now +
-    #    lead_time bleibt der erste queue_step-Intervall klein.
-    #    Dieser Test verifiziert NUR den Clamp-Effekt, nicht den
-    #    reprime (der ist P7-71 Scope).
-    assert t0 < mcu_now + 2.0, (
-        "P7-76 A: clamped t0 must be within MAX_T0_LOOKAHEAD (2.0s) "
-        "of mcu_now. Got t0=%.3f, mcu_now=%.3f, delta=%.3f"
-        % (t0, mcu_now, t0 - mcu_now))
+    # Watchdog-Rate-Limit advanced auf mcu_now -> naechster Tick
+    # innerhalb idle_anchor_gap retried nicht.
+    assert feeder._last_idle_anchor_time >= 60.0 - 0.01, (
+        "P7-77 B: watchdog rate-limit must advance to mcu_now after "
+        "skip. Got %.3f" % feeder._last_idle_anchor_time)
 
 
 def test_integration_56s_without_anchor_blocked_by_continuous_feed_logs(

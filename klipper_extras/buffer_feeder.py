@@ -1990,23 +1990,35 @@ class BufferFeeder:
                             ",".join(_blocking))
                         self._last_watchdog_skip_log_time = _mcu_now
 
-            # P7-76 D: unconditional stale-lme clamp BEFORE the watchdog
-            # gate check. Without this the gate `not _move_in_flight()`
-            # would block (because _move_in_flight = mcu_now <
-            # _last_move_end_time, which is true exactly when lme is
-            # stale-future) and the clamp would be dead code in the
-            # case it's meant to fix. Cheap no-op when lme is healthy
-            # (lme <= mcu_now). Analog zu P7-74 in _halt_motion.
-            if self._state in (STATE_IDLE, STATE_AUTO):
-                _mcu = self.stepper.get_mcu()
-                _mcu_now_clamp = _mcu.estimated_print_time(
-                    self.reactor.monotonic())
-                if self._last_move_end_time > _mcu_now_clamp:
-                    logging.debug(
-                        "buffer_feeder: pre-anchor lme-clamp "
-                        "(was %.3fs ahead of mcu_now, P7-76 D)",
-                        self._last_move_end_time - _mcu_now_clamp)
-                    self._last_move_end_time = _mcu_now_clamp
+            # P7-77 A (Issue #32 Crash unter P7-76, Eifel-Joe Hardware-
+            # Log 2026-05-12 klippy.log "(2).txt"): Watchdog HARD-block
+            # waehrend aktivem Print. Diagnose:
+            #   1. Watchdog-Anchor laeuft legitim (gap > threshold),
+            #      schiebt stepcompress.last_step_clock auf ~551.18s.
+            #   2. 4 nachfolgende Bang-Bang-Tick-Submits (continuous_-
+            #      feed-streaming, forced_t0=None Pfad) clampen t0 via
+            #      P7-76 A auf mcu_now + lead_time = ~551.13s.
+            #   3. ABER: last_step_clock = 551.18 vom legitimen Anchor
+            #      -> interval = 551.13 - 551.18 = -10.4ms -> negativer
+            #      interval -> stepcompress-Crash (i=-500471).
+            # Architektonisch ist `t0 = max(forced_t0, lme, en, mcu_-
+            # now)` blind gegen `last_step_clock`. Waehrend eines aktiven
+            # Prints uebernimmt _on_mcu_flush + P7-73 (forced_t0-Pfad)
+            # die Cursor-Pflege; Watchdog ist konzeptionell nur fuer
+            # echtes IDLE/Standby. -> Print-Stats-Check skipt Watchdog
+            # bei state == 'printing'. paused/complete/cancelled/standby
+            # zaehlen NICHT als active print (paused: User-Halt, kein
+            # ongoing flush; complete: lookahead leer; standby/cancelled:
+            # kein Print).
+            _print_active = False
+            try:
+                _ps = self.printer.lookup_object('print_stats', None)
+                if _ps is not None:
+                    _ps_status = _ps.get_status(eventtime)
+                    _print_active = (
+                        _ps_status.get('state') == 'printing')
+            except Exception:
+                _print_active = False
 
             if (self._state in (STATE_IDLE, STATE_AUTO)
                     and not self._stepper_synced_to
@@ -2016,7 +2028,8 @@ class BufferFeeder:
                     and not self._continuous_feed
                     and not self.hall_empty
                     and not self.hall_full
-                    and not self._needs_overflow_prime):
+                    and not self._needs_overflow_prime
+                    and not _print_active):  # P7-77 A
                 mcu = self.stepper.get_mcu()
                 mcu_now = mcu.estimated_print_time(
                     self.reactor.monotonic())
@@ -2024,6 +2037,23 @@ class BufferFeeder:
                 gap_anchors = mcu_now - self._last_idle_anchor_time
                 if (gap_moves > self.idle_anchor_gap
                         and gap_anchors > self.idle_anchor_gap):
+                    # P7-77 C: lme-clamp NUR direkt vor dem Anchor-
+                    # Submit, nicht bei jedem Tick. P7-76 D rollte lme
+                    # unconditional bei jedem Tick zurueck — das
+                    # radierte den Anchor-Effekt fuer alle nachfolgenden
+                    # Bang-Bang-Ticks (sie sahen lme=mcu_now statt
+                    # lme=anchor_end_time und produzierten t0-Werte
+                    # zurueck unter last_step_clock). Inside des Submit-
+                    # Branches: clamp greift nur einmal pro Watchdog-
+                    # Anchor, danach setzt _submit_anchor_move lme
+                    # konsistent in die Zukunft.
+                    if self._last_move_end_time > mcu_now:
+                        logging.debug(
+                            "buffer_feeder: pre-anchor lme-clamp "
+                            "(was %.3fs ahead of mcu_now, P7-77 C; "
+                            "ex-P7-76 D, scope reduced)",
+                            self._last_move_end_time - mcu_now)
+                        self._last_move_end_time = mcu_now
                     try:
                         self.sync._submit_anchor_move()
                         self._last_idle_anchor_time = mcu_now
@@ -3169,30 +3199,46 @@ class BufferFeeder:
             toolhead = self.printer.lookup_object('toolhead')
             th_time = toolhead.get_last_move_time()
             t0 = max(th_time + self.lead_time, self._last_move_end_time, en)
-            # P7-76 A: global t0-clamp im forced_t0=None Pfad. Verhindert
-            # dass _submit_anchor_move (Watchdog/Boot) waehrend aktivem
-            # Print einen far-future anchor erzeugt — toolhead.get_last_
-            # move_time() liefert print_time-Ende = mcu_now + N s.
-            # Issue #32 Crash #3: anchor mit interval=491M Ticks (10.24s
-            # @ 48 MHz) triggert spaeter i=0 step batch im syncemitter.
-            # Im gesunden Watchdog-Betrieb ist th_time ≈ mcu_now → t0
-            # ≈ mcu_now + lead_time, weit unter Cap. Greift NUR wenn
-            # Toolhead-Queue waehrend aktivem Print zu weit voraus ist.
-            # Komplementaer zu P7-73 (forced_t0!=None Pfad) — beide
-            # Pfade jetzt geclampt, defense-in-depth.
+            # P7-77 B (Issue #32 Crash unter P7-76, Eifel-Joe 2026-05-12
+            # klippy.log "(2).txt"): wenn th_time strukturell weit voraus
+            # ist (aktiver Print mit gefuellter Toolhead-Queue), MUSS
+            # der Submit SKIP statt CLAMP. Begruendung:
+            #   - P7-76 A clampte t0 auf mcu_now + lead_time
+            #   - Aber stepcompress.last_step_clock wurde durch einen
+            #     vorigen Submit/Anchor bereits weiter vorgerueckt (z.B.
+            #     ein legitimer Watchdog-Anchor auf 551.18s)
+            #   - Geclampte t0 ~ mcu_now + 0.3 = 551.13s < last_step_clock
+            #     -> interval = -10.4ms -> stepcompress-Crash i=-500471
+            # Einen Step bei `mcu_now + lead_time` zu submitten waehrend
+            # `last_step_clock` schon weiter vorgerueckt ist MUSS zu
+            # negativem interval fuehren. Sicheres Verhalten: nicht
+            # submitten. Setze `_last_idle_anchor_time = mcu_now` damit
+            # der Watchdog-Rate-Limit weiterhin greift; der naechste
+            # _on_mcu_flush (forced_t0!=None Pfad) liefert ohnehin einen
+            # race-freien step_gen_time-Anchor und uebernimmt die
+            # Cursor-Pflege.
+            # Komplementaer zu P7-77 A (Watchdog-Print-Block im _main_-
+            # tick) — wenn Patch A wegen einer Race / paused / einer
+            # nicht-printing-State greift, faengt B den degenerate Submit
+            # noch in _submit_single_trapezoid ab.
             MAX_T0_LOOKAHEAD = 2.0  # s
             if t0 > mcu_now + MAX_T0_LOOKAHEAD:
                 logging.warning(
-                    "buffer_feeder: t0 clamped from anchor/gap path — "
-                    "was %.2fs ahead (P7-76 A; th_time=%.3f lme=%.3f "
-                    "en=%.3f mcu_now=%.3f)",
+                    "buffer_feeder: anchor skipped — th_time %.2fs "
+                    "ahead, would corrupt last_step_clock (P7-77 B; "
+                    "th_time=%.3f lme=%.3f en=%.3f mcu_now=%.3f)",
                     t0 - mcu_now, th_time, self._last_move_end_time,
                     en, mcu_now)
-                t0 = mcu_now + self.lead_time
-                # _last_move_end_time mitziehen, damit nachfolgende
-                # Submits nicht erneut auf stale Anchor zugreifen.
+                # Rate-limit watchdog so the skip doesn't spin once per
+                # tick — analog zum erfolgreichen Anchor-Submit, der
+                # `_last_idle_anchor_time = mcu_now` setzt.
+                self._last_idle_anchor_time = mcu_now
+                # _last_move_end_time mitziehen falls stale-future,
+                # damit nachfolgende Submits nicht erneut den ELSE-
+                # Branch durch falschen abut-Check verfehlen.
                 if self._last_move_end_time > mcu_now + MAX_T0_LOOKAHEAD:
                     self._last_move_end_time = mcu_now
+                return
 
         distance = abs(signed_distance)
         direction = 1.0 if signed_distance > 0 else -1.0
