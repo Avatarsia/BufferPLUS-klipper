@@ -2067,10 +2067,10 @@ class BufferFeeder:
                             persist_duration, self.hall1_persist_timeout)
                     self._enter_overflow()
                     return eventtime + MAIN_TICK_INTERVAL
-                # Persist innerhalb Timeout: HALL1-Sofort-Trigger via
-                # _is_hall1_active('main_tick') unterdruecken. Der naechste
-                # Tick prueft die Persist-Dauer erneut.
-                return eventtime + MAIN_TICK_INTERVAL
+                # Persist innerhalb Timeout: kein Hard-Trigger noetig,
+                # der Hard-Pfad unten greift in STATE_AUTO ohnehin nicht
+                # (siehe T6-cleanup-Guard). Fall-through zum naechsten
+                # Tick.
 
             # HALL1 has absolute priority — AUSSER bei aktivem Manual-
             # Retract oder einer UNLOAD-Phase: dann lassen wir den
@@ -2078,7 +2078,13 @@ class BufferFeeder:
             # Retract-Sequenz endet, greift der Reassert wieder normal.
             # OVERFLOW_OK=1 in Phase 3 (P7-8): _is_hall1_active kapselt
             # die caller-spezifischen Bypasses (siehe FaultManager).
-            if self._is_hall1_active('main_tick'):
+            # C-cont T6 cleanup: HALL1-Hard-Trigger nur noch fuer nicht-
+            # AUTO-States (LOAD/MANUAL/UNLOAD/etc.). In STATE_AUTO
+            # uebernimmt der Persist-Check (Z.~2049ff.) die HALL1-
+            # Behandlung mit Soft-Timer-Eskalation. Toter Code (AUTO-
+            # Pfad) sichtbar entfernt.
+            if (self._state != STATE_AUTO
+                    and self._is_hall1_active('main_tick')):
                 self._enter_overflow()
                 return eventtime + MAIN_TICK_INTERVAL
 
