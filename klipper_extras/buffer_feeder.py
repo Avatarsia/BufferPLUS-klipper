@@ -2605,7 +2605,12 @@ class BufferFeeder:
         if self._pending_remaining_mm <= 0:
             return
         if self._abort_signalled():
+            # Codex-Verify Q6b: HALL1-Early-Exit muss auch den Sub-Chunk-Cap
+            # zuruecksetzen — sonst leakt der cap (e.g. interrupt_chunk_mm=9)
+            # auf den naechsten unrelated _submit_move-Call. T8's
+            # target_speed<=0-Branch macht beides; dieser Pfad muss es auch.
             self._pending_remaining_mm = 0.0
+            self._pending_submit_chunk_cap = None
             return
         # P7-66b: HALL2 (buffer full) MUST abort a forward streaming
         # sequence. _abort_signalled covers HALL1 (overflow) but not
