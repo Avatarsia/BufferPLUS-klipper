@@ -474,15 +474,28 @@ class SyncCoordinator:
         self.trapq = self.motion_queuing.allocate_trapq()
         self.trapq_append = self.motion_queuing.lookup_trapq_append()
 
-    def _submit_anchor_move(self):
+    def _submit_anchor_move(self, *, forced_t0=None):
         """Submit a 0.05mm anchor-step in the safe direction. Returns
         the direction sign so the caller can format its respond message
         (boot anchor vs. pre-sync REPRIME use different wording but the
-        underlying motion + direction-policy is identical)."""
+        underlying motion + direction-policy is identical).
+
+        P7-78v2 (Codex-Verify Finding zu P7-78 v1): keyword-only
+        `forced_t0` routet den Submit durch den forced_t0!=None
+        Branch in _submit_single_trapezoid (Z.3203 ff.). Der ist
+        NICHT vom P7-77 B SKIP-statt-Clamp Guard (else-Branch
+        Z.3275) betroffen. Caller im Watchdog-Print-Block-Override-
+        Pfad (_main_tick P7-78) MUESSEN `forced_t0=mcu_now +
+        lead_time` uebergeben, damit der Anchor auch bei aktiv
+        gefuellter Toolhead-Queue (toolhead.get_last_move_time()
+        far-future, typisch waehrend Print) tatsaechlich gesubmittet
+        wird statt geskippt zu werden. Default (None) erhaelt das
+        bisherige Verhalten fuer alle anderen Caller (boot anchor,
+        pre-sync REPRIME, P7-77 C Nicht-Print-Watchdog)."""
         owner = self.owner
         owner._enable_stepper()
         anchor_dir = -1.0 if owner.hall_overflow else 1.0
-        owner._submit_move(anchor_dir * 0.05, 10.0)
+        owner._submit_move(anchor_dir * 0.05, 10.0, forced_t0=forced_t0)
         owner._wait_for_move_done(direction=int(anchor_dir))
         return anchor_dir
 
@@ -1048,6 +1061,16 @@ class BufferFeeder:
         # by _main_tick. 0.0 means "never fired yet" — first valid trip
         # happens once mcu_now - _last_move_end_time > idle_anchor_gap.
         self._last_idle_anchor_time = 0.0
+        # P7-78 (Issue #29): Timestamp wann _on_mcu_flush zuletzt
+        # aufgerufen wurde (MCU print-time). Genutzt vom P7-77 A
+        # Print-Block-Override: bei print_stats.state == 'printing'
+        # wird der Watchdog hart geblockt, aber wenn _on_mcu_flush
+        # messbar still ist (HALL2-Hysterese-Zwischenzone in
+        # STATE_AUTO), muss der Watchdog feuern damit stepcompress.
+        # last_step_clock nicht altert und der erste Bang-Bang-Submit
+        # nach Stille nicht c=7 Invalid sequence wirft. 0.0 = "noch nie
+        # ein Flush gesehen" (Boot-Schutz, kein Override moeglich).
+        self._last_mcu_flush_time = 0.0
         # P7-54: After OVERFLOW → IDLE → AUTO the stepcompress cursor
         # is out of sync. _main_tick handles the safe resync (forced_t0=None
         # path → flush_step_generation allowed). _on_mcu_flush skips while
@@ -2010,6 +2033,21 @@ class BufferFeeder:
             # zaehlen NICHT als active print (paused: User-Halt, kein
             # ongoing flush; complete: lookahead leer; standby/cancelled:
             # kein Print).
+            #
+            # P7-78 (Issue #29 Crash unter P7-77, Eifel-Joe Hardware-
+            # Log 2026-05-13): Der P7-77 A Hard-Block ist zu strikt.
+            # In der HALL2-Hysterese-Zwischenzone laeuft _on_mcu_flush
+            # minutenlang nicht — Klipper's motion_queuing.flush_handler
+            # ruft den Callback nur synchron mit Step-Generation; ohne
+            # Steps kein Callback. stepcompress.last_step_clock altert,
+            # und der erste Bang-Bang-Submit nach Stille wirft c=7
+            # Invalid sequence. Eifel-Joe Beleg: 163.2s Funkstille
+            # zwischen IDLE->AUTO (Z.8706 @ 1063.5s) und Crash (Z.9895
+            # @ 1226.7s). Loesung: Print-Block-Override — wenn _on_mcu_-
+            # flush messbar laenger als idle_anchor_gap nicht gerufen
+            # wurde, weichen wir den Hard-Block auf und lassen den
+            # Watchdog feuern. Boot-Schutz: _last_mcu_flush_time == 0.0
+            # zaehlt nicht (frischer Boot, noch nie ein Flush).
             _print_active = False
             try:
                 _ps = self.printer.lookup_object('print_stats', None)
@@ -2020,6 +2058,36 @@ class BufferFeeder:
             except Exception:
                 _print_active = False
 
+            # P7-78 Print-Block-Stale-Override: nur evaluieren wenn
+            # ueberhaupt geblockt waere und mindestens ein Flush
+            # bereits gesehen wurde (Boot-Schutz). Strict > damit
+            # Stille == idle_anchor_gap noch geblockt bleibt.
+            #
+            # P7-78v2 (Codex-Verify Finding): _p778_override Flag
+            # markiert den Override-Pfad, damit der innere Anchor-
+            # Submit `forced_t0=mcu_now + lead_time` uebergibt und
+            # den P7-77 B SKIP-statt-Clamp im else-Branch umgeht.
+            # Ohne den Flag wuerde der Override zwar feuern, aber
+            # `_submit_anchor_move()` (ohne kwarg) faellt in den
+            # forced_t0==None else-Branch -> th_time = aktive
+            # Toolhead-Queue (far-future) -> P7-77 B SKIP ->
+            # silent return ohne realen Submit -> Bug wirkungslos.
+            _p778_override = False
+            if _print_active and self._last_mcu_flush_time > 0.0:
+                _mcu_p778 = self.stepper.get_mcu()
+                _mcu_now_p778 = _mcu_p778.estimated_print_time(
+                    self.reactor.monotonic())
+                _flush_silence = (
+                    _mcu_now_p778 - self._last_mcu_flush_time)
+                if _flush_silence > self.idle_anchor_gap:
+                    logging.info(
+                        "buffer_feeder: print-block stale override "
+                        "(flush silent for %.1fs > %.1fs threshold, "
+                        "P7-78)",
+                        _flush_silence, self.idle_anchor_gap)
+                    _print_active = False
+                    _p778_override = True
+
             if (self._state in (STATE_IDLE, STATE_AUTO)
                     and not self._stepper_synced_to
                     and not self._pending_disable
@@ -2029,7 +2097,7 @@ class BufferFeeder:
                     and not self.hall_empty
                     and not self.hall_full
                     and not self._needs_overflow_prime
-                    and not _print_active):  # P7-77 A
+                    and not _print_active):  # P7-77 A + P7-78 Override
                 mcu = self.stepper.get_mcu()
                 mcu_now = mcu.estimated_print_time(
                     self.reactor.monotonic())
@@ -2055,7 +2123,32 @@ class BufferFeeder:
                             self._last_move_end_time - mcu_now)
                         self._last_move_end_time = mcu_now
                     try:
-                        self.sync._submit_anchor_move()
+                        if _p778_override:
+                            # P7-78v2: aktiver Print hat typisch weit-
+                            # zukuenftige toolhead.get_last_move_time().
+                            # Ohne forced_t0 wuerde der Anchor-Submit in
+                            # den forced_t0==None else-Branch fallen
+                            # (Z.3248) und durch P7-77 B SKIP (Z.3275)
+                            # silent abgebrochen. Mit forced_t0=mcu_now+
+                            # lead_time geht der Submit in den forced_t0
+                            # !=None Branch (Z.3203), der NICHT vom
+                            # P7-77 B Skip betroffen ist.
+                            #
+                            # P7-78v3 (Codex-Verify MEDIUM): lead_time
+                            # mit min(..., MAX_FORCED_T0_LOOKAHEAD) cap,
+                            # damit ein via BUFFER_SET ungewoehnlich
+                            # gesetzter lead_time > 2.0s den forced_t0
+                            # nicht in den P7-73 Clamp-Pfad zieht. Im
+                            # Default-Fall (lead_time=0.3s) no-op.
+                            _MAX_FORCED_T0_LOOKAHEAD = 2.0  # s
+                            _p778_forced_t0 = (
+                                mcu_now
+                                + min(self.lead_time,
+                                      _MAX_FORCED_T0_LOOKAHEAD))
+                            self.sync._submit_anchor_move(
+                                forced_t0=_p778_forced_t0)
+                        else:
+                            self.sync._submit_anchor_move()
                         self._last_idle_anchor_time = mcu_now
                         # In IDLE we re-defer the disable so IDLE
                         # semantics (stopped AND disabled) are restored
@@ -2392,6 +2485,13 @@ class BufferFeeder:
         and crashed; the flush-callback path is the safe equivalent
         because Klipper itself dictates the anchor time).
         """
+        # P7-78 (Issue #29): Track flush-callback activity for Print-
+        # Block-Override (Watchdog-Stale-Detection). Set BEFORE early-
+        # returns so even filtered ticks (state != AUTO, suspended,
+        # use_flush_callback_bang_bang=False) keep the timestamp fresh
+        # — what matters is that the LLL_PLUS MCU is generating steps
+        # somewhere, not whether we decided to act on this tick.
+        self._last_mcu_flush_time = flush_time
         if not self.use_flush_callback_bang_bang:
             return
         if self._bang_bang_suspended:

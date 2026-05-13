@@ -100,7 +100,7 @@ def test_anchor_step_without_overflow_uses_forward_boot_move(monkeypatch):
     monkeypatch.setattr(
         feeder,
         "_submit_move",
-        lambda distance, speed: events.append(("submit_move", distance, speed)),
+        lambda distance, speed, **_kw: events.append(("submit_move", distance, speed)),
     )
     monkeypatch.setattr(
         feeder,
@@ -136,7 +136,7 @@ def test_anchor_step_with_overflow_uses_retract_boot_move(monkeypatch):
     monkeypatch.setattr(
         feeder,
         "_submit_move",
-        lambda distance, speed: events.append(("submit_move", distance, speed)),
+        lambda distance, speed, **_kw: events.append(("submit_move", distance, speed)),
     )
     monkeypatch.setattr(
         feeder,
