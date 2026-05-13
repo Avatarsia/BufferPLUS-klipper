@@ -461,3 +461,35 @@ def test_c_cont_pending_chunk_hall1_aborts_stream(monkeypatch):
     # nicht, dann muss target_speed=0 den Stream beenden.
     assert len(trapezoids) == 0
     assert feeder._pending_remaining_mm == 0.0
+
+
+# ===========================================================================
+# C-cont T10: Diagnostik-Logs (buffer_debug_metrics)
+# ===========================================================================
+
+
+def test_c_cont_metrics_emitted_when_enabled(monkeypatch, caplog):
+    """buffer_debug_metrics=True -> _main_tick emittiert Metrics-Log
+    alle 1s mit state/hall/tracker/target_speed."""
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'buffer_debug_metrics': True})
+    feeder._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder, 'hall_empty', True)
+    _populate_tracker_to_ready(feeder, velocity=15.0)
+    feeder.reactor.now = 10.0
+    feeder._main_tick(eventtime=10.0)
+    feeder.reactor.now = 11.0  # +1s
+    with caplog.at_level('INFO'):
+        feeder._main_tick(eventtime=11.0)
+    metrics = [r for r in caplog.records if 'buffer_metrics' in r.message]
+    assert len(metrics) >= 1
+
+
+def test_c_cont_metrics_not_emitted_when_disabled(monkeypatch, caplog):
+    """buffer_debug_metrics=False -> kein Metrics-Log."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)  # default False
+    feeder._state = buffer_feeder.STATE_AUTO
+    with caplog.at_level('INFO'):
+        feeder._main_tick(eventtime=10.0)
+    metrics = [r for r in caplog.records if 'buffer_metrics' in r.message]
+    assert len(metrics) == 0

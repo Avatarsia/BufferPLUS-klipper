@@ -1210,6 +1210,8 @@ class BufferFeeder:
         # eskaliert dann zu echtem OVERFLOW (Hardware-Safety). None = HALL1
         # inactive, float = reactor.monotonic() zum Edge-Time.
         self._hall1_active_since = None
+        # C-cont T10: Rate-Limit fuer Metrics-Log (1s).
+        self._last_metrics_log_time = 0.0
         # C-cont T2: ExtruderVelocityTracker fuer SpeedModulator.
         # Read-only passiver Observer ueber extruder.get_status. Kein
         # flush_step_generation, kein SYNC -> kein Druckkopf-Pause-
@@ -2434,6 +2436,33 @@ class BufferFeeder:
                                   self._continuous_feed_speed)
 
             self._tick_pending_chunk(eventtime)
+
+            # C-cont T10: Diagnostik-Logs (alle 1s wenn buffer_debug_metrics).
+            if self.buffer_debug_metrics:
+                if (eventtime - self._last_metrics_log_time) >= 1.0:
+                    target_speed = self._compute_target_feed_speed()
+                    flow = self.velocity_tracker.get_volumetric_flow()
+                    hall1_persist_info = (
+                        "%.2fs" % (self.reactor.monotonic()
+                                   - self._hall1_active_since)
+                        if self._hall1_active_since is not None
+                        else "off")
+                    logging.info(
+                        "buffer_metrics: state=%s hall=[H3:%s H2:%s H1:%s] "
+                        "tracker_vel=%.1fmm/s flow=%.1fmm3/s ready=%s "
+                        "target_speed=%.1fmm/s "
+                        "pending_remaining=%.1fmm hall1_persist=%s",
+                        self._state,
+                        'on' if self.hall_empty else 'off',
+                        'on' if self.hall_full else 'off',
+                        'on' if self.hall_overflow else 'off',
+                        self.velocity_tracker.get_velocity(),
+                        flow,
+                        self.velocity_tracker.is_ready(),
+                        target_speed,
+                        self._pending_remaining_mm,
+                        hall1_persist_info)
+                    self._last_metrics_log_time = eventtime
 
         except Exception:
             logging.exception("buffer_feeder main_tick error")
