@@ -305,6 +305,14 @@ def test_streaming_safety_gates(gate):
         assert not own, "Lookahead lief in STATE_MANUAL_FEED — verboten"
 
 
+@pytest.mark.skip(
+    reason="C-cont T7 removed hard-stop on HALL2 in _on_mcu_flush. "
+           "Streaming continues with target_speed = 0.5 * extruder_"
+           "velocity (SpeedModulator slow-down, nicht stop). "
+           "_continuous_feed / _pending_remaining_mm bleiben "
+           "strukturell aktiv — Speed-Modulation per Sub-Chunk via "
+           "_tick_pending_chunk (C-cont T8). See docs/superpowers/plans/"
+           "2026-05-13-c-cont-streaming.md T7+T8.")
 def test_streaming_stops_on_hall_full():
     """Wenn HALL2 (full) während Streaming aktiv wird, muss
     _continuous_feed sofort auf False fallen UND _pending_remaining_-
@@ -592,6 +600,15 @@ def test_pending_sub_chunks_continue_until_hall_full():
 # 4.2 — Streaming → HALL2-Full Race (Codex-Finding).
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skip(
+    reason="C-cont T7+T8: HALL2 abort-on-edge wurde durch dynamische "
+           "Speed-Modulation ersetzt. _on_mcu_flush bricht den Sub-"
+           "Chunk-Stream nicht mehr ab; stattdessen reduziert "
+           "_tick_pending_chunk die Speed auf 0.5 * extruder_velocity "
+           "(Tracker ready) bzw. feed_speed (Tracker not_ready). Hard-"
+           "abort nur noch wenn target_speed <= 0 (HALL1 / OVERFLOW). "
+           "See docs/superpowers/plans/2026-05-13-c-cont-streaming.md "
+           "T7+T8.")
 def test_streaming_then_hall2_aborts_in_flight_via_pending_clear():
     """Codex 4.2: HALL3 active, ein Chunk in flight, ein Lookahead-
     Submit (oder sub-chunk-Stream) gequeued. HALL2 schaltet auf True

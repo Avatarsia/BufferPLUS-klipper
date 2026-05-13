@@ -22,6 +22,8 @@ states. Hardware test still required to confirm cursor anchor is
 truly race-free at the MCU level.
 """
 
+import pytest
+
 from fakes_klipper import FakeConfig, FakePrinter
 from klipper_extras import buffer_feeder
 
@@ -107,6 +109,12 @@ def test_flush_submits_when_hall3_active_and_state_auto():
     assert feeder._continuous_feed is True
 
 
+@pytest.mark.skip(
+    reason="C-cont T7 removed Bang-Bang hall_full=no-submit semantic. "
+           "Streaming now continues with target_speed = 0.5 * extruder_"
+           "velocity (SpeedModulator). See docs/superpowers/plans/"
+           "2026-05-13-c-cont-streaming.md T7 and docs/superpowers/specs/"
+           "2026-05-13-high-flow-buffer-architecture.md.")
 def test_flush_no_submit_when_hall_full():
     printer, feeder = make_feeder()
     motion_q = printer.lookup_object('motion_queuing')
@@ -120,6 +128,11 @@ def test_flush_no_submit_when_hall_full():
     assert not own_appends
 
 
+@pytest.mark.skip(
+    reason="C-cont T7 removed Bang-Bang cycle (no hall_full -> "
+           "_continuous_feed=False reset). _continuous_feed stays True "
+           "structurally; only target_speed is modulated. See "
+           "docs/superpowers/plans/2026-05-13-c-cont-streaming.md T7.")
 def test_flush_clears_continuous_feed_when_hall_full():
     printer, feeder = make_feeder()
     motion_q = printer.lookup_object('motion_queuing')
