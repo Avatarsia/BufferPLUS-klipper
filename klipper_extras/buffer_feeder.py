@@ -703,6 +703,26 @@ class FaultManager:
                 and not owner._auto_off_by_user
                 and not owner._bang_bang_suspended
                 and not owner._halt_requested):
+            # P7-76 B: Defensiver Watchdog-Gate-Reset beim
+            # OVERFLOW→IDLE→AUTO-Recovery. Falls _continuous_feed nach
+            # OVERFLOW-Cycling haengend geblieben ist (rapid HALL1-
+            # Flicker, race in _enter_overflow vs. _on_mcu_flush oder
+            # _bang_bang_tick), wuerde der _main_tick-Watchdog 56s+
+            # nicht feuern, obwohl AUTO mit Quiescent-Phasen laeuft
+            # (Eifel-Joe Hardware Crash #3, klippy.log Z 30556-30669,
+            # DWELL-SA3 Diagnose). _enter_overflow + _halt_motion +
+            # _set_state(IDLE) sollten bereits alle drei Flags clearen
+            # — dieser Reset ist Defense-in-Depth gegen unbekannte
+            # Race-Pfade. Schadet nichts wenn die Flags bereits clean
+            # sind (no-op). hall_empty / hall_full / _stepper_synced_to
+            # bleiben unangetastet — die sind sensor- bzw. architektur-
+            # getrieben und kein "stuck flag"-Risiko.
+            if owner._continuous_feed:
+                logging.warning(
+                    "buffer_feeder: stuck _continuous_feed cleared "
+                    "at OVERFLOW→AUTO transition (P7-76 B)")
+                owner._continuous_feed = False
+                owner._continuous_feed_direction = 0
             owner._enable_stepper()
             owner._set_state(STATE_AUTO)
 
@@ -1924,6 +1944,70 @@ class BufferFeeder:
             #         further forward anchors would push toward HALL1
             #         overflow (P7-75b Codex-Verify finding: ~18mm/h
             #         drift without this gate at default idle_anchor_gap=10s)
+            # P7-76 C: Diagnostic-Logging fuer Watchdog-Blocks.
+            # Wenn die "harten" Move-/Sync-Gates clean sind aber ein
+            # Sub-Gate (continuous_feed/hall_empty/hall_full/needs_
+            # overflow_prime) den Anchor blockiert, log das aktive
+            # Sub-Gate. Hilft kuenftige Issue-#32-Klassen ohne weitere
+            # Hardware-Repros zu diagnostizieren (DWELL-SA3 Eifel-Joe
+            # Crash #3: 56.6s ohne Anchor trotz scheinbar quiescentem
+            # AUTO). Rate-limit: einmal pro idle_anchor_gap-Fenster.
+            if (self._state in (STATE_IDLE, STATE_AUTO)
+                    and not self._stepper_synced_to
+                    and not self._pending_disable
+                    and not self._move_in_flight()
+                    and self._pending_remaining_mm == 0.0):
+                _mcu = self.stepper.get_mcu()
+                _mcu_now = _mcu.estimated_print_time(
+                    self.reactor.monotonic())
+                _gap_moves_diag = _mcu_now - self._last_move_end_time
+                if _gap_moves_diag > self.idle_anchor_gap * 1.5:
+                    _blocking = []
+                    if self._continuous_feed:
+                        _blocking.append("_continuous_feed")
+                    if self.hall_empty:
+                        _blocking.append("hall_empty")
+                    if self.hall_full:
+                        _blocking.append("hall_full")
+                    if self._needs_overflow_prime:
+                        _blocking.append("_needs_overflow_prime")
+                    # P7-76 C: separate watermark for log-rate (not
+                    # _last_idle_anchor_time — that is only updated when
+                    # an anchor actually fires; in the blocked path no
+                    # anchor fires so using it for rate-limiting would
+                    # spam every tick).
+                    _last_skip_log = getattr(
+                        self, '_last_watchdog_skip_log_time', 0.0)
+                    if _blocking and (
+                            _mcu_now - _last_skip_log
+                            > self.idle_anchor_gap):
+                        logging.debug(
+                            "buffer_feeder: watchdog skip "
+                            "(state=%s gap=%.1fs > %.1fs threshold) "
+                            "blocked by: %s (P7-76 C diagnostic)",
+                            self._state, _gap_moves_diag,
+                            self.idle_anchor_gap,
+                            ",".join(_blocking))
+                        self._last_watchdog_skip_log_time = _mcu_now
+
+            # P7-76 D: unconditional stale-lme clamp BEFORE the watchdog
+            # gate check. Without this the gate `not _move_in_flight()`
+            # would block (because _move_in_flight = mcu_now <
+            # _last_move_end_time, which is true exactly when lme is
+            # stale-future) and the clamp would be dead code in the
+            # case it's meant to fix. Cheap no-op when lme is healthy
+            # (lme <= mcu_now). Analog zu P7-74 in _halt_motion.
+            if self._state in (STATE_IDLE, STATE_AUTO):
+                _mcu = self.stepper.get_mcu()
+                _mcu_now_clamp = _mcu.estimated_print_time(
+                    self.reactor.monotonic())
+                if self._last_move_end_time > _mcu_now_clamp:
+                    logging.debug(
+                        "buffer_feeder: pre-anchor lme-clamp "
+                        "(was %.3fs ahead of mcu_now, P7-76 D)",
+                        self._last_move_end_time - _mcu_now_clamp)
+                    self._last_move_end_time = _mcu_now_clamp
+
             if (self._state in (STATE_IDLE, STATE_AUTO)
                     and not self._stepper_synced_to
                     and not self._pending_disable
@@ -3085,6 +3169,30 @@ class BufferFeeder:
             toolhead = self.printer.lookup_object('toolhead')
             th_time = toolhead.get_last_move_time()
             t0 = max(th_time + self.lead_time, self._last_move_end_time, en)
+            # P7-76 A: global t0-clamp im forced_t0=None Pfad. Verhindert
+            # dass _submit_anchor_move (Watchdog/Boot) waehrend aktivem
+            # Print einen far-future anchor erzeugt — toolhead.get_last_
+            # move_time() liefert print_time-Ende = mcu_now + N s.
+            # Issue #32 Crash #3: anchor mit interval=491M Ticks (10.24s
+            # @ 48 MHz) triggert spaeter i=0 step batch im syncemitter.
+            # Im gesunden Watchdog-Betrieb ist th_time ≈ mcu_now → t0
+            # ≈ mcu_now + lead_time, weit unter Cap. Greift NUR wenn
+            # Toolhead-Queue waehrend aktivem Print zu weit voraus ist.
+            # Komplementaer zu P7-73 (forced_t0!=None Pfad) — beide
+            # Pfade jetzt geclampt, defense-in-depth.
+            MAX_T0_LOOKAHEAD = 2.0  # s
+            if t0 > mcu_now + MAX_T0_LOOKAHEAD:
+                logging.warning(
+                    "buffer_feeder: t0 clamped from anchor/gap path — "
+                    "was %.2fs ahead (P7-76 A; th_time=%.3f lme=%.3f "
+                    "en=%.3f mcu_now=%.3f)",
+                    t0 - mcu_now, th_time, self._last_move_end_time,
+                    en, mcu_now)
+                t0 = mcu_now + self.lead_time
+                # _last_move_end_time mitziehen, damit nachfolgende
+                # Submits nicht erneut auf stale Anchor zugreifen.
+                if self._last_move_end_time > mcu_now + MAX_T0_LOOKAHEAD:
+                    self._last_move_end_time = mcu_now
 
         distance = abs(signed_distance)
         direction = 1.0 if signed_distance > 0 else -1.0
