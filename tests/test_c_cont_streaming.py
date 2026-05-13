@@ -391,3 +391,73 @@ def test_c_cont_hall2_falling_edge_does_not_reset(monkeypatch):
     _fire_hall2_callback(feeder)
     # Accumulator should be untouched on falling edge.
     assert feeder._feed_distance_accumulator == 300.0
+
+
+# ===========================================================================
+# C-cont T8: _tick_pending_chunk Sub-Chunk Speed-Update
+# ===========================================================================
+
+
+def _capture_trapezoids(feeder, monkeypatch):
+    """Helper: monkeypatch _submit_single_trapezoid um Sub-Chunk-Submits
+    (interrupt_chunk_mm) abzufangen. _tick_pending_chunk geht direkt
+    auf _submit_single_trapezoid (nicht _submit_move)."""
+    trapezoids = []
+
+    def fake_trap(distance, speed, **kwargs):
+        trapezoids.append({'distance': distance, 'speed': speed, **kwargs})
+
+    monkeypatch.setattr(feeder, '_submit_single_trapezoid', fake_trap)
+    return trapezoids
+
+
+def test_c_cont_pending_chunk_uses_current_target_speed(monkeypatch):
+    """_tick_pending_chunk submittet Sub-Chunks mit aktuellem target_speed,
+    nicht eingefrorenem Speed vom ersten Submit."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder, 'hall_empty', True)
+    _populate_tracker_to_ready(feeder, velocity=15.0)
+    # Simuliere Pipeline-State nach erstem Submit:
+    # _on_mcu_flush hat flush_callback_chunk_mm (z.B. 45) eingestellt,
+    # mit cap=interrupt_chunk_mm (9). Erste 9 sind in flight, 36 pending,
+    # initial _pending_speed = max_feed_speed.
+    feeder._pending_remaining_mm = 36.0
+    feeder._pending_submit_chunk_cap = feeder.interrupt_chunk_mm
+    feeder._pending_direction = 1.0
+    feeder._pending_speed = feeder.max_feed_speed
+    # _last_move_end_time = eventtime: gap=0 → Trigger Sub-Chunk-Submit
+    feeder._last_move_end_time = 10.0
+    # HALL-Wechsel von HALL3 → Zwischenzone (buffer fuellt sich):
+    set_sensor_active(feeder, 'hall_empty', False)
+    # Zwischenzone (alle HALL inaktiv, Tracker ready=15.0 mm/s):
+    assert feeder._compute_target_feed_speed() == pytest.approx(15.0, abs=0.5)
+    trapezoids = _capture_trapezoids(feeder, monkeypatch)
+    feeder._tick_pending_chunk(eventtime=10.0)
+    # Sub-Chunk wurde submittet mit aktuellem target_speed (15)
+    # NICHT mit eingefrorenem max_feed_speed (z.B. 100)
+    assert len(trapezoids) == 1
+    assert trapezoids[0]['speed'] == pytest.approx(15.0, abs=0.5)
+    assert trapezoids[0]['speed'] != feeder.max_feed_speed
+
+
+def test_c_cont_pending_chunk_hall1_aborts_stream(monkeypatch):
+    """target_speed=0 mid-chunk (HALL1 active) -> Pending-Stream beendet."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    _populate_tracker_to_ready(feeder, velocity=15.0)
+    # Pipeline-State: Sub-Chunks pending.
+    feeder._pending_remaining_mm = 18.0
+    feeder._pending_submit_chunk_cap = feeder.interrupt_chunk_mm
+    feeder._pending_direction = 1.0
+    feeder._pending_speed = feeder.max_feed_speed
+    feeder._last_move_end_time = 10.0
+    # HALL1 wird active mid-chunk:
+    set_sensor_active(feeder, 'hall_overflow', True)
+    assert feeder._compute_target_feed_speed() == 0.0
+    trapezoids = _capture_trapezoids(feeder, monkeypatch)
+    feeder._tick_pending_chunk(eventtime=10.0)
+    # _abort_signalled hat eventuell schon vorher gegriffen, aber wenn
+    # nicht, dann muss target_speed=0 den Stream beenden.
+    assert len(trapezoids) == 0
+    assert feeder._pending_remaining_mm == 0.0

@@ -2601,6 +2601,25 @@ class BufferFeeder:
             return
         if self._pending_speed <= 0:
             return
+        # C-cont T8: Sub-Chunk-Speed dynamisch aus SpeedModulator fuer
+        # AUTO+forward-Streaming. Vorher fest auf _pending_speed
+        # (eingefroren beim ersten Submit) — fuehrte zu Speed-Lag wenn
+        # HALL-State zwischen Sub-Chunks wechselte (HALL3 -> Zwischen-
+        # zone). Legacy-Paths (LOAD/UNLOAD/MANUAL/Retract) behalten den
+        # frozen _pending_speed.
+        sub_chunk_speed = self._pending_speed
+        if (self._state == STATE_AUTO
+                and self._pending_direction > 0):
+            modulated = self._compute_target_feed_speed()
+            if modulated <= 0.0:
+                # HALL1 active mid-chunk — beende Pending-Stream.
+                # (_abort_signalled greift bereits weiter oben, aber
+                # diese Branch deckt jeden anderen target=0-Pfad ab.)
+                self._pending_remaining_mm = 0.0
+                self._pending_submit_chunk_cap = None
+                return
+            sub_chunk_speed = modulated
+            self._continuous_feed_speed = sub_chunk_speed
         # P7-66b: honour the sub-chunk cap if the active stream was
         # opened with one. AUTO+streaming sets cap=interrupt_chunk_mm
         # so HALL-interrupt latency stays bounded; legacy paths
@@ -2609,7 +2628,7 @@ class BufferFeeder:
         cap = self._pending_submit_chunk_cap
         if cap is None or cap > self.max_move_chunk_mm:
             cap = self.max_move_chunk_mm
-        chunk_duration = cap / self._pending_speed
+        chunk_duration = cap / sub_chunk_speed
         mcu = self.stepper.get_mcu()
         now_pt = mcu.estimated_print_time(eventtime)
         gap = self._last_move_end_time - now_pt
@@ -2626,8 +2645,12 @@ class BufferFeeder:
             # gap-check above only fires while the previous trapezoid
             # is still in the future.
             self._submit_single_trapezoid(
-                self._pending_direction * chunk, self._pending_speed,
+                self._pending_direction * chunk, sub_chunk_speed,
                 streaming=True)
+            # C-cont T8: keep _pending_speed aligned with the latest
+            # modulated speed so the next iteration's chunk_duration
+            # math and any consumer of _pending_speed reflects reality.
+            self._pending_speed = sub_chunk_speed
             self._pending_remaining_mm -= chunk
             if self._pending_remaining_mm <= 0:
                 # Drop the cap so a subsequent unrelated _submit_move
