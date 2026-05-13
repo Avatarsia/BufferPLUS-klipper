@@ -2732,17 +2732,23 @@ class BufferFeeder:
             pass
 
     def _compute_target_feed_speed(self):
-        """C-cont T4: SpeedModulator.
+        """C-cont T4 + Hotfix2: SpeedModulator mit Mindest-Floor.
 
-        HALL-Sensoren + ExtruderVelocity -> target feed_speed (mm/s)
-        fuer den naechsten Submit. Returns 0.0 als Notbremse (HALL1).
+        HALL-Sensoren + ExtruderVelocity -> target feed_speed (mm/s).
+        Mindest-Floor self.feed_speed verhindert sehr lange Sub-Chunk-
+        Trapeze, die zu Pipeline-Backpressure und stepcompress-Crashes
+        (`c=N i=0` Pattern) fuehrten (Hardware-Test 2026-05-13 mit
+        extruder_velocity=13.6 mm/s -> buffer_time=2.76s -> crash).
 
         Logik:
-          HALL1 (overflow)  -> 0.0 (Notbremse, ohne State-Wechsel)
-          HALL3 (empty)     -> max_feed_speed (Buffer auffuellen)
-          HALL2 (full)      -> 0.5 * extruder_velocity (langsam)
-          Zwischenzone      -> extruder_velocity (Balance)
-          Tracker not_ready -> config feed_speed (Fallback)
+          HALL1 (overflow)      -> 0.0 (Notbremse)
+          HALL3 (empty)         -> max_feed_speed (auffuellen)
+          tracker not_ready     -> feed_speed (Fallback)
+          tracker vel == 0      -> feed_speed (Fallback fuer Pause)
+          HALL2 (full)          -> max(feed_speed/2, 0.5*extruder_vel)
+                                   (sanftes Bremsen aber kein Stillstand)
+          Zwischenzone          -> max(feed_speed, extruder_vel)
+                                   (Mindest-Floor gegen lange Trapeze)
         """
         if self.hall_overflow:
             return 0.0
@@ -2758,8 +2764,8 @@ class BufferFeeder:
         if extruder_vel <= 0.0:
             return self.feed_speed
         if self.hall_full:
-            return 0.5 * extruder_vel
-        return extruder_vel
+            return max(self.feed_speed / 2.0, 0.5 * extruder_vel)
+        return max(self.feed_speed, extruder_vel)
 
     def _on_mcu_flush(self, flush_time, step_gen_time):
         """P7-52: Flush-callback driven bang-bang. Klipper's motion_

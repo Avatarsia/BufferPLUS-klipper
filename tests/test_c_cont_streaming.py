@@ -162,22 +162,34 @@ def test_c_cont_modulator_hall3_max(monkeypatch):
 
 
 def test_c_cont_modulator_hall2_half(monkeypatch):
-    """HALL2 active (Buffer voll) -> 0.5 * extruder_velocity."""
-    printer, feeder = make_c_cont_feeder(monkeypatch)
+    """HALL2 active (Buffer voll) -> max(feed_speed/2, 0.5 * extruder_vel).
+
+    Hotfix2: feed_speed klein gesetzt, damit floor nicht greift und
+    der 0.5*vel-Pfad sauber getestet wird.
+    """
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'feed_speed': 10.0})
     set_sensor_active(feeder, 'hall_empty', False)
     set_sensor_active(feeder, 'hall_full', True)
     set_sensor_active(feeder, 'hall_overflow', False)
     _populate_tracker_to_ready(feeder, velocity=20.0)
+    # max(10/2=5, 0.5*20=10) -> 10
     assert feeder._compute_target_feed_speed() == pytest.approx(10.0, abs=0.5)
 
 
 def test_c_cont_modulator_zwischenzone_balance(monkeypatch):
-    """Zwischenzone -> extruder_velocity."""
-    printer, feeder = make_c_cont_feeder(monkeypatch)
+    """Zwischenzone -> max(feed_speed, extruder_vel).
+
+    Hotfix2: feed_speed klein gesetzt, damit der extruder_vel-Pfad
+    (>= floor) sauber getestet wird.
+    """
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'feed_speed': 5.0})
     set_sensor_active(feeder, 'hall_empty', False)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
     _populate_tracker_to_ready(feeder, velocity=12.0)
+    # max(5, 12) -> 12
     assert feeder._compute_target_feed_speed() == pytest.approx(12.0, abs=0.5)
 
 
@@ -210,6 +222,52 @@ def test_c_cont_modulator_extruder_vel_zero_fallback(monkeypatch):
     assert feeder.velocity_tracker.get_velocity() == 0.0
     # Modulator: Zwischenzone + vel=0 -> Fallback feed_speed
     assert feeder._compute_target_feed_speed() == feeder.feed_speed
+
+
+# ---------------------------------------------------------------------------
+# C-cont Hotfix2 (2026-05-13): Mindest-Floor feed_speed in Modulator
+# ---------------------------------------------------------------------------
+
+
+def test_c_cont_modulator_hotfix2_zwischen_floor(monkeypatch):
+    """Hotfix2: Mindest-Floor feed_speed in Zwischenzone.
+
+    extruder_vel < feed_speed -> Output = feed_speed (Floor greift),
+    verhindert sehr lange Sub-Chunk-Trapeze (Pipeline-Backpressure).
+    """
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    _populate_tracker_to_ready(feeder, velocity=10.0)  # unter Default floor=30
+    assert feeder._compute_target_feed_speed() == feeder.feed_speed
+
+
+def test_c_cont_modulator_hotfix2_zwischen_no_floor_when_above(monkeypatch):
+    """Hotfix2: kein Floor wenn extruder_vel > feed_speed.
+
+    Tracker dominiert wenn er hoeher liegt als Mindest-Floor.
+    """
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    _populate_tracker_to_ready(feeder, velocity=50.0)  # ueber Default floor=30
+    assert feeder._compute_target_feed_speed() == pytest.approx(50.0, abs=1.0)
+
+
+def test_c_cont_modulator_hotfix2_hall2_floor(monkeypatch):
+    """Hotfix2: HALL2-Branch max(feed_speed/2, 0.5*v).
+
+    feed_speed/2=15 (Default 30), 0.5*vel=5 -> max => 15.
+    Stellt sicher, dass HALL2 nicht zu Stillstand fuehrt.
+    """
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', True)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    _populate_tracker_to_ready(feeder, velocity=10.0)  # 0.5*10=5 < 30/2=15
+    assert feeder._compute_target_feed_speed() == pytest.approx(15.0, abs=0.5)
 
 
 # ===========================================================================
@@ -338,8 +396,13 @@ def test_c_cont_continuous_streaming_in_auto(monkeypatch):
 
 
 def test_c_cont_speed_modulation_via_hall_state(monkeypatch):
-    """HALL-State-Change zwischen flushes -> Speed-Aenderung."""
-    printer, feeder = make_c_cont_feeder(monkeypatch)
+    """HALL-State-Change zwischen flushes -> Speed-Aenderung.
+
+    Hotfix2: feed_speed klein damit HALL2-Ratio 0.5*vel den Floor
+    nicht trifft (sonst max(feed_speed/2, 0.5*vel) ueberschreibt).
+    """
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'feed_speed': 10.0})
     feeder._state = buffer_feeder.STATE_AUTO
     _populate_tracker_to_ready(feeder, velocity=20.0)
     submits = _capture_submits(feeder, monkeypatch)
@@ -432,8 +495,13 @@ def _capture_trapezoids(feeder, monkeypatch):
 
 def test_c_cont_pending_chunk_uses_current_target_speed(monkeypatch):
     """_tick_pending_chunk submittet Sub-Chunks mit aktuellem target_speed,
-    nicht eingefrorenem Speed vom ersten Submit."""
-    printer, feeder = make_c_cont_feeder(monkeypatch)
+    nicht eingefrorenem Speed vom ersten Submit.
+
+    Hotfix2: feed_speed klein damit Zwischenzone-Output = extruder_vel
+    (Mindest-Floor greift sonst und ueberschreibt extruder_vel=15).
+    """
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'feed_speed': 5.0})
     feeder._state = buffer_feeder.STATE_AUTO
     set_sensor_active(feeder, 'hall_empty', True)
     _populate_tracker_to_ready(feeder, velocity=15.0)
@@ -579,8 +647,13 @@ def test_c_cont_continuous_feed_persists_through_hall_state_change(monkeypatch):
     """C-cont Ersatz fuer test_flush_clears_continuous_feed_when_hall_full:
     _continuous_feed bleibt im Stream-Mode strukturell True, auch wenn
     sich der HALL-State zwischen Submits aendert (Speed wird nur
-    moduliert, kein Stream-Reset)."""
-    printer, feeder = make_c_cont_feeder(monkeypatch)
+    moduliert, kein Stream-Reset).
+
+    Hotfix2: feed_speed klein damit Zwischenzone-Output = extruder_vel
+    (Mindest-Floor greift sonst und ueberschreibt extruder_vel=20).
+    """
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'feed_speed': 5.0})
     feeder._state = buffer_feeder.STATE_AUTO
     _populate_tracker_to_ready(feeder, velocity=20.0)
     submits = _capture_submits(feeder, monkeypatch)
