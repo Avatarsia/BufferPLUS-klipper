@@ -285,3 +285,66 @@ def test_c_cont_hall1_short_blip_no_safety(monkeypatch):
     feeder.reactor.now = 1.0
     feeder._main_tick(eventtime=1.0)
     assert feeder._state == buffer_feeder.STATE_AUTO
+
+
+# ===========================================================================
+# C-cont T7: _on_mcu_flush Continuous-Streaming-Submit
+# ===========================================================================
+
+
+def _capture_submits(feeder, monkeypatch):
+    """Helper: monkeypatch _submit_move um alle Submit-Argumente abzufangen."""
+    submits = []
+
+    def fake_submit(distance, speed, **kwargs):
+        submits.append({'distance': distance, 'speed': speed, **kwargs})
+
+    monkeypatch.setattr(feeder, '_submit_move', fake_submit)
+    return submits
+
+
+def test_c_cont_continuous_streaming_in_auto(monkeypatch):
+    """STATE_AUTO + HALL3 stable + tracker ready -> Submit bei jedem flush."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder, 'hall_empty', True)
+    _populate_tracker_to_ready(feeder, velocity=15.0)
+    submits = _capture_submits(feeder, monkeypatch)
+    # Move-State: kein Move in flight
+    feeder._last_move_end_time = 0.0
+    feeder._pending_remaining_mm = 0.0
+    feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
+    assert len(submits) == 1
+    assert submits[0]['speed'] == feeder.max_feed_speed
+
+
+def test_c_cont_speed_modulation_via_hall_state(monkeypatch):
+    """HALL-State-Change zwischen flushes -> Speed-Aenderung."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    _populate_tracker_to_ready(feeder, velocity=20.0)
+    submits = _capture_submits(feeder, monkeypatch)
+    # HALL3 -> max_feed_speed
+    set_sensor_active(feeder, 'hall_empty', True)
+    feeder._last_move_end_time = 0.0
+    feeder._pending_remaining_mm = 0.0
+    feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
+    # HALL2 -> 0.5 * 20 = 10
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', True)
+    feeder._last_move_end_time = 0.0  # Move done
+    feeder._on_mcu_flush(flush_time=10.5, step_gen_time=10.5)
+    assert len(submits) == 2
+    assert submits[0]['speed'] == feeder.max_feed_speed
+    assert submits[1]['speed'] == pytest.approx(10.0, abs=0.5)
+
+
+def test_c_cont_hall1_active_no_submit(monkeypatch):
+    """HALL1 active -> target=0 -> kein Submit."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder, 'hall_overflow', True)
+    _populate_tracker_to_ready(feeder, velocity=15.0)
+    submits = _capture_submits(feeder, monkeypatch)
+    feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
+    assert len(submits) == 0

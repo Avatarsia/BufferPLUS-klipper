@@ -2799,140 +2799,61 @@ class BufferFeeder:
         if self._is_hall1_active('submit_move'):
             return
 
-        if self.hall_full:
-            # Buffer voll: stop. Pending streamed chunks drain via
-            # _last_move_end_time naturally; clearing the streaming
-            # flag prevents new chunks from being requested.
-            self._auto_between_since = None
-            if self._continuous_feed:
-                self._continuous_feed = False
-                # P7-63: Reset accumulator on confirmed buffer-full.
-                # Without this, a long high-flow session with no hall_full
-                # event lets the accumulator grow past max_feed_distance
-                # and trips a false JAM_SAFETY_DISTANCE (Issue #26).
-                self._feed_distance_accumulator = 0.0
-            # P7-66b: HALL2 must also clear _pending_remaining_mm so a
-            # still-streaming sub-chunk sequence (move-splitting) does
-            # NOT keep firing into the now-full buffer. Without this,
-            # only the new-submit path is gated; the sub-chunk pipeline
-            # keeps emitting up to flush_callback_chunk_mm of overshoot.
-            self._pending_remaining_mm = 0.0
-            self._pending_submit_chunk_cap = None
-        elif self.hall_empty:
-            # Buffer leer: feed. step_gen_time + lead_time is the
-            # safe anchor — Klipper just told us the cursor is here.
-            # P7-61: Guard on _move_in_flight() instead of
-            # _continuous_feed so a new chunk is submitted whenever
-            # the previous one has finished playing out, not only on
-            # the very first hall_empty activation. Pre-fix the motor
-            # ran exactly ONE 15mm chunk per HALL3 activation and
-            # then stalled (Issue #23). _main_tick's streaming block
-            # masked this in stable until P7-59 correctly disabled
-            # that racing path; _on_mcu_flush now owns the full
-            # continuous-streaming responsibility.
-            #
-            # P7-66: Lookahead-Submit für Streaming-Pipeline. P7-61
-            # submitted nur, wenn der laufende Chunk *vollständig*
-            # ausgespielt war (Restzeit <= 0). Anker für den nächsten
-            # Chunk war step_gen_time + lead_time → bei lead_time=0.3 s
-            # entstand zwischen aufeinanderfolgenden Chunks ein
-            # sichtbarer Gap, Netto-Förderrate < nominal feed_speed
-            # (Motor lief seriell statt kontinuierlich).
-            #
-            # Neu: sobald die Restzeit des laufenden Chunks <= lead_time
-            # ist, wird der nächste Chunk JETZT submitted, mit
-            # t0 = _last_move_end_time (abuttend, identisch zum
-            # Pattern in _tick_pending_chunk). Erst-Chunk-Pfad
-            # (kein Move in flight) unverändert: t0 = step_gen_time
-            # + lead_time.
-            #
-            # HALT-Latenz: maximal 1 zusätzlicher Chunk gegenüber
-            # P7-61 (laufender + 1 vorab-submittierter). _halt_motion
-            # setzt _continuous_feed=False und clearisiert
-            # _pending_remaining_mm; ein bereits trapq-submittierter
-            # Chunk muss aussspielen. Bei flush_callback_chunk_mm=15
-            # und feed_speed=30 sind das ~0.5 s Worst-Case extra.
-            #
-            # P7-66b: HALL2-Interrupt via move-splitting. flush_call-
-            # back_chunk_mm > interrupt_chunk_mm wird intern in N
-            # sub-chunks zerlegt: der erste landet sofort in der trapq,
-            # der Rest via _pending_remaining_mm. _tick_pending_chunk
-            # prüft HALL2 zwischen jedem sub-chunk → der laufende sub-
-            # chunk spielt aus, der Rest wird verworfen. Worst-case
-            # Overshoot = ein interrupt_chunk_mm (Default 9 mm), nicht
-            # mehr 45 mm. Hardware-Test 2026-05-12: ohne Cap grindet
-            # Filament gegen vollen Puffer.
-            self._auto_between_since = None
-            move_active = self._move_in_flight()
-            if move_active:
-                # Streaming-Pfad: Restzeit aus mcu_now-Perspektive.
-                # step_gen_time ist der race-free MCU-Cursor (vom
-                # Klipper-flush bereitgestellt); _last_move_end_time
-                # ist die in trapq stehende Endzeit. remaining <=
-                # lead_time bedeutet "Klipper braucht spätestens in
-                # lead_time einen neuen Move im trapq".
-                remaining = self._last_move_end_time - step_gen_time
-                can_lookahead = (remaining <= self.lead_time)
-            else:
-                can_lookahead = True  # erster Chunk / Move-Lücke
-            # P7-66b: don't queue a fresh chunk while a sub-chunk
-            # sequence is still draining — _tick_pending_chunk will
-            # continue submitting at the cap size and HALL2 abort
-            # remains the gate. Without this guard a flush-callback
-            # racing the pending-tick would double-submit and the
-            # interrupt latency invariant breaks.
-            if self._pending_remaining_mm > 0:
-                can_lookahead = False
-            if can_lookahead:
-                if not self._continuous_feed:
-                    # P7-57: Reset safety-distance counter on every
-                    # new feed session (first chunk after a hall_empty
-                    # edge). Without this the accumulator carries over
-                    # distance from the previous print and may trip
-                    # JAM_SAFETY_DISTANCE at the start of the next
-                    # print.
-                    # P7-61b: Also clear _feed_deadline_time. Bang-
-                    # bang has no max_duration timeout, but a stale
-                    # deadline left over from an earlier MANUAL_FEED
-                    # session would otherwise trip SAFETY_TIMEOUT
-                    # (Codex-flagged latent path: MANUAL_FEED → 60s
-                    # cooldown → AUTO; old _feed_deadline_time fires
-                    # → false JAM during normal bang-bang).
-                    self._feed_distance_accumulator = 0.0
-                    self._feed_deadline_time = None
-                    self._continuous_feed = True
-                    self._continuous_feed_direction = 1
-                    self._continuous_feed_speed = self.feed_speed
-                if move_active:
-                    # Streaming: abuttend an in flight Move. t0 =
-                    # _last_move_end_time. _submit_single_trapezoid
-                    # nimmt im forced_t0-Pfad max(forced_t0,
-                    # _last_move_end_time, en, mcu_now) — identisch.
-                    anchor = self._last_move_end_time
-                else:
-                    # Erster Chunk: race-free Anker.
-                    anchor = step_gen_time + self.lead_time
-                # P7-66 R1 + P7-66b: streaming=True drops the en floor
-                # and skips _enable_stepper() so the abuttend-anchor
-                # holds; submit_chunk_cap=interrupt_chunk_mm splits
-                # the chunk into HALL-interruptible sub-chunks.
-                self._submit_move(self.flush_callback_chunk_mm,
-                                   self.feed_speed,
-                                   forced_t0=anchor,
-                                   streaming=move_active,
-                                   submit_chunk_cap=self.interrupt_chunk_mm)
+        # C-cont T7: Continuous-Streaming-Submit ersetzt den frueheren
+        # Bang-Bang-Block (hall_full/hall_empty/else mit STABLE_DROP_-
+        # GRACE). Jede flush-callback bestimmt die target_speed via
+        # SpeedModulator (_compute_target_feed_speed) aus HALL-Sensor-
+        # Kombination + ExtruderVelocityTracker. Submit nur wenn
+        # target_speed > 0; sonst kein Move (Notbremse oder Modulator
+        # entscheidet, dass aktuell kein Foerder-Bedarf besteht).
+        #
+        # Lookahead-Pipeline (P7-66 Streaming-Pattern) bleibt: ein
+        # neuer Chunk wird erst eingereiht, wenn der laufende Move
+        # weniger als lead_time Restzeit hat; sub-chunk-Pipeline
+        # (_pending_remaining_mm) gates weiter wie bisher (HALL2-
+        # Interrupt via move-splitting).
+        target_speed = self._compute_target_feed_speed()
+        if target_speed <= 0.0:
+            if self.buffer_debug_metrics:
+                logging.debug(
+                    "buffer_feeder: target_speed=0 - kein Submit "
+                    "(hall1=%s ready=%s)",
+                    self.hall_overflow,
+                    self.velocity_tracker.is_ready())
+            return
+
+        # Lookahead-Check: laeuft noch ein Move? P7-66 Streaming-Pattern.
+        move_active = self._move_in_flight()
+        if move_active:
+            remaining = self._last_move_end_time - step_gen_time
+            if remaining > self.lead_time:
+                return  # noch frueh, kein neuer Chunk
+        if self._pending_remaining_mm > 0:
+            return  # Sub-Chunk-Pipeline laeuft
+
+        # Anchor wie in Bang-Bang (P7-66 Pattern).
+        if move_active:
+            anchor = self._last_move_end_time
         else:
-            # P7-63: Zwischen-Zone — keep short bounce flicker, but end
-            # the AUTO feed session once HALL3 has been inactive long
-            # enough. STABLE_DROP_GRACE matches the load-phase3 pattern
-            # used elsewhere in this file.
-            if self._continuous_feed and self._continuous_feed_direction == 1:
-                if self._auto_between_since is None:
-                    self._auto_between_since = flush_time
-                elif flush_time - self._auto_between_since >= STABLE_DROP_GRACE:
-                    self._continuous_feed = False
-                    self._feed_distance_accumulator = 0.0
-                    self._auto_between_since = None
+            anchor = step_gen_time + self.lead_time
+
+        # C-cont T7: continuous_feed bleibt strukturell True im Stream-
+        # Mode. Reset nur bei echtem Uebergang inactive->active
+        # (P7-57: Safety-Distance-Accumulator-Reset; P7-61b:
+        # _feed_deadline_time-Reset).
+        if not self._continuous_feed:
+            self._feed_distance_accumulator = 0.0
+            self._feed_deadline_time = None
+            self._continuous_feed = True
+            self._continuous_feed_direction = 1
+        self._continuous_feed_speed = target_speed
+
+        self._submit_move(
+            self.flush_callback_chunk_mm,
+            target_speed,
+            forced_t0=anchor,
+            streaming=move_active,
+            submit_chunk_cap=self.interrupt_chunk_mm)
 
     def _exit_phase3_stable(self, *, set_grace, respond_text):
         """Common exit-sequence when HALL2 (buffer full) or HALL1 (with
