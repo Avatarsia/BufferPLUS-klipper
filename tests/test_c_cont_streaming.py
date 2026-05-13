@@ -152,18 +152,17 @@ def test_c_cont_modulator_hall1_zero(monkeypatch):
 
 
 def test_c_cont_modulator_hall3_max(monkeypatch):
-    """Hotfix6: HALL3 active (Buffer leer) -> 30.0 mm/s konstant
-    (sanfter Initial-Fill). Hotfix5 nutzte feed_speed=70, was
-    HALL3->HALL1 ueberschoss (Hardware-Beleg klippy_real.log
-    2026-05-13: 6+ Cycles HALL3->HALL1, c=16 crash). Hotfix6:
-    30 mm/s gibt 300ms Push-Zeit pro 5mm Sub-Chunk -> HALL2 hat
-    Zeit zum Trigger."""
+    """Hotfix7-Update: HALL3:on + vel=15 -> max(15*1.5=22.5, 15)=22.5.
+    Hotfix6 nutzte fix 30 mm/s; Hardware-Crash 2026-05-13 (klippy.log
+    Z.104571, c=12 i=0) zeigte dass fixer 30 mm/s Schub bei
+    HALL2<->HALL1 nur 3.6mm Sicherheitsmarge regelmaessig in HALL1
+    overshoot. Hotfix7 koppelt Speed an Extruder-Verbrauch."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
     _populate_tracker_to_ready(feeder, velocity=15.0)
-    assert feeder._compute_target_feed_speed() == 30.0
+    assert feeder._compute_target_feed_speed() == pytest.approx(22.5, abs=0.1)
 
 
 def test_c_cont_modulator_hall2_half(monkeypatch):
@@ -255,10 +254,10 @@ def test_c_cont_hotfix4_stalled_toolhead_no_submit_in_full_buffer(monkeypatch):
 
 
 def test_c_cont_hotfix4_stalled_but_hall_empty_still_fills(monkeypatch):
-    """Hotfix6: HALL3 active + Toolhead stalled -> foerdere TROTZDEM
-    (Buffer wirklich leer). Hotfix6-Update: 30.0 mm/s konstant statt
-    feed_speed (sanfter Initial-Fill, vermeidet HALL3->HALL1
-    Durchschuss)."""
+    """Hotfix7-Update: HALL3 active + Toolhead stalled (vel=0) ->
+    foerdere TROTZDEM (Buffer wirklich leer), aber sanft mit
+    MIN_FLOOR=15 statt Hotfix6's fix 30.0 (Hardware-Crash
+    2026-05-13, klippy.log Z.104571: 16+ HALL1-Cycles, c=12 i=0)."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'hall_full', False)
@@ -270,8 +269,8 @@ def test_c_cont_hotfix4_stalled_but_hall_empty_still_fills(monkeypatch):
         feeder.velocity_tracker.tick(t)
         t += 0.025
     assert feeder.velocity_tracker.get_velocity() == 0.0
-    # HALL3 dominiert -> 30.0 (vor not_ready/stalled-Checks)
-    assert feeder._compute_target_feed_speed() == 30.0
+    # Hotfix7: HALL3 + vel=0 -> MIN_FLOOR=15 (statt Hotfix6 30.0)
+    assert feeder._compute_target_feed_speed() == pytest.approx(15.0, abs=0.1)
 
 
 def test_c_cont_hotfix4_not_ready_no_submit_in_full(monkeypatch):
@@ -286,14 +285,16 @@ def test_c_cont_hotfix4_not_ready_no_submit_in_full(monkeypatch):
 
 
 def test_c_cont_hotfix4_not_ready_but_hall_empty_uses_fallback(monkeypatch):
-    """Hotfix6: tracker not_ready + HALL3 -> 30.0 mm/s (sanfter
-    Initial-Fill, Hotfix6-Konstante statt feed_speed)."""
+    """Hotfix7-Update: tracker not_ready + HALL3 -> MIN_FLOOR=15 mm/s
+    (Print-Start sanft). Hotfix6 nutzte fix 30 mm/s -> aggressiver
+    Initial-Fill schoss in HALL1 over (Hardware-Beleg klippy.log
+    Z.104571, c=12 i=0)."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
     assert not feeder.velocity_tracker.is_ready()
-    assert feeder._compute_target_feed_speed() == 30.0
+    assert feeder._compute_target_feed_speed() == pytest.approx(15.0, abs=0.1)
 
 
 # ---------------------------------------------------------------------------
@@ -317,15 +318,18 @@ def test_c_cont_hotfix3_zwischen_soft_floor_low_vel(monkeypatch):
 
 
 def test_c_cont_hotfix3_zwischen_soft_floor_high_vel(monkeypatch):
-    """Hotfix3: Zwischenzone bei high velocity = 1.10 * vel.
-    High velocity (50 mm/s): erwarte 1.10 * 50 = 55."""
+    """Hotfix7-Update: Zwischenzone bei high velocity = min(1.10*vel,
+    feed_speed). vel=50 -> 1.10*50=55, capped auf feed_speed=30.
+    Vorher Hotfix3: unbounded 55. NEUER Soft-Cap verhindert dass
+    target_speed > konfigurierte Obergrenze waechst (Hardware-
+    Sicherheit, Hotfix7)."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     set_sensor_active(feeder, 'hall_empty', False)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
     _populate_tracker_to_ready(feeder, velocity=50.0)
-    # max(15, 1.10*50=55) -> 55
-    assert feeder._compute_target_feed_speed() == pytest.approx(55.0, abs=1.0)
+    # min(1.10*50=55, feed_speed=30) -> 30
+    assert feeder._compute_target_feed_speed() == pytest.approx(30.0, abs=0.1)
 
 
 def test_c_cont_hotfix3_hall2_soft_floor_low_vel(monkeypatch):
@@ -373,19 +377,27 @@ def test_c_cont_hotfix5_hall2_returns_zero(monkeypatch):
     assert feeder._compute_target_feed_speed() == 0.0
 
 
-def test_c_cont_hotfix6_hall3_uses_30_not_feed_speed(monkeypatch):
-    """Hotfix6: HALL3 nutzt feste 30.0 mm/s (statt feed_speed=70).
-    Hotfix5 nutzte feed_speed; das war immer noch zu schnell und
-    schoss in 130ms HALL3->HALL1 durch (Hardware-Beleg
-    klippy_real.log 2026-05-13)."""
+def test_c_cont_hotfix7_hall3_scales_with_vel_under_high_feed_speed(monkeypatch):
+    """Hotfix7 (ersetzt Hotfix6): HALL3 + vel=20, feed_speed=70 ->
+    max(20*1.5=30, 15)=30, capped auf feed_speed=70 -> 30.
+    Hotfix7 koppelt Speed an Verbrauch statt fixer Konstante.
+    Hardware-Crash 2026-05-13 (klippy.log Z.104571, c=12 i=0) zeigte
+    dass Hotfix6's fixer 30 mm/s bei niedrigem vel (5-10) immer noch
+    HALL2->HALL1 ueberschoss (3.6mm Sicherheitsmarge)."""
     printer, feeder = make_c_cont_feeder(
         monkeypatch, cfg_overrides={'feed_speed': 70.0})
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
-    assert feeder._compute_target_feed_speed() == 30.0
-    assert feeder._compute_target_feed_speed() != feeder.feed_speed
-    assert feeder._compute_target_feed_speed() != feeder.max_feed_speed
+    _populate_tracker_to_ready(feeder, velocity=20.0)
+    # 20*1.5=30, capped auf feed_speed=70 -> 30
+    assert feeder._compute_target_feed_speed() == pytest.approx(30.0, abs=0.1)
+    # Bei hoeherem vel: vel*1.5 bis feed_speed-Cap. Tracker resetten,
+    # damit alte Samples die neue Velocity nicht verfaelschen.
+    feeder.velocity_tracker.reset()
+    _populate_tracker_to_ready(feeder, velocity=60.0)
+    # 60*1.5=90 -> capped auf feed_speed=70
+    assert feeder._compute_target_feed_speed() == pytest.approx(70.0, abs=0.1)
 
 
 def test_c_cont_hotfix5_zwischen_below_min_floor_skips(monkeypatch):
@@ -410,6 +422,194 @@ def test_c_cont_hotfix5_zwischen_above_min_floor_proportional(monkeypatch):
     set_sensor_active(feeder, 'hall_overflow', False)
     _populate_tracker_to_ready(feeder, velocity=20.0)
     assert feeder._compute_target_feed_speed() == pytest.approx(22.0, abs=1.0)
+
+
+# ---------------------------------------------------------------------------
+# C-cont Hotfix 7 (Hardware-Crash 2026-05-13 klippy.log Z.104571, c=12 i=0
+# Invalid sequence nach 16+ HALL1-OVERFLOW-Zyklen in 80s).
+# Soft-Throttle: Feeder-Speed skaliert mit Extruder-Verbrauch statt fix
+# 30 mm/s. Adressiert Hardware-Geometrie (optische Lichtschranken,
+# HALL3<->HALL2=12.8mm, HALL2<->HALL1=3.6mm, Ausloeser 3-4mm, Hebel 2:1)
+# vs Hotfix6's 5mm-Chunk-Schwung-Energie.
+# Siehe specs/2026-05-13-c-cont-hotfix7-soft-throttle.md
+# ---------------------------------------------------------------------------
+
+
+def test_c_cont_hotfix7_hall3_high_vel_capped_at_feed_speed(monkeypatch):
+    """Hotfix7: HALL3:on + vel=25 -> max(25*1.5=37.5, 15) capped auf
+    feed_speed=30. Soft-Cap verhindert ueberzogene Speeds bei schnellen
+    Drucken."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', True)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    _populate_tracker_to_ready(feeder, velocity=25.0)
+    # 25*1.5=37.5 > feed_speed=30 -> capped to 30
+    assert feeder._compute_target_feed_speed() == pytest.approx(30.0, abs=0.1)
+
+
+def test_c_cont_hotfix7_hall3_mid_vel_scales_with_extruder(monkeypatch):
+    """Hotfix7: HALL3:on + vel=15 -> max(15*1.5=22.5, 15)=22.5.
+    Scaling mit Verbrauch statt fixe 30 mm/s -> halbierte Schwung-Energie
+    bei moderaten Drucken."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', True)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    _populate_tracker_to_ready(feeder, velocity=15.0)
+    assert feeder._compute_target_feed_speed() == pytest.approx(22.5, abs=0.1)
+
+
+def test_c_cont_hotfix7_hall3_low_vel_uses_min_floor(monkeypatch):
+    """Hotfix7: HALL3:on + vel=8 (unter MIN_FLOOR) -> 15 mm/s
+    (MIN_FLOOR-Boden). 8*1.5=12 < 15 -> Floor wins."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', True)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    _populate_tracker_to_ready(feeder, velocity=8.0)
+    assert feeder._compute_target_feed_speed() == pytest.approx(15.0, abs=0.1)
+
+
+def test_c_cont_hotfix7_hall3_vel_zero_uses_min_floor(monkeypatch):
+    """Hotfix7: HALL3:on + tracker ready aber vel=0 (Toolhead stalled
+    mit leerem Buffer) -> 15 mm/s. Buffer muss trotz Stall gefuellt
+    werden, aber sanft (MIN_FLOOR statt 30)."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', True)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    # Tracker ready aber vel=0
+    fake_ext = feeder.printer.objects['extruder']
+    t = 0.0
+    for _ in range(12):
+        fake_ext.last_position = 100.0  # konstant -> vel=0
+        feeder.velocity_tracker.tick(t)
+        t += 0.025
+    assert feeder.velocity_tracker.is_ready()
+    assert feeder.velocity_tracker.get_velocity() == 0.0
+    assert feeder._compute_target_feed_speed() == pytest.approx(15.0, abs=0.1)
+
+
+def test_c_cont_hotfix7_hall3_tracker_not_ready_uses_min_floor(monkeypatch):
+    """Hotfix7: HALL3:on + tracker noch nicht ready (Print-Start) ->
+    15 mm/s. Vorher Hotfix6: 30 mm/s -> aggressiver Initial-Fill ->
+    HALL1-Overshoot waehrend velocity_tracker noch sammelt."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', True)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    assert not feeder.velocity_tracker.is_ready()
+    assert feeder._compute_target_feed_speed() == pytest.approx(15.0, abs=0.1)
+
+
+def test_c_cont_hotfix7_zwischen_low_vel_zero(monkeypatch):
+    """Hotfix7: Zwischenzone + vel<MIN_FLOOR -> 0.0 (unveraendert
+    von Hotfix5: vermeidet Submits bei Spurious-Buffer-Drift)."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    _populate_tracker_to_ready(feeder, velocity=5.0)
+    assert feeder._compute_target_feed_speed() == 0.0
+
+
+def test_c_cont_hotfix7_zwischen_high_vel_capped(monkeypatch):
+    """Hotfix7: Zwischenzone + vel=40 -> min(40*1.10=44, feed_speed=30)=30.
+    NEUER Soft-Cap in Zwischenzone (vorher: unbounded vel*1.10).
+    Verhindert dass schnelle Drucke target_speed > feed_speed setzen."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    _populate_tracker_to_ready(feeder, velocity=40.0)
+    assert feeder._compute_target_feed_speed() == pytest.approx(30.0, abs=0.1)
+
+
+def test_c_cont_hotfix7_zwischen_tracker_not_ready_zero(monkeypatch):
+    """Hotfix7: Zwischenzone + tracker not_ready -> 0.0 (unveraendert
+    von Hotfix4: nur HALL3:on darf bei not_ready foerdern, alle anderen
+    Zonen warten auf echte Velocity)."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    assert not feeder.velocity_tracker.is_ready()
+    assert feeder._compute_target_feed_speed() == 0.0
+
+
+def test_c_cont_hotfix7_hall2_zero_regression(monkeypatch):
+    """Regression: HALL2:on -> 0.0 (unveraendert von Hotfix5).
+    Stellt sicher dass Hotfix7-Umbau den HALL2-Pfad nicht bricht."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', True)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    _populate_tracker_to_ready(feeder, velocity=20.0)
+    assert feeder._compute_target_feed_speed() == 0.0
+
+
+def test_c_cont_hotfix7_hall1_zero_regression(monkeypatch):
+    """Regression: HALL1:on -> 0.0 (Notbremse). Stellt sicher dass
+    Hotfix7-Umbau den OVERFLOW-Pfad nicht beeinflusst."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_overflow', True)
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', False)
+    _populate_tracker_to_ready(feeder, velocity=20.0)
+    assert feeder._compute_target_feed_speed() == 0.0
+
+
+def test_c_cont_hotfix7_tracker_lag_documents_tradeoff(monkeypatch):
+    """Hotfix7 Lag-Verhalten (Reviewer-Concern I2): Auf Hardware kann
+    der velocity_tracker nicht zwischen Flushes resettet werden.
+    Sliding-Window mittelt ueber 300ms. Wenn der Extruder seine
+    Geschwindigkeit rapide drosselt (z.B. Ende eines G1-Segments),
+    lagt der Tracker um genau das Sliding-Window.
+
+    Dieser Test dokumentiert das Trade-Off explizit: nach 5 Samples
+    bei vel=5 (~125ms) hat der Tracker noch 7 alte Samples bei
+    vel=30 -> Mittelwert ~24 mm/s -> target_speed entsprechend hoch.
+    Spec §6.2 akzeptiert das, aber dieser Test verhindert dass
+    zukuenftige Optimierungen das Lag-Verhalten unbemerkt aendern."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', True)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+
+    fake_ext = feeder.printer.objects['extruder']
+    # Phase 1: 12 Samples bei vel=30, Tracker primed auf 30
+    pos = 0.0
+    t = 0.0
+    for _ in range(12):
+        fake_ext.last_position = pos
+        feeder.velocity_tracker.tick(t)
+        pos += 30.0 * 0.025  # vel=30
+        t += 0.025
+    assert feeder.velocity_tracker.is_ready()
+    assert feeder.velocity_tracker.get_velocity() == pytest.approx(30.0, abs=0.5)
+    # Phase 2: 5 weitere Samples bei vel=5 (Extruder drosselt rapide).
+    # KEIN reset() — hardware-realistisches Lag-Verhalten.
+    for _ in range(5):
+        fake_ext.last_position = pos
+        feeder.velocity_tracker.tick(t)
+        pos += 5.0 * 0.025  # vel=5
+        t += 0.025
+    # Tracker mittelt jetzt ueber 7 alte (vel=30) + 5 neue (vel=5) Samples.
+    # Erwartete Mittel-Velocity zwischen ~15 und ~25 (haengt vom genauen
+    # Window-Verhalten ab). Wichtig: Target ist NICHT auf MIN_FLOOR
+    # gefallen — Soft-Throttle lagt mit dem Tracker.
+    lagged_vel = feeder.velocity_tracker.get_velocity()
+    assert lagged_vel > 10.0, (
+        "Tracker-Lag dokumentiert: nach 5 Drossel-Samples sollte vel "
+        "noch deutlich ueber 5 mm/s sein (alte Samples ueberwiegen). "
+        f"Tatsaechlich: {lagged_vel:.2f}")
+    # Target_speed: HALL3 + lagged_vel -> max(lagged_vel*1.5, MIN_FLOOR)
+    target = feeder._compute_target_feed_speed()
+    expected_target = min(max(lagged_vel * 1.5, 15.0), feeder.feed_speed)
+    assert target == pytest.approx(expected_target, abs=0.1), (
+        f"Target {target} muss aktuellem (gelaggten) tracker_vel "
+        f"folgen: erwartet {expected_target}")
 
 
 # ===========================================================================
@@ -525,9 +725,10 @@ def _capture_submits(feeder, monkeypatch):
 def test_c_cont_continuous_streaming_in_auto(monkeypatch):
     """STATE_AUTO + HALL3 stable + tracker ready -> Submit bei jedem flush.
 
-    Hotfix6: HALL3-Submit nutzt feste 30.0 mm/s (statt feed_speed=70
-    in Hotfix5) — sanfter Initial-Fill verhindert HALL3->HALL1
-    Durchschuss in 130ms."""
+    Hotfix7-Update: HALL3-Submit nutzt max(vel*1.5, MIN_FLOOR) capped
+    auf feed_speed. vel=15 -> 15*1.5=22.5 -> Submit-Speed 22.5.
+    Vorher Hotfix6: fix 30.0 (Hardware-Crash 2026-05-13 zeigte dass
+    fixer 30 trotzdem HALL2->HALL1 overshoot)."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     feeder._state = buffer_feeder.STATE_AUTO
     set_sensor_active(feeder, 'hall_empty', True)
@@ -538,21 +739,22 @@ def test_c_cont_continuous_streaming_in_auto(monkeypatch):
     feeder._pending_remaining_mm = 0.0
     feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
     assert len(submits) == 1
-    assert submits[0]['speed'] == 30.0
+    # Hotfix7: 15*1.5=22.5 (statt Hotfix6 fix 30.0)
+    assert submits[0]['speed'] == pytest.approx(22.5, abs=0.1)
 
 
 def test_c_cont_speed_modulation_via_hall_state(monkeypatch):
     """HALL-State-Change zwischen flushes -> Speed-Aenderung.
 
-    Hotfix6:
-    - HALL3 -> 30.0 mm/s (sanfter Initial-Fill, Hotfix6-Konstante)
+    Hotfix7-Update:
+    - HALL3 + vel=40 -> min(40*1.5=60, feed_speed=30)=30 (capped)
     - HALL2 -> 0.0 (kein Submit, Buffer voll = drain ueber Toolhead)
     """
     printer, feeder = make_c_cont_feeder(monkeypatch)
     feeder._state = buffer_feeder.STATE_AUTO
     _populate_tracker_to_ready(feeder, velocity=40.0)
     submits = _capture_submits(feeder, monkeypatch)
-    # HALL3 -> 30.0
+    # HALL3 -> 30 (40*1.5=60 capped auf feed_speed=30)
     set_sensor_active(feeder, 'hall_empty', True)
     feeder._last_move_end_time = 0.0
     feeder._pending_remaining_mm = 0.0
@@ -564,7 +766,8 @@ def test_c_cont_speed_modulation_via_hall_state(monkeypatch):
     feeder._on_mcu_flush(flush_time=10.5, step_gen_time=10.5)
     # Nur 1 Submit (HALL3), HALL2 ist Skip
     assert len(submits) == 1
-    assert submits[0]['speed'] == 30.0
+    # Hotfix7: 40*1.5=60 capped auf feed_speed=30
+    assert submits[0]['speed'] == pytest.approx(30.0, abs=0.1)
 
 
 def test_c_cont_hall1_active_no_submit(monkeypatch):
@@ -643,8 +846,9 @@ def test_c_cont_pending_chunk_uses_current_target_speed(monkeypatch):
     """_tick_pending_chunk submittet Sub-Chunks mit aktuellem target_speed,
     nicht eingefrorenem Speed vom ersten Submit.
 
-    Hotfix3: Zwischenzone-Output = max(15, vel*1.10). Bei velocity=30
-    ist 1.10*30=33 > MIN_FLOOR=15, also expect 33.
+    Hotfix7-Update: Zwischenzone-Output = min(vel*1.10, feed_speed).
+    Bei velocity=30: 1.10*30=33 > feed_speed=30 -> capped auf 30.
+    Vorher Hotfix3: unbounded 33 (kein Soft-Cap).
     Im Continuous-Mode submittet _on_mcu_flush nur noch interrupt_-
     chunk_mm (9), kein _pending_remaining_mm. Wir setzen Pending hier
     kuenstlich um _tick_pending_chunk-Logik zu testen.
@@ -661,12 +865,12 @@ def test_c_cont_pending_chunk_uses_current_target_speed(monkeypatch):
     feeder._last_move_end_time = 10.0
     # HALL-Wechsel von HALL3 -> Zwischenzone (buffer fuellt sich):
     set_sensor_active(feeder, 'hall_empty', False)
-    # Zwischenzone Hotfix3: max(15, 1.10*30=33) = 33
-    assert feeder._compute_target_feed_speed() == pytest.approx(33.0, abs=1.0)
+    # Hotfix7: min(1.10*30=33, feed_speed=30) = 30 (NEUER Soft-Cap)
+    assert feeder._compute_target_feed_speed() == pytest.approx(30.0, abs=0.1)
     trapezoids = _capture_trapezoids(feeder, monkeypatch)
     feeder._tick_pending_chunk(eventtime=10.0)
     assert len(trapezoids) == 1
-    assert trapezoids[0]['speed'] == pytest.approx(33.0, abs=1.0)
+    assert trapezoids[0]['speed'] == pytest.approx(30.0, abs=0.1)
     assert trapezoids[0]['speed'] != feeder.max_feed_speed
 
 
@@ -791,14 +995,18 @@ def test_c_cont_continuous_feed_persists_through_hall_state_change(monkeypatch):
     sich der HALL-State zwischen Submits aendert (Speed wird nur
     moduliert, kein Stream-Reset).
 
-    Hotfix3: Zwischenzone-Output = max(15, vel*1.10). Bei velocity=40
-    ist 1.10*40=44 > MIN_FLOOR=15, also expect 44.
-    """
-    printer, feeder = make_c_cont_feeder(monkeypatch)
+    Hotfix7-Update: HALL3 + vel=40 -> min(40*1.5=60, feed_speed)
+    (Soft-Cap). Zwischenzone + vel=40 -> min(1.10*40=44, feed_speed)
+    (Soft-Cap). Wenn feed_speed niedrig ist (z.B. 30), cappen BEIDE
+    Submits auf feed_speed -> Modulation nicht mehr beobachtbar.
+    Daher feed_speed=70 nutzen: HALL3=60, Zwischenzone=44 -> beide
+    unterschiedlich, Modulations-Invariante erhalten."""
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'feed_speed': 70.0})
     feeder._state = buffer_feeder.STATE_AUTO
     _populate_tracker_to_ready(feeder, velocity=40.0)
     submits = _capture_submits(feeder, monkeypatch)
-    # HALL3 -> max_feed_speed, erster Submit setzt _continuous_feed=True
+    # HALL3 -> Hotfix7: 40*1.5=60 (unter feed_speed=70, kein Cap)
     set_sensor_active(feeder, 'hall_empty', True)
     feeder._last_move_end_time = 0.0
     feeder._pending_remaining_mm = 0.0
@@ -807,16 +1015,21 @@ def test_c_cont_continuous_feed_persists_through_hall_state_change(monkeypatch):
     assert feeder._continuous_feed is True
     assert len(submits) == 1
     first_submit_speed = submits[0]['speed']
+    assert first_submit_speed == pytest.approx(60.0, abs=0.1)
     # HALL-State-Change: HALL3 -> Zwischenzone (alle HALL inactive).
     set_sensor_active(feeder, 'hall_empty', False)
     feeder._last_move_end_time = 0.0  # vorheriger Move done
     feeder._on_mcu_flush(flush_time=10.5, step_gen_time=10.5)
-    # _continuous_feed bleibt strukturell True:
+    # _continuous_feed bleibt strukturell True (kein Stream-Reset bei
+    # HALL-Wechsel):
     assert feeder._continuous_feed is True
-    # Speed wurde moduliert (Zwischenzone Hotfix3 = max(15, 1.10*40)=44):
+    # Zweiter Submit: Zwischenzone Hotfix7 = min(1.10*40=44, feed_speed=70)
+    # = 44 (unter Cap):
     assert len(submits) == 2
-    assert submits[1]['speed'] == pytest.approx(44.0, abs=1.0)
-    # Speed-Aenderung gegenueber erstem Submit ist erfolgt (Modulation):
+    assert submits[1]['speed'] == pytest.approx(44.0, abs=0.1)
+    # Modulations-Invariante (Reviewer I1): Speed hat sich strukturell
+    # geaendert zwischen den Submits — beweist dass HALL-State-Change
+    # die Modulation triggert (nicht nur ein zufaelliger zweiter Submit).
     assert submits[1]['speed'] != first_submit_speed
 
 
@@ -834,9 +1047,9 @@ def test_c_cont_hotfix3_pipeline_one_chunk_only(monkeypatch):
     die Pipeline sofort beim naechsten flush-callback (Hardware
     2026-05-13 klippy(9), 30/30 Cycles HALL1-Overshoot-Storm fix).
 
-    Hotfix6: HALL3-Speed ist jetzt 30.0 mm/s konstant (statt
-    feed_speed=70 in Hotfix5) + interrupt_chunk_mm default 5mm
-    (statt 9mm in Hotfix5)."""
+    Hotfix7-Update: HALL3-Speed = min(max(vel*1.5, MIN_FLOOR),
+    feed_speed). Bei vel=15: 15*1.5=22.5 -> Submit-Speed=22.5.
+    Pipeline-Cap (interrupt_chunk_mm=5) unveraendert von Hotfix6."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     feeder._state = buffer_feeder.STATE_AUTO
     set_sensor_active(feeder, 'hall_empty', True)
@@ -846,13 +1059,12 @@ def test_c_cont_hotfix3_pipeline_one_chunk_only(monkeypatch):
     feeder._pending_remaining_mm = 0.0
     feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
     assert len(submits) == 1
-    # Hotfix6: Submit-Distanz = interrupt_chunk_mm (default 5), nicht
-    # flush_callback_chunk_mm:
+    # Pipeline-Cap unveraendert: Submit-Distanz = interrupt_chunk_mm (5):
     assert submits[0]['distance'] == feeder.interrupt_chunk_mm
     assert feeder.interrupt_chunk_mm == 5.0  # Hotfix6 default
-    # Hotfix6: Speed = 30.0 (HALL3-Branch sanfter Initial-Fill,
-    # Konstante statt feed_speed)
-    assert submits[0]['speed'] == 30.0
+    # Hotfix7: Speed = min(max(15*1.5, 15), 30) = 22.5
+    # (statt Hotfix6 fix 30.0)
+    assert submits[0]['speed'] == pytest.approx(22.5, abs=0.1)
     # submit_chunk_cap bleibt gesetzt (defense-in-depth fuer Safety-
     # Pfade, falls _submit_move spaeter doch in Sub-Chunk-Stream
     # gerinnt — Continuous-Mode selbst nutzt kein Pending mehr):
@@ -916,22 +1128,38 @@ def test_c_cont_hotfix3_no_pending_remaining_in_continuous(monkeypatch):
 # ===========================================================================
 
 
-def test_c_cont_hotfix6_hall3_speed_constant_30(monkeypatch):
-    """Hotfix6 Layer 1: HALL3 -> 30.0 mm/s konstant (nicht feed_speed).
+def test_c_cont_hotfix7_hall3_speed_varies_with_vel(monkeypatch):
+    """Hotfix7 (ersetzt Hotfix6): HALL3-Speed skaliert mit
+    Extruder-Verbrauch statt fixer Konstante. Hotfix6 nutzte feste
+    30 mm/s -> schoss bei niedriger Print-Geschwindigkeit (vel<<15)
+    trotzdem in HALL1 over. Hotfix7: max(vel*1.5, MIN_FLOOR),
+    capped auf feed_speed.
 
-    Selbst wenn feed_speed=70 (lll.cfg) oder feed_speed=100 ist, muss
-    HALL3-Branch immer 30.0 zurueckgeben. Verhindert HALL3->HALL1
-    Durchschuss in 1 Sub-Chunk (Hardware-Beleg klippy_real.log
-    2026-05-13: 6+ Cycles HALL3->HALL1 mit feed_speed=70)."""
+    Mehrere velocity-Werte in einem Test: Tracker zwischen Calls
+    resetten, damit Sliding-Window nicht alte Samples mit neuen
+    mischt (sonst FP-Mittelwert verfaelscht Result)."""
     printer, feeder = make_c_cont_feeder(
         monkeypatch, cfg_overrides={'feed_speed': 70.0})
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
-    assert feeder._compute_target_feed_speed() == 30.0
-    # Selbst bei feed_speed=100 waere Output 30
+    # vel=10: 10*1.5=15, == MIN_FLOOR -> 15
+    _populate_tracker_to_ready(feeder, velocity=10.0)
+    assert feeder._compute_target_feed_speed() == pytest.approx(15.0, abs=0.1)
+    # vel=20: 20*1.5=30
+    feeder.velocity_tracker.reset()
+    _populate_tracker_to_ready(feeder, velocity=20.0)
+    assert feeder._compute_target_feed_speed() == pytest.approx(30.0, abs=0.1)
+    # vel=40: 40*1.5=60
+    feeder.velocity_tracker.reset()
+    _populate_tracker_to_ready(feeder, velocity=40.0)
+    assert feeder._compute_target_feed_speed() == pytest.approx(60.0, abs=0.1)
+    # Selbst bei feed_speed=100 cap auf feed_speed
     feeder.feed_speed = 100.0
-    assert feeder._compute_target_feed_speed() == 30.0
+    feeder.velocity_tracker.reset()
+    _populate_tracker_to_ready(feeder, velocity=80.0)
+    # 80*1.5=120 -> capped auf feed_speed=100
+    assert feeder._compute_target_feed_speed() == pytest.approx(100.0, abs=0.1)
 
 
 def test_c_cont_hotfix6_interrupt_chunk_default_5(monkeypatch):
