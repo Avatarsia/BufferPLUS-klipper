@@ -2746,19 +2746,26 @@ class BufferFeeder:
             pass
 
     def _compute_target_feed_speed(self):
-        """C-cont T4 + Hotfix3: SpeedModulator mit weichem Floor.
+        """C-cont T4 + Hotfix3 + Hotfix4: SpeedModulator.
 
-        Hotfix2 hatte hartes Floor=feed_speed (=30) — verursacht das der
-        Buffer-Arm durch HALL2 in HALL1 ueberschoss (Hardware 2026-05-13
-        klippy(9), 30/30 Cycles HALL1-Overshoot-Storm). Hotfix3: weicher
-        10%-Vorlauf statt Konstante, plus weiches Mindest 15 mm/s gegen
-        Pipeline-Backpressure-Crash.
+        Hotfix4-Update: Fallback-Branches (tracker not_ready, extruder
+        stalled) duerfen NICHT in nicht-leeren Buffer foerdern. Sonst
+        Overshoot bei Boot wenn Arm bereits in HALL2/H1 steht
+        (Hardware-Test 2026-05-13 klippy(11).log: Boot-Status
+        hall_full=True+hall_overflow=True -> erster AUTO-Resume
+        submittete 70 mm/s in vollen Buffer -> cycle crash).
+
+        Fallback-Regel: bei extruder_vel <= 0 oder tracker not_ready
+        foerdern wir NUR wenn HALL3 active (Buffer wirklich leer).
+        Sonst target=0 (Stillstand bis Tracker echte Toolhead-Velocity
+        sieht).
 
         Logik:
           HALL1 (overflow)        -> 0.0 (Notbremse)
           HALL3 (empty)           -> max_feed_speed (auffuellen)
-          tracker not_ready       -> feed_speed (Fallback)
-          tracker vel == 0        -> feed_speed (Fallback fuer Pause)
+          tracker not_ready       -> 0.0 (Boot: warten auf Tracker)
+          tracker vel == 0        -> 0.0 (Toolhead stalled, nicht
+                                          foerdern in vollen Buffer)
           HALL2 (full)            -> max(MIN_FLOOR, 0.5 * extruder_vel)
                                      (langsam, aber kein Stillstand)
           Zwischenzone            -> max(MIN_FLOOR, extruder_vel * 1.10)
@@ -2767,16 +2774,14 @@ class BufferFeeder:
         if self.hall_overflow:
             return 0.0
         if self.hall_empty:
-            return self.max_feed_speed
+            return self.max_feed_speed  # Buffer wirklich leer
+        # Buffer in Zwischenzone oder HALL2 — foerdere nur bei echtem
+        # Extruder-Verbrauch (Tracker liefert > 0)
         if not self.velocity_tracker.is_ready():
-            return self.feed_speed
+            return 0.0  # Boot: kein Submit, warten auf Tracker
         extruder_vel = self.velocity_tracker.get_velocity()
-        # C-cont Hotfix: extruder_vel kann 0.0 sein wenn Toolhead
-        # gerade pausiert (kein move command). Fallback auf
-        # config feed_speed verhindert 0-Output das den Buffer-
-        # Stepper zum Erliegen bringt.
         if extruder_vel <= 0.0:
-            return self.feed_speed
+            return 0.0  # Toolhead stalled — nicht foerdern
         MIN_FLOOR = 15.0  # mm/s — Pipeline-Backpressure-Mindest
         if self.hall_full:
             return max(MIN_FLOOR, 0.5 * extruder_vel)

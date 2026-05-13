@@ -190,19 +190,23 @@ def test_c_cont_modulator_zwischenzone_balance(monkeypatch):
 
 
 def test_c_cont_modulator_tracker_not_ready_fallback(monkeypatch):
-    """Tracker not_ready -> fallback config feed_speed."""
+    """Tracker not_ready -> Hotfix4: target=0 in nicht-leerem Buffer
+    (kein Submit, warten auf echte Velocity)."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     set_sensor_active(feeder, 'hall_empty', False)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
     assert not feeder.velocity_tracker.is_ready()
-    assert feeder._compute_target_feed_speed() == feeder.feed_speed
+    assert feeder._compute_target_feed_speed() == 0.0
 
 
 def test_c_cont_modulator_extruder_vel_zero_fallback(monkeypatch):
-    """Toolhead pausiert (extruder_vel=0) trotz tracker ready ->
-    Fallback auf feed_speed (verhindert 0-Speed-Stuck).
-    Hotfix nach Hardware-Log-Befund 2026-05-13."""
+    """Toolhead pausiert (extruder_vel=0) in Zwischenzone -> Hotfix4:
+    target=0 (nicht in nicht-leeren Buffer foerdern).
+
+    Hardware-Test 2026-05-13 klippy(11).log: Hotfix3-Fallback
+    (vel<=0 -> feed_speed=70) overshoot HALL1 -> stepcompress c=9 crash.
+    Hotfix4: nur HALL3-Branch darf bei stalled-Toolhead foerdern."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     set_sensor_active(feeder, 'hall_empty', False)
     set_sensor_active(feeder, 'hall_full', False)
@@ -216,8 +220,74 @@ def test_c_cont_modulator_extruder_vel_zero_fallback(monkeypatch):
         t += 0.025
     assert feeder.velocity_tracker.is_ready()
     assert feeder.velocity_tracker.get_velocity() == 0.0
-    # Modulator: Zwischenzone + vel=0 -> Fallback feed_speed
-    assert feeder._compute_target_feed_speed() == feeder.feed_speed
+    # Hotfix4: Zwischenzone + vel=0 -> 0.0
+    assert feeder._compute_target_feed_speed() == 0.0
+
+
+# ---------------------------------------------------------------------------
+# C-cont Hotfix4 (2026-05-13 klippy(11)): no submit into full buffer
+# when toolhead stalled (Boot-Status Arm in HALL1+HALL2)
+# ---------------------------------------------------------------------------
+
+
+def test_c_cont_hotfix4_stalled_toolhead_no_submit_in_full_buffer(monkeypatch):
+    """Hotfix4: Boot mit HALL2 active + Toolhead stalled -> target=0,
+    kein Submit in vollen Buffer."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', True)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    # Tracker ready aber konstante Position (Toolhead stalled)
+    fake_ext = feeder.printer.objects['extruder']
+    t = 0.0
+    for _ in range(12):
+        fake_ext.last_position = 100.0  # konstant
+        feeder.velocity_tracker.tick(t)
+        t += 0.025
+    assert feeder.velocity_tracker.is_ready()
+    assert feeder.velocity_tracker.get_velocity() == 0.0
+    # Modulator: HALL2 + stalled -> 0.0 (Hotfix4)
+    assert feeder._compute_target_feed_speed() == 0.0
+
+
+def test_c_cont_hotfix4_stalled_but_hall_empty_still_fills(monkeypatch):
+    """Hotfix4: HALL3 active + Toolhead stalled -> foerdere TROTZDEM
+    (Buffer wirklich leer, nicht vollfuellen-Problem)."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', True)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    fake_ext = feeder.printer.objects['extruder']
+    t = 0.0
+    for _ in range(12):
+        fake_ext.last_position = 100.0
+        feeder.velocity_tracker.tick(t)
+        t += 0.025
+    assert feeder.velocity_tracker.get_velocity() == 0.0
+    # HALL3 dominiert -> max_feed_speed (vor not_ready/stalled-Checks)
+    assert feeder._compute_target_feed_speed() == feeder.max_feed_speed
+
+
+def test_c_cont_hotfix4_not_ready_no_submit_in_full(monkeypatch):
+    """Hotfix4: tracker not_ready + HALL2 active -> target=0."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', True)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    # Tracker not_ready (Boot)
+    assert not feeder.velocity_tracker.is_ready()
+    assert feeder._compute_target_feed_speed() == 0.0
+
+
+def test_c_cont_hotfix4_not_ready_but_hall_empty_uses_fallback(monkeypatch):
+    """Hotfix4: tracker not_ready + HALL3 -> max_feed_speed (fuer
+    Buffer-Initial-Fill)."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', True)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    assert not feeder.velocity_tracker.is_ready()
+    assert feeder._compute_target_feed_speed() == feeder.max_feed_speed
 
 
 # ---------------------------------------------------------------------------

@@ -196,13 +196,28 @@ def test_main_tick_pending_chunk_runs_in_auto_with_flush_callback(monkeypatch):
     is 50mm, _pending_remaining_mm should never accumulate). But if
     a state-leak ever set both _pending_remaining_mm>0 and AUTO,
     pending-chunk would still submit — pin that contract so a future
-    refactor doesn't accidentally gate it too."""
-    _, feeder = make_feeder(values={'use_flush_callback_bang_bang': True})
+    refactor doesn't accidentally gate it too.
+
+    C-cont Hotfix4: AUTO+forward sub-chunk path now uses Speed-
+    Modulator; mit not-ready Tracker + Zwischenzone wuerde target=0
+    den Stream abbrechen. Wir populieren den Tracker, damit das
+    P7-59 Contract (pending-chunk submit unabhaengig von continuous-
+    feed-gating) weiter geprueft werden kann."""
+    printer, feeder = make_feeder(values={'use_flush_callback_bang_bang': True})
     feeder._state = buffer_feeder.STATE_AUTO
     feeder._continuous_feed = False
     feeder._pending_remaining_mm = 30.0
     feeder._pending_direction = 1
     feeder._pending_speed = 25.0
+
+    # Hotfix4: Tracker ready mit echter Velocity, sonst Sub-Chunk-Pfad
+    # abortiert wegen target_speed=0.
+    fake_ext = printer.objects['extruder']
+    t = 0.0
+    for _ in range(12):
+        fake_ext.last_position = t * 20.0  # 20 mm/s
+        feeder.velocity_tracker.tick(t)
+        t += 0.025
 
     submit_calls = []
     monkeypatch.setattr(feeder, "_submit_single_trapezoid",

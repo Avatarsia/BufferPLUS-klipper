@@ -566,7 +566,12 @@ def test_pending_sub_chunks_continue_until_hall_full():
     """Positive case: solange HALL2 inaktiv ist, streamen die sub-
     chunks munter weiter. _tick_pending_chunk submittet jeweils
     einen weiteren 9-mm-Sub-Chunk wenn der gerade laufende kurz
-    vor Ende ist."""
+    vor Ende ist.
+
+    C-cont Hotfix4: AUTO+forward Sub-Chunk-Pfad uses SpeedModulator;
+    mit not-ready Tracker + Zwischenzone wuerde target=0 abbrechen.
+    Wir populieren den Tracker mit echter Velocity, damit der
+    Sub-Chunk-Stream wie beabsichtigt weiterlaeuft."""
     printer, feeder = make_feeder(values={
         'flush_callback_chunk_mm': 45.0,
         'interrupt_chunk_mm': 9.0,
@@ -575,6 +580,14 @@ def test_pending_sub_chunks_continue_until_hall_full():
     motion_q = printer.lookup_object('motion_queuing')
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
+
+    # Hotfix4: Tracker ready mit Velocity, sonst target=0 → abort.
+    fake_ext = printer.objects['extruder']
+    t = 0.0
+    for _ in range(12):
+        fake_ext.last_position = t * 50.0  # 50 mm/s
+        feeder.velocity_tracker.tick(t)
+        t += 0.025
 
     feeder._pending_remaining_mm = 36.0
     feeder._pending_direction = 1.0
