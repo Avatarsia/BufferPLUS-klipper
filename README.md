@@ -679,6 +679,71 @@ HALL1-Overflow hat absolute Priorität über allem.
 
 ---
 
+## Betriebsregeln + Diagnose
+
+Für den Druckbetrieb gelten vier einfache Regeln:
+
+1. **AUTO-Streaming hat genau einen Submitter.**
+   Bei `STATE_AUTO` + `use_flush_callback_bang_bang=1` darf nur
+   `_on_mcu_flush()` neue Feed-Chunks erzeugen. Andere Handler
+   beobachten, sperren oder räumen auf, aber submitten nicht parallel.
+
+2. **Explizite LOAD/UNLOAD-Pfade bleiben getrennt vom Print-AUTO.**
+   `BUFFER_SYNC_TO_EXTRUDER` / `BUFFER_UNSYNC` sind Sonderpfade für
+   explizite Workflows. Sie gehören nicht in die normale
+   Druck-Nachförderung.
+
+3. **Stop-/Recovery-Pfade räumen konservativ auf.**
+   Nach `OVERFLOW`, `JAM`, `PAUSE`, `RESUME` oder HALL-Bounce ist ein
+   konservativer Wiederanlauf wichtiger als ein aggressives „Weiter
+   irgendwie“. Cursor-, Pending- und Latch-Zustände müssen sauber
+   zurückgesetzt werden.
+
+4. **Diagnose-Logs müssen abschaltbar sein.**
+   Produktionsbetrieb soll nicht mit Forensik-Logs zugespammt werden.
+   Fehlersuche braucht aber reproduzierbare Logspuren.
+
+### Log-Schalter
+
+Es gibt zwei getrennte Diagnose-Schalter:
+
+- `buffer_debug_events`
+  Zweck: verständliche Ereignis-Logs für Handler-Entscheidungen
+  (`_on_mcu_flush` skip/defer/submit, Recovery-Trigger, etc.).
+  Standard: `False`
+- `buffer_debug_metrics`
+  Zweck: per-second Metrik-/Zustandslogs für Hardware-Tuning.
+  Standard: projektspezifisch; für normalen Betrieb typischerweise `False`
+
+Beide Schalter können zur Laufzeit über `BUFFER_SET` geändert werden:
+
+```gcode
+BUFFER_SET DEBUG_EVENTS=1
+BUFFER_SET DEBUG_METRICS=1
+BUFFER_SET DEBUG_EVENTS=0 DEBUG_METRICS=0
+```
+
+Ohne Argumente zeigt `BUFFER_SET` den aktuellen Stand an.
+
+### Empfohlener Fehlersuche-Ablauf
+
+1. Reproduktionsversuch mit normalen Einstellungen.
+2. Für die Fehlersuche nur temporär aktivieren:
+   `BUFFER_SET DEBUG_EVENTS=1`
+3. Für Tuning-/Timing-Fragen zusätzlich:
+   `BUFFER_SET DEBUG_METRICS=1`
+4. Nach dem Test wieder abschalten:
+   `BUFFER_SET DEBUG_EVENTS=0 DEBUG_METRICS=0`
+5. `BUFFER_STATE_DUMP` sichern, wenn ein Lauf unerwartet endet.
+
+Faustregel:
+- `DEBUG_EVENTS` hilft bei „Warum hat der Handler nichts oder etwas
+  Unerwartetes getan?“
+- `DEBUG_METRICS` hilft bei „Welche Sensor-/Timing-/Geschwindigkeits-
+  Lage lag währenddessen vor?“
+
+---
+
 ## Firmware flashen
 
 Der Abschnitt ist unverändert vom alten README. Siehe die originale

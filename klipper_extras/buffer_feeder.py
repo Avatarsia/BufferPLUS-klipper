@@ -25,6 +25,7 @@
 # full design rationale and feature mapping.
 
 import collections
+import inspect
 import logging
 import math
 
@@ -71,6 +72,7 @@ class BufferFeeder:
         self.settings.apply(self)
         self.runtime_state = BufferRuntimeState()
         self.runtime_state.apply(self)
+        self._debug_event_last = {}
 
         # ----- Stepper + trapq -----
         self.sync = SyncCoordinator(self)
@@ -129,6 +131,56 @@ class BufferFeeder:
     def use_fault_overlay(self, value):
         self.use_overflow_overlay = bool(value)
 
+    def _supports_flush_callback_can_add_trapq(self, register_flush):
+        """Best-effort feature-detection for newer motion_queuing
+        callback signatures.
+
+        Returns:
+          True  -> signature explicitly supports can_add_trapq or **kwargs
+          False -> signature is introspectable and does not support it
+          None  -> signature is not introspectable; caller may probe by call
+        """
+        try:
+            signature = inspect.signature(register_flush)
+        except (TypeError, ValueError):
+            return None
+        if any(param.kind == inspect.Parameter.VAR_KEYWORD
+               for param in signature.parameters.values()):
+            return True
+        return 'can_add_trapq' in signature.parameters
+
+    def _is_missing_can_add_trapq_typeerror(self, exc):
+        """True only for signature-mismatch TypeErrors caused by
+        can_add_trapq on older motion_queuing implementations."""
+        message = str(exc)
+        return (
+            ("can_add_trapq" in message and "keyword" in message)
+            or "takes no keyword arguments" in message
+        )
+
+    def _debug_event(self, key, message, *args, level=logging.INFO,
+                     min_interval=1.0):
+        """Rate-limited handler/event tracing controlled by
+        buffer_debug_events.
+
+        Intended for incident diagnostics. Emits concise, readable
+        breadcrumbs without changing motion logic and can be fully
+        disabled in normal operation.
+        """
+        if not self.buffer_debug_events:
+            return
+        now = None
+        try:
+            now = self.reactor.monotonic()
+        except Exception:
+            now = None
+        if min_interval and now is not None:
+            last = self._debug_event_last.get(key)
+            if last is not None and (now - last) < min_interval:
+                return
+            self._debug_event_last[key] = now
+        logging.log(level, "buffer_event[%s]: " + message, key, *args)
+
     def _register_flush_callback_if_supported(self, config):
         register_flush = getattr(
             self.motion_queuing, 'register_flush_callback', None)
@@ -142,9 +194,23 @@ class BufferFeeder:
                 "buffer_feeder: motion_queuing has no register_flush_callback; "
                 "flush-driven bang-bang unavailable, legacy reactor-tick path stays active")
             return
+        supports_can_add_trapq = self._supports_flush_callback_can_add_trapq(
+            register_flush)
+        if supports_can_add_trapq is False:
+            if self.use_flush_callback_bang_bang:
+                raise config.error(
+                    "use_flush_callback_bang_bang requires "
+                    "register_flush_callback(..., can_add_trapq=True). "
+                    "Update to a recent mainline Klipper build.")
+            logging.info(
+                "buffer_feeder: register_flush_callback lacks can_add_trapq support; "
+                "flush-driven bang-bang unavailable, legacy reactor-tick path stays active")
+            return
         try:
             register_flush(self._on_mcu_flush, can_add_trapq=True)
-        except TypeError:
+        except TypeError as exc:
+            if not self._is_missing_can_add_trapq_typeerror(exc):
+                raise
             if self.use_flush_callback_bang_bang:
                 raise config.error(
                     "use_flush_callback_bang_bang requires "
@@ -1536,23 +1602,56 @@ class BufferFeeder:
         # steps somewhere, not whether we decided to act on this tick.
         self._last_mcu_flush_time = flush_time
         if not self.use_flush_callback_bang_bang:
+            self._debug_event(
+                'flush_skip_disabled',
+                "skip use_flush_callback_bang_bang=0 flush=%.3f step_gen=%.3f",
+                flush_time, step_gen_time, min_interval=5.0)
             return
         if self._bang_bang_suspended:
+            self._debug_event(
+                'flush_skip_suspended',
+                "skip bang_bang_suspended=1 flush=%.3f step_gen=%.3f",
+                flush_time, step_gen_time, min_interval=5.0)
             return
         if self._state != STATE_AUTO:
             # Macros and operator commands own non-AUTO states.
+            self._debug_event(
+                'flush_skip_state',
+                "skip state=%s flush=%.3f step_gen=%.3f",
+                self._state, flush_time, step_gen_time, min_interval=5.0)
             return
         if self._flush_should_defer_pending_itersolve(step_gen_time):
+            self._debug_event(
+                'flush_defer_itersolve',
+                "defer step_gen=%.3f current_end=%.3f primed=%s",
+                step_gen_time,
+                (self._current_move['end_time']
+                 if self._current_move is not None
+                 else self._last_move_end_time),
+                self._stepcompress_primed,
+                min_interval=1.0)
             return
         if self._needs_overflow_prime:
+            self._debug_event(
+                'flush_overflow_prime',
+                "prime via flush step_gen=%.3f lead=%.3f",
+                step_gen_time, self.lead_time, min_interval=0.0)
             self._handle_overflow_prime_via_flush(step_gen_time)
             return
         if self._stepper_synced_to is not None:
             # Explicit BUFFER_SYNC_TO_EXTRUDER macro path — would queue
             # trapezoids on the wrong trapq.
+            self._debug_event(
+                'flush_skip_synced',
+                "skip synced_to_extruder=%s",
+                self._stepper_synced_to, min_interval=5.0)
             return
         if self._is_hall1_active(Hall1Context.SUBMIT_MOVE):
             # Hard-safety: never feed forward into an overfilled buffer.
+            self._debug_event(
+                'flush_skip_hall1',
+                "skip hall1_active=1 state=%s",
+                self._state, min_interval=1.0)
             return
         self._flush_submit_streaming_chunk(step_gen_time)
 
@@ -1607,6 +1706,11 @@ class BufferFeeder:
         """
         target_speed = self._compute_target_feed_speed()
         if target_speed <= 0.0:
+            self._debug_event(
+                'flush_no_demand',
+                "no submit target_speed=0 hall1=%s hall2=%s hall3=%s ready=%s",
+                self.hall_overflow, self.hall_full, self.hall_empty,
+                self.velocity_tracker.is_ready(), min_interval=2.0)
             if self.buffer_debug_metrics:
                 logging.debug(
                     "buffer_feeder: target_speed=0 - no submit "
@@ -1619,8 +1723,16 @@ class BufferFeeder:
         if move_active:
             remaining = self._last_move_end_time - step_gen_time
             if remaining > self.lead_time:
+                self._debug_event(
+                    'flush_skip_inflight',
+                    "skip in-flight remaining=%.3f lead=%.3f",
+                    remaining, self.lead_time, min_interval=1.0)
                 return  # too early, no new chunk yet
         if self._pending_remaining_mm > 0:
+            self._debug_event(
+                'flush_skip_pending',
+                "skip pending_remaining_mm=%.3f",
+                self._pending_remaining_mm, min_interval=1.0)
             return  # sub-chunk pipeline already running
 
         if move_active:
@@ -1635,6 +1747,11 @@ class BufferFeeder:
             self._continuous_feed = True
             self._continuous_feed_direction = 1
         self._continuous_feed_speed = target_speed
+        self._debug_event(
+            'flush_submit',
+            "submit speed=%.3f anchor=%.3f move_active=%s chunk=%.3f",
+            target_speed, anchor, move_active, self.interrupt_chunk_mm,
+            min_interval=1.0)
 
         # Pipeline-Cap: one sub-chunk in-flight at a time so a HALL1/
         # HALL2 transition can stop the pipeline at the next flush
@@ -3154,6 +3271,8 @@ class BufferFeeder:
             "runout_recov_pending= %s (RESUME will grip+fill if armed)" % self._runout_recovery_pending,
             "macro_state_saved  = %s (buffer_feeder_op slot consumable)" % self._macro_state_saved,
             "synced_to_extruder = %s" % self._stepper_synced_to,
+            "debug_flags        = events=%s metrics=%s" % (
+                self.buffer_debug_events, self.buffer_debug_metrics),
             "measure_load       = active=%s feeding=%s dist=%.1f mm" % (
                 self._measure_load_active, self._measure_feeding,
                 self._measure_load_distance),
@@ -3177,6 +3296,8 @@ class BufferFeeder:
         "  INTERRUPT_CHUNK_MM    interrupt_chunk_mm      (mm,  default 9, cap <= MAX_MOVE_CHUNK_MM)\n"
         "  LEAD_TIME             lead_time               (s,   default 0.3, lll.cfg 0.12; warn outside 0.05..1.0)\n"
         "  MAX_MOVE_CHUNK_MM     max_move_chunk_mm       (mm,  default 50)\n"
+        "  DEBUG_EVENTS          buffer_debug_events     (0/1, handler trace logs)\n"
+        "  DEBUG_METRICS         buffer_debug_metrics    (0/1, per-second metrics)\n"
         "Without args: prints current values. No persistence — copy "
         "the final value into lll.cfg manually."
     )
@@ -3187,6 +3308,8 @@ class BufferFeeder:
         new_interrupt  = gcmd.get_float('INTERRUPT_CHUNK_MM', None, above=0.)
         new_lead       = gcmd.get_float('LEAD_TIME',          None, above=0.)
         new_max_move   = gcmd.get_float('MAX_MOVE_CHUNK_MM',  None, above=0.)
+        new_debug_events = gcmd.get_int('DEBUG_EVENTS',       None, minval=0, maxval=1)
+        new_debug_metrics = gcmd.get_int('DEBUG_METRICS',     None, minval=0, maxval=1)
 
         gc = self.printer.lookup_object('gcode')
         changed = False
@@ -3255,6 +3378,20 @@ class BufferFeeder:
                     % new_lead)
             changed = True
 
+        if new_debug_events is not None:
+            old = self.buffer_debug_events
+            self.buffer_debug_events = bool(new_debug_events)
+            gc.respond_info("BUFFER_SET: buffer_debug_events  %s -> %s"
+                            % (old, self.buffer_debug_events))
+            changed = True
+
+        if new_debug_metrics is not None:
+            old = self.buffer_debug_metrics
+            self.buffer_debug_metrics = bool(new_debug_metrics)
+            gc.respond_info("BUFFER_SET: buffer_debug_metrics %s -> %s"
+                            % (old, self.buffer_debug_metrics))
+            changed = True
+
         if not changed:
             # No-op: dump current values so the operator can read the
             # live picture without a separate command.
@@ -3269,6 +3406,10 @@ class BufferFeeder:
                             % self.lead_time)
             gc.respond_info("  max_move_chunk_mm       = %.3f mm"
                             % self.max_move_chunk_mm)
+            gc.respond_info("  buffer_debug_events     = %s"
+                            % self.buffer_debug_events)
+            gc.respond_info("  buffer_debug_metrics    = %s"
+                            % self.buffer_debug_metrics)
 
     cmd_CALIBRATE_FEEDER_SYNC_help = ("No-op under python-ansatz — feeder is not synced "
                                       "to extruder. Use MEASURE_LOAD_START for distance calibration.")
@@ -3451,6 +3592,8 @@ class BufferFeeder:
             'max_move_chunk_mm':        self.max_move_chunk_mm,
             'flush_callback_chunk_mm':  self.flush_callback_chunk_mm,
             'interrupt_chunk_mm':       self.interrupt_chunk_mm,
+            'buffer_debug_events':      self.buffer_debug_events,
+            'buffer_debug_metrics':     self.buffer_debug_metrics,
         }
 
 

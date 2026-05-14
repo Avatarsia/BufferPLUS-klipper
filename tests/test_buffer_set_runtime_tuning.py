@@ -10,6 +10,8 @@ Covered parameters:
 - INTERRUPT_CHUNK_MM  -> interrupt_chunk_mm (capped <= max_move_chunk_mm)
 - LEAD_TIME           -> lead_time (warn outside 0.05..1.0)
 - MAX_MOVE_CHUNK_MM   -> max_move_chunk_mm
+- DEBUG_EVENTS        -> buffer_debug_events
+- DEBUG_METRICS       -> buffer_debug_metrics
 
 Also: default-mux registration so BUFFER_SET works without BUFFER=mellow
 on single-instance setups (NOT-TO-DO 2026-04-26: register_mux_command with
@@ -180,6 +182,24 @@ def test_buffer_set_multiple_params_at_once():
     assert feeder.lead_time == 0.15
 
 
+def test_buffer_set_debug_flags_toggle():
+    printer, feeder = make_feeder()
+    assert feeder.buffer_debug_events is False
+    assert feeder.buffer_debug_metrics is False
+
+    feeder.cmd_BUFFER_SET(FakeGCmd({
+        "DEBUG_EVENTS": 1,
+        "DEBUG_METRICS": 1,
+    }))
+
+    assert feeder.buffer_debug_events is True
+    assert feeder.buffer_debug_metrics is True
+    gcode = printer.lookup_object('gcode')
+    joined = "\n".join(gcode.info_messages)
+    assert 'buffer_debug_events' in joined
+    assert 'buffer_debug_metrics' in joined
+
+
 # ---------------------------------------------------------------------------
 # No-op without args: emit current values
 # ---------------------------------------------------------------------------
@@ -195,6 +215,8 @@ def test_buffer_set_no_args_dumps_current_values():
     assert 'interrupt_chunk_mm' in joined
     assert 'lead_time' in joined
     assert 'max_move_chunk_mm' in joined
+    assert 'buffer_debug_events' in joined
+    assert 'buffer_debug_metrics' in joined
 
 
 def test_buffer_set_no_args_does_not_change_state():
@@ -252,7 +274,8 @@ def test_buffer_set_default_mux_registered_when_single_instance():
 def test_buffer_set_help_text_lists_all_params():
     help_text = buffer_feeder.BufferFeeder.cmd_BUFFER_SET_help
     for token in ('CHUNK_MM', 'SPEED', 'INTERRUPT_CHUNK_MM',
-                  'LEAD_TIME', 'MAX_MOVE_CHUNK_MM'):
+                  'LEAD_TIME', 'MAX_MOVE_CHUNK_MM',
+                  'DEBUG_EVENTS', 'DEBUG_METRICS'):
         assert token in help_text, "help missing %s" % token
 
 

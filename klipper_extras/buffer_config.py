@@ -31,6 +31,7 @@ class BufferConfigValues:
     interrupt_chunk_mm: float
     max_feed_speed: float
     hall1_persist_timeout: float
+    buffer_debug_events: bool
     buffer_debug_metrics: bool
     min_feed_floor: float
     feed_speed_gain: float
@@ -109,6 +110,8 @@ class BufferConfigValues:
             max_feed_speed=max_feed_speed,
             hall1_persist_timeout=config.getfloat(
                 'hall1_persist_timeout', 2.0, above=0.),
+            buffer_debug_events=config.getboolean(
+                'buffer_debug_events', False),
             buffer_debug_metrics=config.getboolean(
                 'buffer_debug_metrics', False),
             min_feed_floor=config.getfloat('min_feed_floor', 15.0, above=0.),

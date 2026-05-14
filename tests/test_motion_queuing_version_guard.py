@@ -46,6 +46,20 @@ class MotionQueuingMissingAppendLookup:
         return None
 
 
+class MotionQueuingBrokenFlushRegistration(FakeMotionQueuing):
+    def register_flush_callback(self, callback, can_add_trapq=False):
+        del callback, can_add_trapq
+        raise TypeError("boom during flush callback registration")
+
+
+class BrokenMotionQueuingLoadPrinter(FakePrinter):
+    def load_object(self, config, name):
+        del config
+        if name == "motion_queuing":
+            raise RuntimeError("motion_queuing init exploded")
+        return super().load_object(None, name)
+
+
 def test_missing_motion_queuing_raises_clear_error():
     printer = FakePrinter()
     printer.objects.pop("motion_queuing")
@@ -95,4 +109,21 @@ def test_flush_callback_mode_requires_can_add_trapq_support():
     )
 
     with pytest.raises(RuntimeError, match="can_add_trapq=True"):
+        buffer_feeder.BufferFeeder(config)
+
+
+def test_unexpected_register_flush_callback_typeerror_bubbles():
+    printer = FakePrinter()
+    printer.objects["motion_queuing"] = MotionQueuingBrokenFlushRegistration()
+    config = FakeConfig(printer=printer)
+
+    with pytest.raises(TypeError, match="boom during flush callback registration"):
+        buffer_feeder.BufferFeeder(config)
+
+
+def test_non_missing_motion_queuing_load_error_bubbles():
+    printer = BrokenMotionQueuingLoadPrinter()
+    config = FakeConfig(printer=printer)
+
+    with pytest.raises(RuntimeError, match="motion_queuing init exploded"):
         buffer_feeder.BufferFeeder(config)

@@ -22,11 +22,11 @@ class SyncCoordinator:
     def setup_trapq(self, config):
         try:
             self.motion_queuing = self.printer.load_object(config, 'motion_queuing')
-        except Exception:
+        except (KeyError, AttributeError) as exc:
             raise config.error(
                 "buffer_feeder requires Klipper's motion_queuing module. "
                 "Install a recent mainline Klipper build that provides "
-                "'motion_queuing' before loading [buffer_feeder].")
+                "'motion_queuing' before loading [buffer_feeder].") from exc
         required = (
             'allocate_trapq',
             'lookup_trapq_append',
