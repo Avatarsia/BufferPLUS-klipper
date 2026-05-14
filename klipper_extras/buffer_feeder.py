@@ -36,8 +36,8 @@ from ._buffer_common import (
     ANCHOR_NUDGE_MM, BUSY_PHASE_STATES, BUTTON_FEED, BUTTON_RETRACT,
     CLICK_DOUBLE, CLICK_SINGLE, CLICK_TRIPLE,
     CONTINUOUS_FEED_STATES, JAM_TICK_INTERVAL, JAM_WATCH_STATES,
-    MAIN_TICK_INTERVAL, MAX_T0_LOOKAHEAD_S, REPRIME_GAP_S,
-    STABLE_DROP_GRACE,
+    MAIN_TICK_INTERVAL, MAX_T0_LOOKAHEAD_S, MIN_CURSOR_FRESHNESS_S,
+    REPRIME_GAP_S, STABLE_DROP_GRACE,
     STATE_AUTO, STATE_IDLE, STATE_INIT, STATE_INITIAL_GRIP,
     STATE_JAM, STATE_LOADING_PULL, STATE_LOADING_PUSH,
     STATE_MANUAL_FEED, STATE_MANUAL_RETRACT, STATE_OVERFLOW,
@@ -1790,6 +1790,43 @@ class BufferFeeder:
                 "skip pending_remaining_mm=%.3f",
                 self._pending_remaining_mm, min_interval=1.0)
             return  # sub-chunk pipeline already running
+
+        # Cursor-Freshness-Contract (Hardware-Beleg 2026-05-14
+        # klippy_refactor_*_repro.log): wenn kein move in flight UND
+        # _last_move_end_time aelter als MIN_CURSOR_FRESHNESS_S, dann
+        # ist die MCU-side last_step_clock potenziell ueber USB-Sende-
+        # Latenz + MCU-busy in "Step in der Vergangenheit"-Race
+        # anfaellig (queue_step interval = mcu_now + lead_time -
+        # last_step_clock). Watchdog-Anchor alle 10s ist best-effort,
+        # schliesst aber das Race-Window nicht; PR #39 Watchdog-Fix
+        # haelt Cursor im IDLE frisch, aber das Race-Window zwischen
+        # Watchdog-Anchor und erstem streaming-Submit nach PRINT_START
+        # bleibt.
+        #
+        # Fix: pre-anchor (0.05mm @ feed_speed) als garantierter
+        # Cursor-Refresh vor dem streaming-Submit, wenn cursor zu alt.
+        # forced_t0 wird intern (siehe _plan_t0_anchor) auf
+        # mcu_now + lead_time geclampt — anchor landet sicher in
+        # naher Zukunft, last_step_clock danach <= lead_time alt.
+        # Effekt: queue_step interval fuer den danach folgenden
+        # streaming-Submit << 1s, race-frei unter jeder USB-Latenz.
+        #
+        # Komplementaer zu PR #39 (Watchdog-Hall-Empty-Bypass) und
+        # 97e97e7 (sanitize stale-future-floors). Defense-in-depth.
+        if not move_active:
+            mcu_now = self.stepper.get_mcu().estimated_print_time(
+                self.reactor.monotonic())
+            cursor_age = mcu_now - self._last_move_end_time
+            if cursor_age > MIN_CURSOR_FRESHNESS_S:
+                self._debug_event(
+                    'flush_freshness_anchor',
+                    "pre-anchor cursor_age=%.2fs > %.2fs threshold",
+                    cursor_age, MIN_CURSOR_FRESHNESS_S, min_interval=2.0)
+                anchor_dir = -1.0 if self.hall_overflow else 1.0
+                self._submit_move(
+                    anchor_dir * ANCHOR_NUDGE_MM,
+                    self.feed_speed,
+                    forced_t0=step_gen_time + self.lead_time)
 
         if move_active:
             anchor = self._last_move_end_time

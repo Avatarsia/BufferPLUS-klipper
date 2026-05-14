@@ -482,6 +482,12 @@ def test_interrupt_cap_splits_large_chunk():
     set_sensor_active(feeder, 'hall_empty', True)
 
     feeder.reactor.now = 5.0
+    # Cursor frisch setzen so dass Cursor-Freshness-Anchor nicht
+    # vor dem sub-chunk-Split-Test triggert (vgl. test_cursor_-
+    # freshness_before_submit.py; default lme=0 wuerde age=5s
+    # ergeben und einen pre-anchor erzwingen, was diesen Test
+    # auf splitting-spezifisches Verhalten verfaelscht).
+    feeder._last_move_end_time = 4.9
     appends_before = len(motion_q.append_calls)
     motion_q.trigger_flush(flush_time=5.0, step_gen_time=5.05)
 

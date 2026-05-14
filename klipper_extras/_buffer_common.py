@@ -70,6 +70,22 @@ REPRIME_GAP_S = 5.0
 # als stale verworfen.
 MAX_T0_LOOKAHEAD_S = 2.0
 
+# Maximales Alter von _last_move_end_time (Python-Proxy fuer MCU-side
+# last_step_clock), bevor ein streaming-Submit aus _on_mcu_flush einen
+# garantierten Cursor-Freshness-Anchor (0.05mm @ feed_speed) vorne
+# anstellt. Begruendung:
+#   - Streaming-Submit nach langer Idle-Phase produziert
+#     queue_step interval = (mcu_now + lead_time) - last_step_clock,
+#     was bei Watchdog-Anchor-Lueck (bis ~10s) mit USB-Sende-Latenz
+#     + MCU-busy in "Step in der Vergangenheit"-Race kippen kann
+#     (Hardware-Beleg 2026-05-14: Timer too close beim ersten
+#     streaming-Submit nach PRINT_START).
+#   - 1.0s ist klein genug, dass nach Anchor (5ms duration) der
+#     naechste Submit-Step << CLOCK_DIFF_MAX (~16.78s) bleibt;
+#     gross genug, dass die uebliche Submit-Kadenz keinen Pseudo-
+#     Anchor jedes Mal triggert.
+MIN_CURSOR_FRESHNESS_S = 1.0
+
 
 # ---------------------------------------------------------------------------
 # Click / button identifiers
