@@ -107,6 +107,8 @@ def test_c_cont_cfg_params_loaded(monkeypatch):
     printer, feeder = make_c_cont_feeder(monkeypatch)
     assert hasattr(feeder, 'max_feed_speed')
     assert feeder.max_feed_speed == 100.0
+    assert hasattr(feeder, 'high_flow_mm3s_threshold')
+    assert feeder.high_flow_mm3s_threshold == 24.0
     assert hasattr(feeder, 'hall1_persist_timeout')
     assert feeder.hall1_persist_timeout == 2.0
     assert hasattr(feeder, 'buffer_debug_metrics')
@@ -117,11 +119,13 @@ def test_c_cont_cfg_params_custom(monkeypatch):
     """Custom cfg-Params funktionieren."""
     overrides = {
         'max_feed_speed': 80.0,
+        'high_flow_mm3s_threshold': 30.0,
         'hall1_persist_timeout': 3.0,
         'buffer_debug_metrics': True,
     }
     printer, feeder = make_c_cont_feeder(monkeypatch, cfg_overrides=overrides)
     assert feeder.max_feed_speed == 80.0
+    assert feeder.high_flow_mm3s_threshold == 30.0
     assert feeder.hall1_persist_timeout == 3.0
     assert feeder.buffer_debug_metrics is True
 
@@ -190,6 +194,33 @@ def test_c_cont_modulator_zwischenzone_balance(monkeypatch):
     _populate_tracker_to_ready(feeder, velocity=20.0)
     # max(15, 1.10*20=22) -> 22
     assert feeder._compute_target_feed_speed() == pytest.approx(22.0, abs=1.0)
+
+
+def test_c_cont_modulator_zwischenzone_high_flow_carries_below_floor(monkeypatch):
+    """~24 mm^3/s sind bei 1.75 mm Filament nur ~10 mm/s linear.
+
+    Vor dem Fix fiel die Zwischenzone deshalb trotz echtem High-Flow-
+    Print auf 0.0 zurueck, weil 10 * 1.10 < min_feed_floor=15. Jetzt
+    bleibt der proportionale Carry-Pfad aktiv.
+    """
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    _populate_tracker_to_ready(feeder, velocity=10.0)
+    assert feeder.velocity_tracker.get_volumetric_flow() > feeder.high_flow_mm3s_threshold
+    assert feeder._compute_target_feed_speed() == pytest.approx(11.0, abs=0.5)
+
+
+def test_c_cont_modulator_zwischenzone_subthreshold_still_skips(monkeypatch):
+    """Unterhalb der High-Flow-Schwelle bleibt der alte Schutz aktiv."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    set_sensor_active(feeder, 'hall_empty', False)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    _populate_tracker_to_ready(feeder, velocity=9.0)
+    assert feeder.velocity_tracker.get_volumetric_flow() < feeder.high_flow_mm3s_threshold
+    assert feeder._compute_target_feed_speed() == 0.0
 
 
 def test_c_cont_modulator_tracker_not_ready_fallback(monkeypatch):

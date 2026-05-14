@@ -38,6 +38,7 @@ class BufferConfigValues:
     buffer_conservative_mode: bool
     min_feed_floor: float
     feed_speed_gain: float
+    high_flow_mm3s_threshold: float
     feed_hysteresis_stop_factor: float
     idle_anchor_gap: float
     jam_detection_enabled: bool
@@ -126,6 +127,8 @@ class BufferConfigValues:
             min_feed_floor=config.getfloat('min_feed_floor', 15.0, above=0.),
             feed_speed_gain=config.getfloat(
                 'feed_speed_gain', 1.10, minval=1.0),
+            high_flow_mm3s_threshold=config.getfloat(
+                'high_flow_mm3s_threshold', 24.0, minval=0.0),
             feed_hysteresis_stop_factor=config.getfloat(
                 'feed_hysteresis_stop_factor', 0.7, minval=0.1, maxval=1.0),
             idle_anchor_gap=config.getfloat('idle_anchor_gap', 10.0, above=0.),

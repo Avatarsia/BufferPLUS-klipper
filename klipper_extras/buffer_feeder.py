@@ -181,6 +181,21 @@ class BufferFeeder:
             self._debug_event_last[key] = now
         logging.log(level, "buffer_event[%s]: " + message, key, *args)
 
+    def _is_high_flow_active(self, flow_mm3_s):
+        """True once volumetric flow is high enough that the
+        Zwischenzone should keep proportionally feeding even when the
+        linear filament speed is below min_feed_floor.
+
+        Example: 24 mm^3/s with 1.75 mm filament is only about 10 mm/s
+        linear. The old min_feed_floor=15 gate suppressed that case
+        completely, which made the buffer wait for HALL3 bursts instead
+        of carrying continuously through the middle zone.
+        """
+        return (
+            self.high_flow_mm3s_threshold > 0.0
+            and flow_mm3_s >= self.high_flow_mm3s_threshold
+        )
+
     def _register_flush_callback_if_supported(self, config):
         register_flush = getattr(
             self.motion_queuing, 'register_flush_callback', None)
@@ -1405,8 +1420,8 @@ class BufferFeeder:
                         else "off")
                     logging.info(
                         "buffer_metrics: state=%s hall=[H3:%s H2:%s H1:%s] "
-                        "tracker_vel=%.1fmm/s flow=%.1fmm3/s ready=%s "
-                        "target_speed=%.1fmm/s "
+                        "tracker_vel=%.1fmm/s flow=%.1fmm3/s high_flow=%s "
+                        "ready=%s target_speed=%.1fmm/s "
                         "pending_remaining=%.1fmm hall1_persist=%s",
                         self._state,
                         'on' if self.hall_empty else 'off',
@@ -1414,6 +1429,7 @@ class BufferFeeder:
                         'on' if self.hall_overflow else 'off',
                         self.velocity_tracker.get_velocity(),
                         flow,
+                        self._is_high_flow_active(flow),
                         self.velocity_tracker.is_ready(),
                         target_speed,
                         self._pending_remaining_mm,
@@ -1703,6 +1719,14 @@ class BufferFeeder:
         streaming-submit beim Druckstart. Daher gilt HALL3 jetzt nur
         noch mit echter Extruderbewegung als Demand.
 
+        High-Flow-Korrektur (2026-05-15): 24 mm^3/s sind bei 1.75 mm
+        Filament nur rund 10 mm/s linear. Die alte Zwischenzonen-Grenze
+        `vel < min_feed_floor -> 0.0` kappte damit reale High-Flow-
+        Prints vollstaendig aus dem Carry-Pfad. Oberhalb der
+        volumetrischen Schwelle bleibt die Zwischenzone deshalb
+        proportional aktiv statt auf den naechsten HALL3-Fall zu
+        warten.
+
           HALL1 (overflow)  -> 0.0
           HALL2 (full)      -> 0.0
           HALL3 (empty):
@@ -1711,7 +1735,9 @@ class BufferFeeder:
             ext_vel >= floor                -> min(max(vel * 1.5, floor),
                                                    feed_speed)
           Zwischenzone:
-            tracker not_ready / vel < floor -> 0.0
+            tracker not_ready / vel <= 0    -> 0.0
+            vel*gain < floor and flow below high_flow_mm3s_threshold
+                                             -> 0.0
             sonst                           -> min(vel * feed_speed_gain,
                                                    feed_speed)
         """
@@ -1725,6 +1751,8 @@ class BufferFeeder:
             return 0.0
         vel_ready = self.velocity_tracker.is_ready()
         extruder_vel = self.velocity_tracker.get_velocity() if vel_ready else 0.0
+        flow = self.velocity_tracker.get_volumetric_flow() if vel_ready else 0.0
+        high_flow_active = self._is_high_flow_active(flow)
         if self.hall_empty:
             # Wurzel-C-Praevention γ: HALL3 ohne aktiven Extruder ist
             # kein Demand-Signal sondern Idle-Resting-Position.
@@ -1736,11 +1764,22 @@ class BufferFeeder:
                 return floor
             self._modulator_feeding = True
             return min(max(extruder_vel * 1.5, floor), self.feed_speed)
-        if not vel_ready or extruder_vel < floor - floor_epsilon:
+        if not vel_ready or extruder_vel <= floor_epsilon:
             self._modulator_feeding = False
             return 0.0
+        proposed = extruder_vel * self.feed_speed_gain
+        if proposed < floor - floor_epsilon and not high_flow_active:
+            self._modulator_feeding = False
+            return 0.0
+        if proposed < floor - floor_epsilon and high_flow_active:
+            self._debug_event(
+                'high_flow_carry',
+                "allow below-floor carry flow=%.1fmm3/s vel=%.3f "
+                "target=%.3f threshold=%.1f",
+                flow, extruder_vel, proposed, self.high_flow_mm3s_threshold,
+                min_interval=1.0)
         self._modulator_feeding = True
-        return min(extruder_vel * self.feed_speed_gain, self.feed_speed)
+        return min(proposed, self.feed_speed)
 
     def _on_mcu_flush(self, flush_time, step_gen_time):
         """Flush-callback driven continuous-streaming submit.
@@ -3531,6 +3570,7 @@ class BufferFeeder:
         "  STRICT_START_GUARD    strict_print_start_guard(0/1, block AUTO until real extrusion)\n"
         "  CRITICAL_GUARD_S      critical_action_guard_s (s,   quiet window after risky actions)\n"
         "  CONSERVATIVE_MODE     buffer_conservative_mode(0/1, longer safety guards)\n"
+        "  HIGH_FLOW_MM3S        high_flow_mm3s_threshold(mm3/s, allow carry below min_feed_floor)\n"
         "Without args: prints current values. No persistence — copy "
         "the final value into lll.cfg manually."
     )
@@ -3546,6 +3586,7 @@ class BufferFeeder:
         new_strict_start = gcmd.get_int('STRICT_START_GUARD', None, minval=0, maxval=1)
         new_critical_guard = gcmd.get_float('CRITICAL_GUARD_S', None, minval=0.0)
         new_conservative = gcmd.get_int('CONSERVATIVE_MODE',  None, minval=0, maxval=1)
+        new_high_flow_mm3s = gcmd.get_float('HIGH_FLOW_MM3S', None, minval=0.0)
 
         gc = self.printer.lookup_object('gcode')
         changed = False
@@ -3649,6 +3690,13 @@ class BufferFeeder:
                             % (old, self.buffer_conservative_mode))
             changed = True
 
+        if new_high_flow_mm3s is not None:
+            old = self.high_flow_mm3s_threshold
+            self.high_flow_mm3s_threshold = new_high_flow_mm3s
+            gc.respond_info("BUFFER_SET: high_flow_mm3s_threshold %.3f -> %.3f mm3/s"
+                            % (old, self.high_flow_mm3s_threshold))
+            changed = True
+
         if not changed:
             # No-op: dump current values so the operator can read the
             # live picture without a separate command.
@@ -3673,6 +3721,8 @@ class BufferFeeder:
                             % self.critical_action_guard_s)
             gc.respond_info("  buffer_conservative_mode= %s"
                             % self.buffer_conservative_mode)
+            gc.respond_info("  high_flow_mm3s_threshold = %.3f mm3/s"
+                            % self.high_flow_mm3s_threshold)
 
     cmd_CALIBRATE_FEEDER_SYNC_help = ("No-op under python-ansatz — feeder is not synced "
                                       "to extruder. Use MEASURE_LOAD_START for distance calibration.")

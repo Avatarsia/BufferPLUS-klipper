@@ -15,6 +15,7 @@ Covered parameters:
 - STRICT_START_GUARD  -> strict_print_start_guard
 - CRITICAL_GUARD_S    -> critical_action_guard_s
 - CONSERVATIVE_MODE   -> buffer_conservative_mode
+- HIGH_FLOW_MM3S      -> high_flow_mm3s_threshold
 
 Also: default-mux registration so BUFFER_SET works without BUFFER=mellow
 on single-instance setups (NOT-TO-DO 2026-04-26: register_mux_command with
@@ -224,6 +225,19 @@ def test_buffer_set_transition_guard_flags_toggle():
     assert 'buffer_conservative_mode' in joined
 
 
+def test_buffer_set_high_flow_threshold_updates_value():
+    printer, feeder = make_feeder()
+    assert feeder.high_flow_mm3s_threshold == 24.0
+
+    feeder.cmd_BUFFER_SET(FakeGCmd({
+        "HIGH_FLOW_MM3S": 28.5,
+    }))
+
+    assert feeder.high_flow_mm3s_threshold == 28.5
+    joined = "\n".join(printer.lookup_object('gcode').info_messages)
+    assert 'high_flow_mm3s_threshold' in joined
+
+
 # ---------------------------------------------------------------------------
 # No-op without args: emit current values
 # ---------------------------------------------------------------------------
@@ -244,6 +258,7 @@ def test_buffer_set_no_args_dumps_current_values():
     assert 'strict_print_start_guard' in joined
     assert 'critical_action_guard_s' in joined
     assert 'buffer_conservative_mode' in joined
+    assert 'high_flow_mm3s_threshold' in joined
 
 
 def test_buffer_set_no_args_does_not_change_state():
@@ -304,6 +319,7 @@ def test_buffer_set_help_text_lists_all_params():
                   'LEAD_TIME', 'MAX_MOVE_CHUNK_MM',
                   'DEBUG_EVENTS', 'DEBUG_METRICS',
                   'STRICT_START_GUARD', 'CRITICAL_GUARD_S',
+                  'HIGH_FLOW_MM3S',
                   'CONSERVATIVE_MODE'):
         assert token in help_text, "help missing %s" % token
 
