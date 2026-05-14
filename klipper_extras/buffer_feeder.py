@@ -460,6 +460,10 @@ class BufferFeeder:
         except Exception:
             pass
         self._print_running = True
+        now = self.reactor.monotonic()
+        self._print_extrusion_seen = False
+        self._arm_critical_action_guard('print_start', eventtime=now)
+        self._set_print_phase('guarded', now, reason='idle_timeout_printing')
         # RESUME / print-start: bang-bang resumes.
         self._bang_bang_suspended = False
         # Documented RESUME-clears-JAM path (spec §10, README §Jam).
@@ -471,6 +475,7 @@ class BufferFeeder:
         if jam_recovery:
             self._respond("RESUME: clearing JAM lockout")
             self._clear_recovery_flags()
+            self._prepare_post_jam_recovery()
             # If the jam interrupted a LOAD/UNLOAD macro mid-flight,
             # the macro's SAVE_GCODE_STATE is still pending. Restore
             # it now so the user's E-mode isn't stuck on M83 after
@@ -582,6 +587,100 @@ class BufferFeeder:
         except Exception:
             return False
 
+    def _get_print_stats_state(self, eventtime=None):
+        if eventtime is None:
+            eventtime = self.reactor.monotonic()
+        try:
+            ps = self.printer.lookup_object('print_stats', None)
+            if ps is None:
+                return ''
+            return ps.get_status(eventtime).get('state', '')
+        except Exception:
+            return ''
+
+    def _get_tracker_velocity(self):
+        ready = self.velocity_tracker.is_ready()
+        velocity = self.velocity_tracker.get_velocity() if ready else 0.0
+        return ready, velocity
+
+    def _arm_critical_action_guard(self, reason, duration=None, eventtime=None):
+        if duration is None:
+            duration = self.critical_action_guard_s
+        if eventtime is None:
+            eventtime = self.reactor.monotonic()
+        duration = max(duration, 0.0)
+        if self.buffer_conservative_mode:
+            duration = max(duration, 0.75)
+        new_until = eventtime + duration
+        if new_until > self._critical_action_guard_until:
+            self._critical_action_guard_until = new_until
+        self._critical_action_guard_reason = reason
+        self._debug_event(
+            'guard_arm',
+            "guard armed reason=%s duration=%.3f until=%.3f",
+            reason, duration, self._critical_action_guard_until,
+            min_interval=0.0)
+
+    def _critical_action_guard_remaining(self, eventtime=None):
+        if eventtime is None:
+            eventtime = self.reactor.monotonic()
+        return max(0.0, self._critical_action_guard_until - eventtime)
+
+    def _set_print_phase(self, phase, eventtime=None, reason=None):
+        if eventtime is None:
+            eventtime = self.reactor.monotonic()
+        if phase == self._print_phase:
+            return phase
+        self._print_phase = phase
+        self._print_phase_since = eventtime
+        self._debug_event(
+            'print_phase',
+            "phase=%s reason=%s print_state=%s",
+            phase, (reason or '-'), self._get_print_stats_state(eventtime),
+            min_interval=0.0)
+        return phase
+
+    def _refresh_print_phase(self, eventtime=None):
+        if eventtime is None:
+            eventtime = self.reactor.monotonic()
+        ps_state = self._get_print_stats_state(eventtime)
+        vel_ready, extruder_vel = self._get_tracker_velocity()
+        active_extrusion = vel_ready and extruder_vel > 1e-6
+
+        if ps_state == 'printing' and active_extrusion:
+            self._print_extrusion_seen = True
+
+        if ps_state == 'paused':
+            return self._set_print_phase(
+                'paused', eventtime, reason='print_stats_paused')
+
+        if ps_state != 'printing':
+            self._print_extrusion_seen = False
+            self._critical_action_guard_until = 0.0
+            self._critical_action_guard_reason = ""
+            return self._set_print_phase(
+                'inactive', eventtime, reason='print_stats_inactive')
+
+        if self._critical_action_guard_until > eventtime:
+            return self._set_print_phase(
+                'guarded', eventtime,
+                reason=self._critical_action_guard_reason or 'critical_action')
+
+        if (self.strict_print_start_guard
+                and not self._print_extrusion_seen
+                and not active_extrusion):
+            return self._set_print_phase(
+                'starting', eventtime, reason='awaiting_extrusion')
+
+        self._critical_action_guard_reason = ""
+        return self._set_print_phase(
+            'active', eventtime,
+            reason=('extrusion_active' if active_extrusion else 'print_running'))
+
+    def _auto_submit_permission(self, eventtime=None):
+        phase = self._refresh_print_phase(eventtime)
+        return phase == 'active', phase
+
     def _on_idle_ready(self, *args):
         # idle_timeout:ready fires for BOTH a manual PAUSE during a
         # print (RESUME erwartet) AND for the natural end of a print
@@ -599,11 +698,12 @@ class BufferFeeder:
         if not self._startup_grace_done:
             self._print_running = False
             return
+        now = self.reactor.monotonic()
         if self._print_running:
             ps_state = None
             try:
                 ps = self.printer.lookup_object('print_stats')
-                ps_state = ps.get_status(self.reactor.monotonic()).get('state')
+                ps_state = ps.get_status(now).get('state')
             except Exception:
                 pass
             if ps_state == 'paused':
@@ -611,11 +711,23 @@ class BufferFeeder:
                 # so a queued G1 E in the resumed file doesn't fire
                 # an unexpected feed before the print actually resumes.
                 self._bang_bang_suspended = True
+                self._print_extrusion_seen = False
+                self._set_print_phase('paused', now, reason='idle_timeout_ready')
                 if self._continuous_feed:
                     self._continuous_feed = False
                     self._halt_motion()
                 self._respond("Print paused — bang-bang suspended until RESUME")
             else:
+                self._print_extrusion_seen = False
+                self._critical_action_guard_until = 0.0
+                self._critical_action_guard_reason = ""
+                self._set_print_phase('inactive', now, reason='idle_timeout_ready')
+                # Reset stale continuous-feed session state after a
+                # normal print end. Otherwise the next print can see
+                # _continuous_feed=True even though no submit occurred
+                # yet and falsely arm SUPPLY_JAM dwell tracking.
+                self._continuous_feed = False
+                self._continuous_feed_direction = 0
                 # Print ended normally (state=complete/standby/None).
                 # Buffer stays available for manual workflow + reinsert
                 # auto-grip. _bang_bang_suspended stays whatever it
@@ -728,6 +840,24 @@ class BufferFeeder:
     def _clear_recovery_flags(self):
         """Clear jam-related recovery flags reused by cleanup paths."""
         return self.fault.clear_recovery_flags()
+
+    def _prepare_post_jam_recovery(self):
+        """Conservatively refresh motion/cursor state after JAM exit.
+
+        JAM can be cleared either explicitly (BUFFER_CLEAR_JAM) or
+        implicitly via the RESUME/print-start path in _on_idle_printing.
+        Both exits must leave the feeder in a state where the next
+        watchdog/submit recalculates stepcompress state conservatively
+        instead of trusting a potentially stale pre-JAM cursor.
+        """
+        mcu = self.stepper.get_mcu()
+        mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
+        current_end = (self._current_move['end_time']
+                       if self._current_move is not None
+                       else 0.0)
+        self._last_move_end_time = max(current_end, mcu_now)
+        self._stepcompress_primed = False
+        self._arm_critical_action_guard('jam_exit', eventtime=mcu_now)
 
     def _resume_after_overflow(self):
         """Restore the pre-overflow workflow if it is still resumable."""
@@ -1120,13 +1250,15 @@ class BufferFeeder:
                     _print_active = False
                     _p778_override = True
 
+            hall_empty_block = (self.hall_empty
+                                and not self.use_flush_callback_bang_bang)
             if (self._state in (STATE_IDLE, STATE_AUTO)
                     and not self._stepper_synced_to
                     and not self._pending_disable
                     and not self._move_in_flight()
                     and self._pending_remaining_mm == 0.0
                     and not self._continuous_feed
-                    and not self.hall_empty
+                    and not hall_empty_block
                     and not self.hall_full
                     and not self._needs_overflow_prime
                     and not _print_active):  # P7-77 A + P7-78 Override
@@ -1561,14 +1693,27 @@ class BufferFeeder:
         Deshalb skaliert HALL3 jetzt mit dem realen Extruder-Verbrauch
         und nutzt nur noch einen sanften MIN_FLOOR als Unterkante.
 
+        Wurzel-C-Praevention (γ, 2026-05-14): HALL3=True hat zwei
+        Bedeutungen:
+          1. Aktiver Print: Extruder zieht Filament -> Arm hochgezogen
+             -> echter Demand fuer Refill
+          2. Idle / Pre-Print-Phase: Arm liegt natuerlich oben durch
+             fehlende Zugkraft -> KEIN Demand, Buffer ist in Ruhe
+        Vor Fix: beide Faelle gleich -> HALL3-only-demand triggert
+        streaming-submit beim Druckstart. Daher gilt HALL3 jetzt nur
+        noch mit echter Extruderbewegung als Demand.
+
           HALL1 (overflow)  -> 0.0
           HALL2 (full)      -> 0.0
           HALL3 (empty):
-            tracker not_ready / vel < floor -> floor
-            sonst                           -> min(max(vel * 1.5, floor), feed_speed)
+            ext_vel <= 0                    -> 0.0
+            0 < ext_vel < floor             -> floor
+            ext_vel >= floor                -> min(max(vel * 1.5, floor),
+                                                   feed_speed)
           Zwischenzone:
             tracker not_ready / vel < floor -> 0.0
-            sonst                           -> min(vel * feed_speed_gain, feed_speed)
+            sonst                           -> min(vel * feed_speed_gain,
+                                                   feed_speed)
         """
         floor = self.min_feed_floor
         floor_epsilon = 1e-6
@@ -1581,7 +1726,12 @@ class BufferFeeder:
         vel_ready = self.velocity_tracker.is_ready()
         extruder_vel = self.velocity_tracker.get_velocity() if vel_ready else 0.0
         if self.hall_empty:
-            if not vel_ready or extruder_vel < floor - floor_epsilon:
+            # Wurzel-C-Praevention γ: HALL3 ohne aktiven Extruder ist
+            # kein Demand-Signal sondern Idle-Resting-Position.
+            if not vel_ready or extruder_vel <= floor_epsilon:
+                self._modulator_feeding = False
+                return 0.0
+            if extruder_vel < floor - floor_epsilon:
                 self._modulator_feeding = True
                 return floor
             self._modulator_feeding = True
@@ -1667,7 +1817,8 @@ class BufferFeeder:
                 "skip hall1_active=1 state=%s",
                 self._state, min_interval=1.0)
             return
-        self._flush_submit_streaming_chunk(step_gen_time)
+        callback_now = self.reactor.monotonic()
+        self._flush_submit_streaming_chunk(step_gen_time, callback_now)
 
     def _flush_should_defer_pending_itersolve(self, step_gen_time):
         """Defer flush-callback submit while itersolve still has pending
@@ -1707,7 +1858,7 @@ class BufferFeeder:
         self._submit_move(ANCHOR_NUDGE_MM, self.feed_speed,
                           forced_t0=anchor)
 
-    def _flush_submit_streaming_chunk(self, step_gen_time):
+    def _flush_submit_streaming_chunk(self, step_gen_time, eventtime=None):
         """Continuous-streaming submit driven by the SpeedModulator.
 
         Every flush callback computes target_speed via
@@ -1733,17 +1884,28 @@ class BufferFeeder:
                     self.velocity_tracker.is_ready())
             return
 
-        if (self.use_flush_callback_bang_bang
-                and not self._is_active_print_state()):
+        if eventtime is None:
+            eventtime = self.reactor.monotonic()
+        allowed, phase = self._auto_submit_permission(eventtime)
+        if not allowed:
+            vel_ready, extruder_vel = self._get_tracker_velocity()
+            event_key = 'flush_skip_idle' if phase == 'inactive' \
+                else 'flush_skip_permission'
             self._debug_event(
-                'flush_skip_idle',
-                "skip idle auto-stream target_speed=%.3f state=%s",
-                target_speed, self._state, min_interval=2.0)
+                event_key,
+                "skip phase=%s target=%.3f print_state=%s seen=%s "
+                "vel_ready=%s vel=%.3f guard_left=%.3f guard_reason=%s",
+                phase, target_speed, self._get_print_stats_state(eventtime),
+                self._print_extrusion_seen, vel_ready, extruder_vel,
+                self._critical_action_guard_remaining(eventtime),
+                (self._critical_action_guard_reason or '-'),
+                min_interval=1.0)
             if self.buffer_debug_metrics:
                 logging.debug(
-                    "buffer_feeder: idle-suppress auto-stream "
-                    "(target=%.1f, no active print)",
-                    target_speed)
+                    "buffer_feeder: permission-suppress auto-stream "
+                    "(phase=%s target=%.1f guard_left=%.3f)",
+                    phase, target_speed,
+                    self._critical_action_guard_remaining(eventtime))
             return
 
         move_active = self._move_in_flight()
@@ -2294,6 +2456,7 @@ class BufferFeeder:
             try:
                 toolhead = self.printer.lookup_object('toolhead')
                 toolhead.flush_step_generation()
+                self._arm_critical_action_guard('flush_step_generation')
                 logging.info(
                     "buffer_feeder: stepcompress re-primed via "
                     "flush_step_generation (gap=%.1fs)", gap)
@@ -3331,6 +3494,15 @@ class BufferFeeder:
             "synced_to_extruder = %s" % self._stepper_synced_to,
             "debug_flags        = events=%s metrics=%s" % (
                 self.buffer_debug_events, self.buffer_debug_metrics),
+            "print_phase        = %s seen_extrusion=%s guard_left=%.3fs reason=%s" % (
+                self._refresh_print_phase(self.reactor.monotonic()),
+                self._print_extrusion_seen,
+                self._critical_action_guard_remaining(self.reactor.monotonic()),
+                (self._critical_action_guard_reason or '-')),
+            "guard_config       = strict_start=%s critical_action=%.3fs conservative=%s" % (
+                self.strict_print_start_guard,
+                self.critical_action_guard_s,
+                self.buffer_conservative_mode),
             "measure_load       = active=%s feeding=%s dist=%.1f mm" % (
                 self._measure_load_active, self._measure_feeding,
                 self._measure_load_distance),
@@ -3356,6 +3528,9 @@ class BufferFeeder:
         "  MAX_MOVE_CHUNK_MM     max_move_chunk_mm       (mm,  default 50)\n"
         "  DEBUG_EVENTS          buffer_debug_events     (0/1, handler trace logs)\n"
         "  DEBUG_METRICS         buffer_debug_metrics    (0/1, per-second metrics)\n"
+        "  STRICT_START_GUARD    strict_print_start_guard(0/1, block AUTO until real extrusion)\n"
+        "  CRITICAL_GUARD_S      critical_action_guard_s (s,   quiet window after risky actions)\n"
+        "  CONSERVATIVE_MODE     buffer_conservative_mode(0/1, longer safety guards)\n"
         "Without args: prints current values. No persistence — copy "
         "the final value into lll.cfg manually."
     )
@@ -3368,6 +3543,9 @@ class BufferFeeder:
         new_max_move   = gcmd.get_float('MAX_MOVE_CHUNK_MM',  None, above=0.)
         new_debug_events = gcmd.get_int('DEBUG_EVENTS',       None, minval=0, maxval=1)
         new_debug_metrics = gcmd.get_int('DEBUG_METRICS',     None, minval=0, maxval=1)
+        new_strict_start = gcmd.get_int('STRICT_START_GUARD', None, minval=0, maxval=1)
+        new_critical_guard = gcmd.get_float('CRITICAL_GUARD_S', None, minval=0.0)
+        new_conservative = gcmd.get_int('CONSERVATIVE_MODE',  None, minval=0, maxval=1)
 
         gc = self.printer.lookup_object('gcode')
         changed = False
@@ -3450,6 +3628,27 @@ class BufferFeeder:
                             % (old, self.buffer_debug_metrics))
             changed = True
 
+        if new_strict_start is not None:
+            old = self.strict_print_start_guard
+            self.strict_print_start_guard = bool(new_strict_start)
+            gc.respond_info("BUFFER_SET: strict_print_start_guard %s -> %s"
+                            % (old, self.strict_print_start_guard))
+            changed = True
+
+        if new_critical_guard is not None:
+            old = self.critical_action_guard_s
+            self.critical_action_guard_s = new_critical_guard
+            gc.respond_info("BUFFER_SET: critical_action_guard_s %.3f -> %.3f s"
+                            % (old, self.critical_action_guard_s))
+            changed = True
+
+        if new_conservative is not None:
+            old = self.buffer_conservative_mode
+            self.buffer_conservative_mode = bool(new_conservative)
+            gc.respond_info("BUFFER_SET: buffer_conservative_mode %s -> %s"
+                            % (old, self.buffer_conservative_mode))
+            changed = True
+
         if not changed:
             # No-op: dump current values so the operator can read the
             # live picture without a separate command.
@@ -3468,6 +3667,12 @@ class BufferFeeder:
                             % self.buffer_debug_events)
             gc.respond_info("  buffer_debug_metrics    = %s"
                             % self.buffer_debug_metrics)
+            gc.respond_info("  strict_print_start_guard= %s"
+                            % self.strict_print_start_guard)
+            gc.respond_info("  critical_action_guard_s = %.3f s"
+                            % self.critical_action_guard_s)
+            gc.respond_info("  buffer_conservative_mode= %s"
+                            % self.buffer_conservative_mode)
 
     cmd_CALIBRATE_FEEDER_SYNC_help = ("No-op under python-ansatz — feeder is not synced "
                                       "to extruder. Use MEASURE_LOAD_START for distance calibration.")
@@ -3604,6 +3809,7 @@ class BufferFeeder:
     # -----------------------------------------------------------------------
 
     def get_status(self, eventtime):
+        print_phase = self._refresh_print_phase(eventtime)
         return {
             # Live state
             'state':                    self._state,
@@ -3631,6 +3837,10 @@ class BufferFeeder:
             'measure_load_distance_mm': self._measure_load_distance,
             'macro_state_saved':        self._macro_state_saved,
             'synced_to_extruder':       self._stepper_synced_to,
+            'print_phase':              print_phase,
+            'print_extrusion_seen':     self._print_extrusion_seen,
+            'critical_action_guard_remaining_s': self._critical_action_guard_remaining(eventtime),
+            'critical_action_guard_reason': self._critical_action_guard_reason,
             # Config values (exposed so LOAD/UNLOAD macros don't hardcode)
             'feed_speed':               self.feed_speed,
             'manual_speed':             self.manual_speed,
@@ -3652,6 +3862,9 @@ class BufferFeeder:
             'interrupt_chunk_mm':       self.interrupt_chunk_mm,
             'buffer_debug_events':      self.buffer_debug_events,
             'buffer_debug_metrics':     self.buffer_debug_metrics,
+            'strict_print_start_guard': self.strict_print_start_guard,
+            'critical_action_guard_s':  self.critical_action_guard_s,
+            'buffer_conservative_mode': self.buffer_conservative_mode,
         }
 
 

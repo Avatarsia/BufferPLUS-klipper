@@ -298,3 +298,53 @@ def test_anchor_after_two_full_windows_fires_again(monkeypatch):
     assert len(calls) == 2, (
         "After a full idle_anchor_gap elapses since the previous "
         "anchor, the watchdog must re-fire.")
+
+
+def test_watchdog_fires_in_auto_with_hall_empty_when_flush_callback_bangbang(
+        monkeypatch):
+    """AUTO watchdog must still anchor in flush-callback mode even
+    when hall_empty is true.
+
+    In the flush-callback architecture, hall_empty does not imply an
+    active reactor-tick submitter. Without this bypass, last_step_clock
+    can age out during long idle windows before PRINT_START.
+    """
+    _, feeder = make_idle_feeder(
+        values={'use_flush_callback_bang_bang': True})
+    feeder._state = buffer_feeder.STATE_AUTO
+    feeder._continuous_feed = False
+    set_sensor_active(feeder, 'hall_empty', True)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+
+    calls = count_anchor_calls(monkeypatch, feeder)
+    feeder.reactor.now = 20.0
+    feeder._last_move_end_time = 0.0
+    feeder._main_tick(eventtime=20.0)
+
+    assert len(calls) == 1, (
+        "Watchdog must fire in STATE_AUTO with hall_empty=True when "
+        "use_flush_callback_bang_bang=True.")
+
+
+def test_watchdog_still_blocks_in_auto_with_hall_empty_when_classic_bangbang(
+        monkeypatch):
+    """Classic reactor-tick bang-bang keeps the original hall_empty
+    block to avoid racing a live feed request."""
+    _, feeder = make_idle_feeder(
+        values={'use_flush_callback_bang_bang': False})
+    feeder._state = buffer_feeder.STATE_AUTO
+    feeder._continuous_feed = False
+    set_sensor_active(feeder, 'hall_empty', True)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    monkeypatch.setattr(feeder, "_bang_bang_tick", lambda et: None)
+
+    calls = count_anchor_calls(monkeypatch, feeder)
+    feeder.reactor.now = 20.0
+    feeder._last_move_end_time = 0.0
+    feeder._main_tick(eventtime=20.0)
+
+    assert calls == [], (
+        "Classic reactor-tick bang-bang must keep the hall_empty "
+        "watchdog block when use_flush_callback_bang_bang=False.")

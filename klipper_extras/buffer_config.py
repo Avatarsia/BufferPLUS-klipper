@@ -33,6 +33,9 @@ class BufferConfigValues:
     hall1_persist_timeout: float
     buffer_debug_events: bool
     buffer_debug_metrics: bool
+    strict_print_start_guard: bool
+    critical_action_guard_s: float
+    buffer_conservative_mode: bool
     min_feed_floor: float
     feed_speed_gain: float
     feed_hysteresis_stop_factor: float
@@ -114,6 +117,12 @@ class BufferConfigValues:
                 'buffer_debug_events', False),
             buffer_debug_metrics=config.getboolean(
                 'buffer_debug_metrics', False),
+            strict_print_start_guard=config.getboolean(
+                'strict_print_start_guard', True),
+            critical_action_guard_s=config.getfloat(
+                'critical_action_guard_s', 0.35, minval=0.0),
+            buffer_conservative_mode=config.getboolean(
+                'buffer_conservative_mode', False),
             min_feed_floor=config.getfloat('min_feed_floor', 15.0, above=0.),
             feed_speed_gain=config.getfloat(
                 'feed_speed_gain', 1.10, minval=1.0),

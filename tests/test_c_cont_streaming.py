@@ -254,9 +254,8 @@ def test_c_cont_hotfix4_stalled_toolhead_no_submit_in_full_buffer(monkeypatch):
 
 
 def test_c_cont_hotfix4_stalled_but_hall_empty_still_fills(monkeypatch):
-    """Hotfix5: HALL3 active + Toolhead stalled -> foerdere TROTZDEM
-    (Buffer wirklich leer). Mit Soft-Throttle jetzt nur MIN_FLOOR
-    statt vollem feed_speed."""
+    """HALL3 without active extruder draw is no longer treated as
+    demand. The arm can rest high while idle or pre-print."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'hall_full', False)
@@ -268,8 +267,7 @@ def test_c_cont_hotfix4_stalled_but_hall_empty_still_fills(monkeypatch):
         feeder.velocity_tracker.tick(t)
         t += 0.025
     assert feeder.velocity_tracker.get_velocity() == 0.0
-    # HALL3 dominiert weiterhin, aber nur mit MIN_FLOOR.
-    assert feeder._compute_target_feed_speed() == pytest.approx(15.0, abs=0.1)
+    assert feeder._compute_target_feed_speed() == 0.0
 
 
 def test_c_cont_hotfix4_not_ready_no_submit_in_full(monkeypatch):
@@ -284,13 +282,13 @@ def test_c_cont_hotfix4_not_ready_no_submit_in_full(monkeypatch):
 
 
 def test_c_cont_hotfix4_not_ready_but_hall_empty_uses_fallback(monkeypatch):
-    """Tracker not_ready + HALL3 -> MIN_FLOOR fuer sanften Initial-Fill."""
+    """Tracker not ready + HALL3 no longer implies demand."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
     assert not feeder.velocity_tracker.is_ready()
-    assert feeder._compute_target_feed_speed() == pytest.approx(15.0, abs=0.1)
+    assert feeder._compute_target_feed_speed() == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -590,12 +588,13 @@ def test_c_cont_active_print_allows_auto_stream(monkeypatch):
     printer, feeder = make_c_cont_feeder(monkeypatch, print_state='printing')
     feeder._state = buffer_feeder.STATE_AUTO
     set_sensor_active(feeder, 'hall_empty', True)
+    _populate_tracker_to_ready(feeder, velocity=15.0)
     submits = _capture_submits(feeder, monkeypatch)
     feeder._last_move_end_time = 0.0
     feeder._pending_remaining_mm = 0.0
     feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
     assert len(submits) == 1
-    assert submits[0]['speed'] == pytest.approx(15.0, abs=0.1)
+    assert submits[0]['speed'] == pytest.approx(22.5, abs=0.1)
 
 
 # ===========================================================================

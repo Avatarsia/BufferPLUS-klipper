@@ -15,7 +15,17 @@ def make_feeder(values=None, state=None, print_state="printing"):
     set_sensor_active(feeder, 'hall_overflow', False)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_empty', False)
+    fake_ext = printer.objects["extruder"]
+    _prime_tracker(feeder, fake_ext, velocity=15.0)
     return printer, feeder
+
+
+def _prime_tracker(feeder, fake_ext, *, velocity):
+    t = 0.0
+    for _ in range(12):
+        fake_ext.last_position = t * velocity
+        feeder.velocity_tracker.tick(t)
+        t += 0.025
 
 
 def test_debug_event_logging_disabled_by_default(caplog):
@@ -55,3 +65,23 @@ def test_debug_event_logging_emits_flush_submit_when_enabled(caplog):
     assert any("buffer_event[flush_submit]" in m for m in messages)
     motion_q = printer.lookup_object('motion_queuing')
     assert motion_q.append_calls
+
+
+def test_debug_event_logging_emits_permission_skip_when_guarded(caplog):
+    printer, feeder = make_feeder(
+        values={"use_flush_callback_bang_bang": True, "buffer_debug_events": True},
+        state=buffer_feeder.STATE_AUTO,
+    )
+    fake_ext = printer.objects["extruder"]
+    _prime_tracker(feeder, fake_ext, velocity=15.0)
+    set_sensor_active(feeder, 'hall_empty', True)
+    feeder.reactor.now = 5.0
+    feeder._arm_critical_action_guard('unit_test', eventtime=5.0)
+
+    with caplog.at_level(logging.INFO, logger=""):
+        feeder._on_mcu_flush(flush_time=5.0, step_gen_time=5.05)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("buffer_event[flush_skip_permission]" in m for m in messages)
+    motion_q = printer.lookup_object('motion_queuing')
+    assert not motion_q.append_calls

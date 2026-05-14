@@ -125,6 +125,7 @@ class SyncCoordinator:
                 pass
             self.owner._stepper_synced_to = None
             raise
+        owner._arm_critical_action_guard('sync_to_extruder')
         self.owner._stepper_synced_to = extruder_name
         owner._stepcompress_primed = True
         owner._enable_stepper()
@@ -140,6 +141,7 @@ class SyncCoordinator:
         owner.stepper.set_position((0., 0., 0.))
         owner.stepper.set_trapq(self.trapq)
         self.motion_queuing.check_step_generation_scan_windows()
+        owner._arm_critical_action_guard('unsync')
         self.owner._stepper_synced_to = None
         owner._commanded_pos = 0.0
         mcu = owner.stepper.get_mcu()

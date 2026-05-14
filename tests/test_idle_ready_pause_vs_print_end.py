@@ -80,23 +80,20 @@ def test_idle_ready_during_grace_ignores_event():
 
 
 def test_idle_ready_print_end_halts_continuous_feed_only_on_pause():
-    """The continuous-feed halt was tied to the 'paused' branch in the
-    legacy code. After P7-56f it stays in the paused-branch only —
-    print-end doesn't need to halt continuous feed (it shouldn't have
-    been running anyway after idle_timeout fires)."""
+    """Print-end must now also reset stale continuous-feed state.
+
+    This closes the false-positive SUPPLY_JAM path where the next print
+    inherits _continuous_feed=True from a prior finished print."""
     printer, feeder = make_feeder()
     printer.objects['print_stats'] = FakePrintStats(state='complete')
     feeder._bang_bang_suspended = False
     feeder._continuous_feed = True  # leftover from print
+    feeder._continuous_feed_direction = 1
 
     feeder._on_idle_ready()
 
-    # On print-end we leave _continuous_feed alone. _on_idle_ready
-    # is the wrong place to mass-clear motion state — that's HALT /
-    # AUTO_OFF / STOP_BUFFER_FILL. _set_state(STATE_IDLE) on the
-    # natural state transitions handles motion stop.
-    # If state is paused this would be cleared (separate test).
-    assert feeder._continuous_feed is True
+    assert feeder._continuous_feed is False
+    assert feeder._continuous_feed_direction == 0
 
 
 # ---------------------------------------------------------------------------

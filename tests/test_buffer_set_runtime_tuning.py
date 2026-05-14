@@ -12,6 +12,9 @@ Covered parameters:
 - MAX_MOVE_CHUNK_MM   -> max_move_chunk_mm
 - DEBUG_EVENTS        -> buffer_debug_events
 - DEBUG_METRICS       -> buffer_debug_metrics
+- STRICT_START_GUARD  -> strict_print_start_guard
+- CRITICAL_GUARD_S    -> critical_action_guard_s
+- CONSERVATIVE_MODE   -> buffer_conservative_mode
 
 Also: default-mux registration so BUFFER_SET works without BUFFER=mellow
 on single-instance setups (NOT-TO-DO 2026-04-26: register_mux_command with
@@ -200,6 +203,27 @@ def test_buffer_set_debug_flags_toggle():
     assert 'buffer_debug_metrics' in joined
 
 
+def test_buffer_set_transition_guard_flags_toggle():
+    printer, feeder = make_feeder()
+    assert feeder.strict_print_start_guard is True
+    assert feeder.critical_action_guard_s == 0.35
+    assert feeder.buffer_conservative_mode is False
+
+    feeder.cmd_BUFFER_SET(FakeGCmd({
+        "STRICT_START_GUARD": 0,
+        "CRITICAL_GUARD_S": 0.8,
+        "CONSERVATIVE_MODE": 1,
+    }))
+
+    assert feeder.strict_print_start_guard is False
+    assert feeder.critical_action_guard_s == 0.8
+    assert feeder.buffer_conservative_mode is True
+    joined = "\n".join(printer.lookup_object('gcode').info_messages)
+    assert 'strict_print_start_guard' in joined
+    assert 'critical_action_guard_s' in joined
+    assert 'buffer_conservative_mode' in joined
+
+
 # ---------------------------------------------------------------------------
 # No-op without args: emit current values
 # ---------------------------------------------------------------------------
@@ -217,6 +241,9 @@ def test_buffer_set_no_args_dumps_current_values():
     assert 'max_move_chunk_mm' in joined
     assert 'buffer_debug_events' in joined
     assert 'buffer_debug_metrics' in joined
+    assert 'strict_print_start_guard' in joined
+    assert 'critical_action_guard_s' in joined
+    assert 'buffer_conservative_mode' in joined
 
 
 def test_buffer_set_no_args_does_not_change_state():
@@ -275,7 +302,9 @@ def test_buffer_set_help_text_lists_all_params():
     help_text = buffer_feeder.BufferFeeder.cmd_BUFFER_SET_help
     for token in ('CHUNK_MM', 'SPEED', 'INTERRUPT_CHUNK_MM',
                   'LEAD_TIME', 'MAX_MOVE_CHUNK_MM',
-                  'DEBUG_EVENTS', 'DEBUG_METRICS'):
+                  'DEBUG_EVENTS', 'DEBUG_METRICS',
+                  'STRICT_START_GUARD', 'CRITICAL_GUARD_S',
+                  'CONSERVATIVE_MODE'):
         assert token in help_text, "help missing %s" % token
 
 

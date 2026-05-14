@@ -23,6 +23,9 @@ def test_buffer_feeder_smoke(fake_config):
     assert status["fault_overflow"] is False
     assert status["overflow_overlay_enabled"] is False
     assert status["use_fault_overlay"] is False
+    assert "print_phase" in status
+    assert "critical_action_guard_remaining_s" in status
+    assert "strict_print_start_guard" in status
 
     gcode.commands["BUFFER_STATE_DUMP"]["handler"](None)
 
@@ -58,6 +61,9 @@ def test_get_status_exposes_important_flags(feeder_factory):
     assert status["fault_overflow"] is True
     assert status["overflow_overlay_enabled"] is True
     assert status["use_fault_overlay"] is True
+    assert "print_phase" in status
+    assert "print_extrusion_seen" in status
+    assert "critical_action_guard_reason" in status
 
 
 def test_buffer_state_dump_reports_core_flags(feeder_factory):
@@ -86,3 +92,5 @@ def test_buffer_state_dump_reports_core_flags(feeder_factory):
     assert "jam_active         = True" in dump
     assert "overflow overlay  = active=True enabled=True" in dump
     assert "synced_to_extruder = extruder" in dump
+    assert "print_phase        =" in dump
+    assert "guard_config       =" in dump

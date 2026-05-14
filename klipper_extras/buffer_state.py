@@ -59,6 +59,11 @@ class BufferRuntimeState:
     _measure_load_distance: float = 0.0
     _measure_feeding: bool = False
     _print_running: bool = False
+    _print_phase: str = "inactive"
+    _print_phase_since: float = 0.0
+    _print_extrusion_seen: bool = False
+    _critical_action_guard_until: float = 0.0
+    _critical_action_guard_reason: str = ""
     _fault_overflow: bool = False
     _post_load_overflow_grace: bool = False
     _runout_filament_ref: Optional[float] = None

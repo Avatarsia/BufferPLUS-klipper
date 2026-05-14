@@ -54,6 +54,7 @@ class CleanupCoordinator:
         if owner._state != STATE_JAM:
             raise owner._cmd_error("Not in JAM state (state=%s)" % owner._state)
         owner._clear_recovery_flags()
+        owner._prepare_post_jam_recovery()
         owner._halt_requested = False
         self.try_restore_gcode_state(from_command=True)
         target = STATE_IDLE
