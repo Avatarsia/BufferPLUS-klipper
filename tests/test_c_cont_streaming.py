@@ -152,15 +152,17 @@ def test_c_cont_modulator_hall1_zero(monkeypatch):
 
 
 def test_c_cont_modulator_hall3_max(monkeypatch):
-    """Hotfix5: HALL3 active (Buffer leer) -> feed_speed (sanfter
-    Initial-Fill statt max_feed_speed=100 — letzteres ueberschiesst
-    Arm in 1 Sub-Chunk von HALL3 nach HALL1)."""
-    printer, feeder = make_c_cont_feeder(monkeypatch)
+    """Soft-Throttle: HALL3 skaliert mit Verbrauch statt fixem Vollgas.
+
+    Bei velocity=15 ergibt das 15 * 1.5 = 22.5 mm/s statt eines
+    harten feed_speed-Sprungs."""
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'feed_speed': 70.0})
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
     _populate_tracker_to_ready(feeder, velocity=15.0)
-    assert feeder._compute_target_feed_speed() == feeder.feed_speed
+    assert feeder._compute_target_feed_speed() == pytest.approx(22.5, abs=0.1)
 
 
 def test_c_cont_modulator_hall2_half(monkeypatch):
@@ -253,8 +255,8 @@ def test_c_cont_hotfix4_stalled_toolhead_no_submit_in_full_buffer(monkeypatch):
 
 def test_c_cont_hotfix4_stalled_but_hall_empty_still_fills(monkeypatch):
     """Hotfix5: HALL3 active + Toolhead stalled -> foerdere TROTZDEM
-    (Buffer wirklich leer). Hotfix5-Update: feed_speed statt
-    max_feed_speed (sanfter Initial-Fill)."""
+    (Buffer wirklich leer). Mit Soft-Throttle jetzt nur MIN_FLOOR
+    statt vollem feed_speed."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'hall_full', False)
@@ -266,8 +268,8 @@ def test_c_cont_hotfix4_stalled_but_hall_empty_still_fills(monkeypatch):
         feeder.velocity_tracker.tick(t)
         t += 0.025
     assert feeder.velocity_tracker.get_velocity() == 0.0
-    # HALL3 dominiert -> feed_speed (vor not_ready/stalled-Checks)
-    assert feeder._compute_target_feed_speed() == feeder.feed_speed
+    # HALL3 dominiert weiterhin, aber nur mit MIN_FLOOR.
+    assert feeder._compute_target_feed_speed() == pytest.approx(15.0, abs=0.1)
 
 
 def test_c_cont_hotfix4_not_ready_no_submit_in_full(monkeypatch):
@@ -282,14 +284,13 @@ def test_c_cont_hotfix4_not_ready_no_submit_in_full(monkeypatch):
 
 
 def test_c_cont_hotfix4_not_ready_but_hall_empty_uses_fallback(monkeypatch):
-    """Hotfix5: tracker not_ready + HALL3 -> feed_speed (sanfter
-    Initial-Fill statt max_feed_speed)."""
+    """Tracker not_ready + HALL3 -> MIN_FLOOR fuer sanften Initial-Fill."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
     assert not feeder.velocity_tracker.is_ready()
-    assert feeder._compute_target_feed_speed() == feeder.feed_speed
+    assert feeder._compute_target_feed_speed() == pytest.approx(15.0, abs=0.1)
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +316,8 @@ def test_c_cont_hotfix3_zwischen_soft_floor_low_vel(monkeypatch):
 def test_c_cont_hotfix3_zwischen_soft_floor_high_vel(monkeypatch):
     """Hotfix3: Zwischenzone bei high velocity = 1.10 * vel.
     High velocity (50 mm/s): erwarte 1.10 * 50 = 55."""
-    printer, feeder = make_c_cont_feeder(monkeypatch)
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'feed_speed': 70.0})
     set_sensor_active(feeder, 'hall_empty', False)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
@@ -369,15 +371,15 @@ def test_c_cont_hotfix5_hall2_returns_zero(monkeypatch):
     assert feeder._compute_target_feed_speed() == 0.0
 
 
-def test_c_cont_hotfix5_hall3_uses_feed_speed_not_max(monkeypatch):
-    """Hotfix5: HALL3 nutzt feed_speed (sanfter Initial-Fill statt
-    max_feed_speed=100, das den Arm in 1 Sub-Chunk von HALL3 nach
-    HALL1 ueberschoss)."""
-    printer, feeder = make_c_cont_feeder(monkeypatch)
+def test_c_cont_hotfix5_hall3_uses_soft_throttle_not_max(monkeypatch):
+    """HALL3 nutzt Soft-Throttle statt max_feed_speed oder fixem Vollgas."""
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'feed_speed': 70.0})
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
-    assert feeder._compute_target_feed_speed() == feeder.feed_speed
+    _populate_tracker_to_ready(feeder, velocity=15.0)
+    assert feeder._compute_target_feed_speed() == pytest.approx(22.5, abs=0.1)
     assert feeder._compute_target_feed_speed() != feeder.max_feed_speed
 
 
@@ -518,8 +520,7 @@ def _capture_submits(feeder, monkeypatch):
 def test_c_cont_continuous_streaming_in_auto(monkeypatch):
     """STATE_AUTO + HALL3 stable + tracker ready -> Submit bei jedem flush.
 
-    Hotfix5: HALL3-Submit nutzt feed_speed (lll=70) statt
-    max_feed_speed (100) — sanfter Initial-Fill verhindert Overshoot."""
+    Soft-Throttle: HALL3-Submit folgt dem Verbrauch statt fixem feed_speed."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     feeder._state = buffer_feeder.STATE_AUTO
     set_sensor_active(feeder, 'hall_empty', True)
@@ -530,21 +531,22 @@ def test_c_cont_continuous_streaming_in_auto(monkeypatch):
     feeder._pending_remaining_mm = 0.0
     feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
     assert len(submits) == 1
-    assert submits[0]['speed'] == feeder.feed_speed
+    assert submits[0]['speed'] == pytest.approx(22.5, abs=0.1)
 
 
 def test_c_cont_speed_modulation_via_hall_state(monkeypatch):
     """HALL-State-Change zwischen flushes -> Speed-Aenderung.
 
-    Hotfix5:
-    - HALL3 -> feed_speed (sanfter Initial-Fill)
+    Soft-Throttle:
+    - HALL3 -> verbrauchsorientiert mit 1.5x Margin
     - HALL2 -> 0.0 (kein Submit, Buffer voll = drain ueber Toolhead)
     """
-    printer, feeder = make_c_cont_feeder(monkeypatch)
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'feed_speed': 70.0})
     feeder._state = buffer_feeder.STATE_AUTO
     _populate_tracker_to_ready(feeder, velocity=40.0)
     submits = _capture_submits(feeder, monkeypatch)
-    # HALL3 -> feed_speed
+    # HALL3 -> min(40 * 1.5, feed_speed=70) = 60
     set_sensor_active(feeder, 'hall_empty', True)
     feeder._last_move_end_time = 0.0
     feeder._pending_remaining_mm = 0.0
@@ -556,7 +558,7 @@ def test_c_cont_speed_modulation_via_hall_state(monkeypatch):
     feeder._on_mcu_flush(flush_time=10.5, step_gen_time=10.5)
     # Nur 1 Submit (HALL3), HALL2 ist Skip
     assert len(submits) == 1
-    assert submits[0]['speed'] == feeder.feed_speed
+    assert submits[0]['speed'] == pytest.approx(60.0, abs=0.1)
 
 
 def test_c_cont_hall1_active_no_submit(monkeypatch):
@@ -593,7 +595,7 @@ def test_c_cont_active_print_allows_auto_stream(monkeypatch):
     feeder._pending_remaining_mm = 0.0
     feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
     assert len(submits) == 1
-    assert submits[0]['speed'] == feeder.feed_speed
+    assert submits[0]['speed'] == pytest.approx(15.0, abs=0.1)
 
 
 # ===========================================================================
@@ -667,7 +669,8 @@ def test_c_cont_pending_chunk_uses_current_target_speed(monkeypatch):
     chunk_mm (9), kein _pending_remaining_mm. Wir setzen Pending hier
     kuenstlich um _tick_pending_chunk-Logik zu testen.
     """
-    printer, feeder = make_c_cont_feeder(monkeypatch)
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'feed_speed': 70.0})
     feeder._state = buffer_feeder.STATE_AUTO
     set_sensor_active(feeder, 'hall_empty', True)
     _populate_tracker_to_ready(feeder, velocity=30.0)
@@ -809,14 +812,15 @@ def test_c_cont_continuous_feed_persists_through_hall_state_change(monkeypatch):
     sich der HALL-State zwischen Submits aendert (Speed wird nur
     moduliert, kein Stream-Reset).
 
-    Hotfix3: Zwischenzone-Output = max(15, vel*1.10). Bei velocity=40
-    ist 1.10*40=44 > MIN_FLOOR=15, also expect 44.
+    Soft-Throttle: HALL3 startet mit min(vel*1.5, feed_speed),
+    Zwischenzone mit min(vel*1.10, feed_speed).
     """
-    printer, feeder = make_c_cont_feeder(monkeypatch)
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'feed_speed': 70.0})
     feeder._state = buffer_feeder.STATE_AUTO
     _populate_tracker_to_ready(feeder, velocity=40.0)
     submits = _capture_submits(feeder, monkeypatch)
-    # HALL3 -> max_feed_speed, erster Submit setzt _continuous_feed=True
+    # HALL3 -> min(40*1.5, 70)=60, erster Submit setzt _continuous_feed=True
     set_sensor_active(feeder, 'hall_empty', True)
     feeder._last_move_end_time = 0.0
     feeder._pending_remaining_mm = 0.0
@@ -852,7 +856,7 @@ def test_c_cont_hotfix3_pipeline_one_chunk_only(monkeypatch):
     naechsten flush-callback (Hardware 2026-05-13 klippy(9), 30/30
     Cycles HALL1-Overshoot-Storm fix).
 
-    Hotfix5: HALL3-Speed ist jetzt feed_speed statt max_feed_speed."""
+    Soft-Throttle: HALL3-Speed ist jetzt verbrauchsorientiert statt fix."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
     feeder._state = buffer_feeder.STATE_AUTO
     set_sensor_active(feeder, 'hall_empty', True)
@@ -865,12 +869,21 @@ def test_c_cont_hotfix3_pipeline_one_chunk_only(monkeypatch):
     # Hotfix3: Submit-Distanz = interrupt_chunk_mm (9), nicht
     # flush_callback_chunk_mm (Default 15, lll.cfg 45):
     assert submits[0]['distance'] == feeder.interrupt_chunk_mm
-    # Hotfix5: Speed = feed_speed (HALL3-Branch sanfter Initial-Fill)
-    assert submits[0]['speed'] == feeder.feed_speed
-    # submit_chunk_cap bleibt gesetzt (defense-in-depth fuer Safety-
-    # Pfade, falls _submit_move spaeter doch in Sub-Chunk-Stream
-    # gerinnt — Continuous-Mode selbst nutzt kein Pending mehr):
-    assert submits[0].get('submit_chunk_cap') == feeder.interrupt_chunk_mm
+    # Soft-Throttle: vel=15 -> 22.5 mm/s
+    assert submits[0]['speed'] == pytest.approx(22.5, abs=0.1)
+
+
+def test_c_cont_soft_throttle_caps_high_velocity(monkeypatch):
+    """Sehr hohe Extruder-Geschwindigkeit bleibt auf feed_speed gecappt."""
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'feed_speed': 70.0})
+    set_sensor_active(feeder, 'hall_empty', True)
+    _populate_tracker_to_ready(feeder, velocity=80.0)
+    assert feeder._compute_target_feed_speed() == pytest.approx(
+        feeder.feed_speed, abs=0.1)
+    set_sensor_active(feeder, 'hall_empty', False)
+    assert feeder._compute_target_feed_speed() == pytest.approx(
+        feeder.feed_speed, abs=0.1)
 
 
 def test_c_cont_hotfix3_hall1_plus_hall2_instant_overflow(monkeypatch):

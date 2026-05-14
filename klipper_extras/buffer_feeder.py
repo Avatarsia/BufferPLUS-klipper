@@ -1555,48 +1555,42 @@ class BufferFeeder:
     def _compute_target_feed_speed(self):
         """SpeedModulator — bestimmt target_feed_speed in STATE_AUTO.
 
-        HALL-State dominiert; in der Zwischenzone wird die
-        Extruder-Velocity proportional zur Foerder-Rate skaliert mit
-        Schmitt-Trigger-Hysterese gegen on/off-Oszillation.
+        Portiert die zentrale Hardware-Erkenntnis aus C-cont Hotfix 7:
+        ein fixer HALL3-Refill mit voller feed_speed ueberschiesst beim
+        Mellow-Buffer die sehr kleine HALL2->HALL1-Sicherheitsmarge.
+        Deshalb skaliert HALL3 jetzt mit dem realen Extruder-Verbrauch
+        und nutzt nur noch einen sanften MIN_FLOOR als Unterkante.
 
-          HALL1 (overflow)  -> 0.0  (Notbremse)
-          HALL2 (full)      -> 0.0  (Buffer voll, nicht weiter pushen)
-          HALL3 (empty)     -> feed_speed  (sanfter Initial-Fill)
-          Tracker not_ready -> 0.0  (Boot: warten auf Sample-Fenster)
-          Tracker vel <= 0  -> 0.0  (Toolhead stalled)
+          HALL1 (overflow)  -> 0.0
+          HALL2 (full)      -> 0.0
+          HALL3 (empty):
+            tracker not_ready / vel < floor -> floor
+            sonst                           -> min(max(vel * 1.5, floor), feed_speed)
           Zwischenzone:
-            proposed = extruder_vel * feed_speed_gain
-            Schmitt-Trigger:
-              an  -> bleibt an bis proposed < floor * stop_factor
-              aus -> einschalten ab proposed >= floor
+            tracker not_ready / vel < floor -> 0.0
+            sonst                           -> min(vel * feed_speed_gain, feed_speed)
         """
+        floor = self.min_feed_floor
+        floor_epsilon = 1e-6
         if self.hall_overflow:
             self._modulator_feeding = False
             return 0.0
         if self.hall_full:
             self._modulator_feeding = False
             return 0.0
+        vel_ready = self.velocity_tracker.is_ready()
+        extruder_vel = self.velocity_tracker.get_velocity() if vel_ready else 0.0
         if self.hall_empty:
+            if not vel_ready or extruder_vel < floor - floor_epsilon:
+                self._modulator_feeding = True
+                return floor
             self._modulator_feeding = True
-            return self.feed_speed
-        if not self.velocity_tracker.is_ready():
+            return min(max(extruder_vel * 1.5, floor), self.feed_speed)
+        if not vel_ready or extruder_vel < floor - floor_epsilon:
             self._modulator_feeding = False
             return 0.0
-        extruder_vel = self.velocity_tracker.get_velocity()
-        if extruder_vel <= 0.0:
-            self._modulator_feeding = False
-            return 0.0
-        proposed = extruder_vel * self.feed_speed_gain
-        stop_threshold = self.min_feed_floor * self.feed_hysteresis_stop_factor
-        if self._modulator_feeding:
-            if proposed >= stop_threshold:
-                return proposed
-            self._modulator_feeding = False
-            return 0.0
-        if proposed >= self.min_feed_floor:
-            self._modulator_feeding = True
-            return proposed
-        return 0.0
+        self._modulator_feeding = True
+        return min(extruder_vel * self.feed_speed_gain, self.feed_speed)
 
     def _on_mcu_flush(self, flush_time, step_gen_time):
         """Flush-callback driven continuous-streaming submit.
