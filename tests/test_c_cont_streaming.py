@@ -549,6 +549,51 @@ def test_c_cont_hotfix7_hall2_zero_regression(monkeypatch):
     assert feeder._compute_target_feed_speed() == 0.0
 
 
+def test_c_cont_hotfix10b_idle_suppresses_auto_stream(monkeypatch):
+    """Hotfix 10b (Hardware 2026-05-14 klippy.log Z.397): _on_mcu_flush
+    darf bei Klipper-Idle (not _print_active) KEIN auto-stream submit
+    machen, auch wenn Hotfix 7 MIN_FLOOR-Pfad (HALL3:on + vel<15)
+    triggert. Watchdog macht den Anchor, _on_mcu_flush perpetuiert
+    nicht.
+
+    Vorher: Hotfix 10 Watchdog -> 1 Anchor -> motion_queuing flush
+    -> _on_mcu_flush -> Hotfix 7 MIN_FLOOR -> 5mm chunk -> motion_-
+    queuing flush -> Loop -> 360mm in 2min Idle -> SET_KINEMATIC_
+    POSITION flush_step_generation -> c=31 Invalid sequence."""
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, print_state='ready')  # Klipper-Idle, NICHT printing
+    feeder._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder, 'hall_empty', True)
+    # Tracker not ready -> Hotfix7: HALL3:on + not_ready -> target=15
+    submits = _capture_submits(feeder, monkeypatch)
+    feeder._last_move_end_time = 0.0
+    feeder._pending_remaining_mm = 0.0
+    feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
+    # Hotfix 10b: kein Submit weil not _print_active
+    assert len(submits) == 0, (
+        "Hotfix 10b: _on_mcu_flush darf bei Klipper-Idle (not "
+        "_print_active) keinen auto-stream submit machen, selbst "
+        f"wenn Hotfix 7 MIN_FLOOR-Pfad target>0 liefert. Submits: "
+        f"{submits}")
+
+
+def test_c_cont_hotfix10b_active_print_allows_stream(monkeypatch):
+    """Hotfix 10b Regression: Bei aktivem Print (print_active=True)
+    soll _on_mcu_flush wie gewohnt streamen (Hotfix 7 voll aktiv).
+    Stellt sicher dass Hotfix 10b den Print-Pfad nicht bricht."""
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, print_state='printing')  # aktiv
+    feeder._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder, 'hall_empty', True)
+    submits = _capture_submits(feeder, monkeypatch)
+    feeder._last_move_end_time = 0.0
+    feeder._pending_remaining_mm = 0.0
+    feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
+    # Hotfix 7 MIN_FLOOR-Submit erwartet (Hotfix 10b nicht aktiv weil printing)
+    assert len(submits) == 1
+    assert submits[0]['speed'] == pytest.approx(15.0, abs=0.1)
+
+
 def test_c_cont_hotfix7_hall1_zero_regression(monkeypatch):
     """Regression: HALL1:on -> 0.0 (Notbremse). Stellt sicher dass
     Hotfix7-Umbau den OVERFLOW-Pfad nicht beeinflusst."""
