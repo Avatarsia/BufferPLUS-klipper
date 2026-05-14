@@ -621,6 +621,21 @@ class BufferFeeder:
                 # auto-grip. _bang_bang_suspended stays whatever it
                 # was (operator may have set it explicitly via
                 # BUFFER_AUTO_OFF; we don't override).
+                #
+                # Bugfix 2026-05-14: _continuous_feed-Stale-Flag-Reset.
+                # Ohne diesen Reset bleibt der Flag aus dem letzten Mid-
+                # Print-Submit auf True stehen. Beim naechsten Print
+                # mit langer Pre-Extrusion-Phase (Heating + QGL > jam_-
+                # supply_dwell_time, typisch 240s) interpretiert
+                # _jam_tick das als "feeder running" und triggert
+                # false-positive JAM SUPPLY — obwohl buffer_feeder gar
+                # nicht gefoerdert hat. Analog zum PAUSE-Branch-Reset
+                # oben (Z.615), aber fuer end-of-print noetig.
+                # Hardware-Beleg: 30.7-min-Print endete bei HALL3=True;
+                # 1h Idle; naechster Print bei HALL3=True + Heating +
+                # 3x QGL-Retries > 240s -> false-positive JAM.
+                self._continuous_feed = False
+                self._continuous_feed_direction = 0
                 self._respond("Print ended — buffer ready for next "
                               "filament change or print")
         self._print_running = False

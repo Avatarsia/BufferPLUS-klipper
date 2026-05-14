@@ -80,10 +80,15 @@ def test_idle_ready_during_grace_ignores_event():
 
 
 def test_idle_ready_print_end_halts_continuous_feed_only_on_pause():
-    """The continuous-feed halt was tied to the 'paused' branch in the
-    legacy code. After P7-56f it stays in the paused-branch only —
-    print-end doesn't need to halt continuous feed (it shouldn't have
-    been running anyway after idle_timeout fires)."""
+    """SUPERSEDED durch Bugfix 2026-05-14 (_continuous_feed-Stale-
+    Flag-Reset): Print-Ende muss _continuous_feed jetzt AUCH auf
+    False zurueck setzen — nicht nur PAUSE.
+
+    Pre-Fix-Annahme (legacy): "print-end doesn't need to halt
+    continuous feed". Real-Hardware-Beobachtung: stale-Flag
+    triggert false-positive JAM SUPPLY beim naechsten Print mit
+    langer Heat-Up/QGL-Phase (240s ohne Extruder-Bewegung).
+    """
     printer, feeder = make_feeder()
     printer.objects['print_stats'] = FakePrintStats(state='complete')
     feeder._bang_bang_suspended = False
@@ -91,12 +96,11 @@ def test_idle_ready_print_end_halts_continuous_feed_only_on_pause():
 
     feeder._on_idle_ready()
 
-    # On print-end we leave _continuous_feed alone. _on_idle_ready
-    # is the wrong place to mass-clear motion state — that's HALT /
-    # AUTO_OFF / STOP_BUFFER_FILL. _set_state(STATE_IDLE) on the
-    # natural state transitions handles motion stop.
-    # If state is paused this would be cleared (separate test).
-    assert feeder._continuous_feed is True
+    # Bugfix: _continuous_feed muss bei Print-Ende auf False
+    # zurueck (Stale-Flag-Reset). Siehe
+    # tests/test_continuous_feed_stale_flag_reset.py fuer die
+    # vollstaendige Bug-Reproduktion.
+    assert feeder._continuous_feed is False
 
 
 # ---------------------------------------------------------------------------
