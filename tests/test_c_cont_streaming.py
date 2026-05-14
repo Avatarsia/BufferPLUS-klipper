@@ -570,6 +570,32 @@ def test_c_cont_hall1_active_no_submit(monkeypatch):
     assert len(submits) == 0
 
 
+def test_c_cont_idle_suppresses_auto_stream(monkeypatch):
+    """Watchdog-anchor waehrend Klipper-Idle darf den Flush-Callback
+    nicht in einen Selbstlaeufer verwandeln."""
+    printer, feeder = make_c_cont_feeder(monkeypatch, print_state='standby')
+    feeder._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder, 'hall_empty', True)
+    submits = _capture_submits(feeder, monkeypatch)
+    feeder._last_move_end_time = 0.0
+    feeder._pending_remaining_mm = 0.0
+    feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
+    assert len(submits) == 0
+
+
+def test_c_cont_active_print_allows_auto_stream(monkeypatch):
+    """Der Idle-Schutz darf den echten Print-Pfad nicht blockieren."""
+    printer, feeder = make_c_cont_feeder(monkeypatch, print_state='printing')
+    feeder._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder, 'hall_empty', True)
+    submits = _capture_submits(feeder, monkeypatch)
+    feeder._last_move_end_time = 0.0
+    feeder._pending_remaining_mm = 0.0
+    feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
+    assert len(submits) == 1
+    assert submits[0]['speed'] == feeder.feed_speed
+
+
 # ===========================================================================
 # C-cont T7 followup: HALL2-rising-edge accumulator reset
 # (replacement for P7-63 hall_full branch in bang-bang _on_mcu_flush)

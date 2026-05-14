@@ -562,6 +562,26 @@ class BufferFeeder:
                       "(print state=%s)" % ps_state)
         return True
 
+    def _is_active_print_state(self, eventtime=None):
+        """Best-effort check whether Klipper currently reports an
+        active print.
+
+        Flush-driven auto-streaming must only run while a print is
+        actually active. During Klipper idle/standby the watchdog may
+        still refresh the stepcompress cursor with tiny anchor moves,
+        but _on_mcu_flush must not turn those anchor refreshes into a
+        self-sustaining filament stream.
+        """
+        if eventtime is None:
+            eventtime = self.reactor.monotonic()
+        try:
+            ps = self.printer.lookup_object('print_stats', None)
+            if ps is None:
+                return False
+            return ps.get_status(eventtime).get('state') == 'printing'
+        except Exception:
+            return False
+
     def _on_idle_ready(self, *args):
         # idle_timeout:ready fires for BOTH a manual PAUSE during a
         # print (RESUME erwartet) AND for the natural end of a print
@@ -1717,6 +1737,19 @@ class BufferFeeder:
                     "(hall1=%s ready=%s)",
                     self.hall_overflow,
                     self.velocity_tracker.is_ready())
+            return
+
+        if (self.use_flush_callback_bang_bang
+                and not self._is_active_print_state()):
+            self._debug_event(
+                'flush_skip_idle',
+                "skip idle auto-stream target_speed=%.3f state=%s",
+                target_speed, self._state, min_interval=2.0)
+            if self.buffer_debug_metrics:
+                logging.debug(
+                    "buffer_feeder: idle-suppress auto-stream "
+                    "(target=%.1f, no active print)",
+                    target_speed)
             return
 
         move_active = self._move_in_flight()

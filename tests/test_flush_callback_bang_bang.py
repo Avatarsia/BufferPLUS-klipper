@@ -24,7 +24,7 @@ truly race-free at the MCU level.
 
 import pytest
 
-from fakes_klipper import FakeConfig, FakePrinter
+from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
 from klipper_extras import buffer_feeder
 
 
@@ -40,6 +40,7 @@ def make_feeder(values=None):
     if values:
         base.update(values)
     printer = FakePrinter()
+    printer.objects["print_stats"] = FakePrintStats(state="printing")
     config = FakeConfig(printer=printer, values=base)
     feeder = buffer_feeder.BufferFeeder(config)
     feeder._startup_grace_done = True

@@ -41,7 +41,7 @@ stepcompress invalid sequence, LOAD_PHASE_1.
 
 import pytest
 
-from fakes_klipper import FakeConfig, FakePrinter
+from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
 from klipper_extras import buffer_feeder
 
 
@@ -58,6 +58,7 @@ def make_feeder(values=None):
     if values:
         base.update(values)
     printer = FakePrinter()
+    printer.objects["print_stats"] = FakePrintStats(state="printing")
     config = FakeConfig(printer=printer, values=base)
     feeder = buffer_feeder.BufferFeeder(config)
     # P7-66 R6: wire _stepper_enable via _handle_connect.

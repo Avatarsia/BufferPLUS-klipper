@@ -32,12 +32,13 @@ reactor-tick path because _on_mcu_flush early-returns on non-AUTO.
 """
 
 import pytest
-from fakes_klipper import FakeConfig, FakePrinter
+from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
 from klipper_extras import buffer_feeder
 
 
 def make_feeder(values=None):
     printer = FakePrinter()
+    printer.objects["print_stats"] = FakePrintStats(state="printing")
     config = FakeConfig(printer=printer, values=values)
     feeder = buffer_feeder.BufferFeeder(config)
     feeder._startup_grace_done = True

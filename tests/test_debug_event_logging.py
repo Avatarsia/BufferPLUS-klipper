@@ -1,12 +1,13 @@
 import logging
 
-from fakes_klipper import FakeConfig, FakePrinter
+from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
 from helpers import set_sensor_active
 from klipper_extras import buffer_feeder
 
 
-def make_feeder(values=None, state=None):
+def make_feeder(values=None, state=None, print_state="printing"):
     printer = FakePrinter()
+    printer.objects["print_stats"] = FakePrintStats(state=print_state)
     config = FakeConfig(printer=printer, values=values)
     feeder = buffer_feeder.BufferFeeder(config)
     feeder._startup_grace_done = True
