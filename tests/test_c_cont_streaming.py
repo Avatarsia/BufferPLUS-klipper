@@ -254,9 +254,14 @@ def test_c_cont_hotfix4_stalled_toolhead_no_submit_in_full_buffer(monkeypatch):
 
 
 def test_c_cont_hotfix4_stalled_but_hall_empty_still_fills(monkeypatch):
-    """Hotfix5: HALL3 active + Toolhead stalled -> foerdere TROTZDEM
-    (Buffer wirklich leer). Mit Soft-Throttle jetzt nur MIN_FLOOR
-    statt vollem feed_speed."""
+    """SUPERSEDED durch Wurzel-C-Praevention γ (2026-05-14):
+    HALL3 ohne ext_vel ist KEIN Demand-Signal mehr, sondern Idle-
+    Resting-Position. Old behavior (force-fill mit MIN_FLOOR) hat
+    den Race mit PRINT_START Macro getriggert -> Timer too close.
+
+    Hotfix4-Original-Annahme war: HALL3 immer = demand. γ-Befund:
+    nur HALL3+aktiver Extruder = demand. Idle-HALL3 -> 0.
+    """
     printer, feeder = make_c_cont_feeder(monkeypatch)
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'hall_full', False)
@@ -268,8 +273,8 @@ def test_c_cont_hotfix4_stalled_but_hall_empty_still_fills(monkeypatch):
         feeder.velocity_tracker.tick(t)
         t += 0.025
     assert feeder.velocity_tracker.get_velocity() == 0.0
-    # HALL3 dominiert weiterhin, aber nur mit MIN_FLOOR.
-    assert feeder._compute_target_feed_speed() == pytest.approx(15.0, abs=0.1)
+    # γ: HALL3 + ext_vel=0 -> KEIN demand (Idle-Resting).
+    assert feeder._compute_target_feed_speed() == 0.0
 
 
 def test_c_cont_hotfix4_not_ready_no_submit_in_full(monkeypatch):
@@ -284,13 +289,22 @@ def test_c_cont_hotfix4_not_ready_no_submit_in_full(monkeypatch):
 
 
 def test_c_cont_hotfix4_not_ready_but_hall_empty_uses_fallback(monkeypatch):
-    """Tracker not_ready + HALL3 -> MIN_FLOOR fuer sanften Initial-Fill."""
+    """SUPERSEDED durch Wurzel-C-Praevention γ (2026-05-14):
+    Tracker not_ready + HALL3 -> KEIN demand mehr.
+
+    Hotfix4 hatte MIN_FLOOR auch bei not_ready zurueckgegeben, um
+    "sanften Initial-Fill" zu ermoeglichen. γ-Befund: das triggert
+    den Race mit PRINT_START Macro beim ersten Druckstart nach
+    Klipper-Boot/Idle. Mit γ wartet buffer_feeder bis tatsaechlich
+    extruder-Verbrauch vorhanden ist (post-Heating).
+    """
     printer, feeder = make_c_cont_feeder(monkeypatch)
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_overflow', False)
     assert not feeder.velocity_tracker.is_ready()
-    assert feeder._compute_target_feed_speed() == pytest.approx(15.0, abs=0.1)
+    # γ: not_ready + HALL3 -> 0 (war frueher MIN_FLOOR)
+    assert feeder._compute_target_feed_speed() == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -586,16 +600,20 @@ def test_c_cont_idle_suppresses_auto_stream(monkeypatch):
 
 
 def test_c_cont_active_print_allows_auto_stream(monkeypatch):
-    """Der Idle-Schutz darf den echten Print-Pfad nicht blockieren."""
+    """Der Idle-Schutz darf den echten Print-Pfad nicht blockieren.
+    γ-Wurzel-C-Praevention: Tracker muss aktive ext_vel >0 zeigen,
+    sonst gilt HALL3 nicht als demand."""
     printer, feeder = make_c_cont_feeder(monkeypatch, print_state='printing')
     feeder._state = buffer_feeder.STATE_AUTO
     set_sensor_active(feeder, 'hall_empty', True)
+    _populate_tracker_to_ready(feeder, velocity=15.0)
     submits = _capture_submits(feeder, monkeypatch)
     feeder._last_move_end_time = 0.0
     feeder._pending_remaining_mm = 0.0
     feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
     assert len(submits) == 1
-    assert submits[0]['speed'] == pytest.approx(15.0, abs=0.1)
+    # Soft-Throttle: ext_vel=15 -> 15*1.5 = 22.5
+    assert submits[0]['speed'] == pytest.approx(22.5, abs=0.1)
 
 
 # ===========================================================================

@@ -1590,14 +1590,30 @@ class BufferFeeder:
         Deshalb skaliert HALL3 jetzt mit dem realen Extruder-Verbrauch
         und nutzt nur noch einen sanften MIN_FLOOR als Unterkante.
 
+        Wurzel-C-Praevention (γ, 2026-05-14): HALL3=True hat zwei
+        Bedeutungen:
+          1. Aktiver Print: Extruder zieht Filament -> Arm hochgezogen
+             -> echter Demand fuer Refill
+          2. Idle / Pre-Print-Phase: Arm liegt natuerlich oben durch
+             fehlende Zugkraft -> KEIN Demand, Buffer ist in Ruhe
+        Vor Fix: beide Faelle gleich -> HALL3-only-demand triggert
+        streaming-submit beim Druckstart -> Race mit PRINT_START
+        Macro (SET_KINEMATIC_POSITION + TMC-UART-Burst) -> MCU 'LLL_-
+        PLUS' shutdown: Timer too close (vier HW-Test-Belege).
+        Fix: HALL3 nur als Demand interpretieren wenn ext_vel > 0
+        (Extruder zieht aktiv). Idle-HALL3 -> 0.
+
           HALL1 (overflow)  -> 0.0
           HALL2 (full)      -> 0.0
           HALL3 (empty):
-            tracker not_ready / vel < floor -> floor
-            sonst                           -> min(max(vel * 1.5, floor), feed_speed)
+            ext_vel <= 0                    -> 0.0  (γ: kein idle-demand)
+            0 < ext_vel < floor             -> floor
+            ext_vel >= floor                -> min(max(vel * 1.5, floor),
+                                                   feed_speed)
           Zwischenzone:
             tracker not_ready / vel < floor -> 0.0
-            sonst                           -> min(vel * feed_speed_gain, feed_speed)
+            sonst                           -> min(vel * feed_speed_gain,
+                                                   feed_speed)
         """
         floor = self.min_feed_floor
         floor_epsilon = 1e-6
@@ -1610,7 +1626,14 @@ class BufferFeeder:
         vel_ready = self.velocity_tracker.is_ready()
         extruder_vel = self.velocity_tracker.get_velocity() if vel_ready else 0.0
         if self.hall_empty:
-            if not vel_ready or extruder_vel < floor - floor_epsilon:
+            # Wurzel-C-Praevention γ: HALL3 ohne aktiven Extruder ist
+            # kein Demand-Signal sondern Idle-Resting-Position.
+            # Damit triggert HALL3 alleine NICHT mehr den streaming-
+            # submit beim Druckstart (vor Heat-Up-/QGL-Phase).
+            if not vel_ready or extruder_vel <= floor_epsilon:
+                self._modulator_feeding = False
+                return 0.0
+            if extruder_vel < floor - floor_epsilon:
                 self._modulator_feeding = True
                 return floor
             self._modulator_feeding = True

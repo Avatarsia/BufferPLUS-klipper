@@ -51,6 +51,14 @@ def make_feeder(values=None):
     set_sensor_active(feeder, 'hall_overflow', False)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_empty', False)
+    # Wurzel-C-Praevention γ (2026-05-14): Tracker mit aktiver
+    # ext_vel vorbefuellen damit HALL3-Demand-Pfad-Tests funktionieren.
+    fake_ext = printer.objects['extruder']
+    t = 0.0
+    for _ in range(12):
+        fake_ext.last_position = t * 15.0
+        feeder.velocity_tracker.tick(t)
+        t += 0.025
     return printer, feeder
 
 
