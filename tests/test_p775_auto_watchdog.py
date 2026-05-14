@@ -174,6 +174,40 @@ def test_3_hall_empty_blocks_watchdog(monkeypatch):
         "(bang-bang has an active feed-request).")
 
 
+def test_3c_hall_empty_with_flush_callback_bangbang_allows_watchdog(monkeypatch):
+    """Hotfix 10 (Hardware 2026-05-14 klippy.log Z.363: MCU 'LLL_PLUS'
+    shutdown: Timer too close beim Druckstart nach 4min Klipper-Idle).
+
+    P7-75 not_hall_empty Sub-Gate verhindert Race mit bang-bang feed-
+    request, ABER die Race existiert NUR im Reactor-Tick-Bang-Bang-
+    Pfad (use_flush_callback_bang_bang=False). Bei use_flush_callback_-
+    bang_bang=True ist _bang_bang_tick ein No-Op (Z.2735), bang-bang
+    feuert NUR via _on_mcu_flush, der waehrend Klipper-Idle gar nicht
+    gerufen wird. Resultat: HALL3:on + Klipper-Idle -> kein einziger
+    Submit -> last_step_clock altert -> Timer too close beim ersten
+    Print-Start-Submit.
+
+    Hotfix 10: not (hall_empty and not use_flush_callback_bang_bang).
+    Bei use_flush_callback_bang_bang=True ist Watchdog erlaubt
+    obwohl hall_empty=True — die einzige Schutzschicht gegen
+    stale step_gen_time."""
+    _, feeder = make_auto_feeder(
+        values={'use_flush_callback_bang_bang': True})
+    set_sensor_active(feeder, 'hall_empty', True)
+    neutralize_bang_bang(monkeypatch, feeder)
+    calls = count_anchor_calls(monkeypatch, feeder)
+
+    feeder.reactor.now = 30.0
+    feeder._last_move_end_time = 0.0
+
+    feeder._main_tick(eventtime=30.0)
+
+    assert calls != [], (
+        "Hotfix 10: Watchdog MUSS feuern bei hall_empty=True UND "
+        "use_flush_callback_bang_bang=True (kein konkurrierender "
+        "Reactor-Bang-Bang-Pfad existiert).")
+
+
 def test_3b_hall_full_blocks_watchdog(monkeypatch):
     """hall_full=True means buffer is already at the upper threshold.
     Forward anchors would push toward HALL1 overflow. Sub-gate

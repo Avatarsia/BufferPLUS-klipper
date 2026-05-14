@@ -2315,13 +2315,44 @@ class BufferFeeder:
                     _print_active = False
                     _p778_override = True
 
+            # Hotfix 10 (Hardware 2026-05-14 klippy.log Z.363: MCU
+            # 'LLL_PLUS' shutdown: Timer too close beim Druckstart
+            # nach 4min Klipper-Idle, mit DIAG-Beleg gap=257.7s).
+            #
+            # P7-75 Original-Bedingung 'not self.hall_empty' schuetzt
+            # vor Race mit Bang-Bang-Feed-Request. Diese Race existiert
+            # NUR im Reactor-Tick-Bang-Bang-Pfad (use_flush_callback_-
+            # bang_bang=False). Bei use_flush_callback_bang_bang=True
+            # ist _bang_bang_tick ein No-Op (Z.2735), Bang-Bang feuert
+            # NUR via _on_mcu_flush, der waehrend Klipper-Idle gar
+            # nicht gerufen wird (keine motion_queuing-Aktivitaet).
+            # Resultat: HALL3:on + Klipper-Idle (kein Print aktiv)
+            # -> kein Submit -> last_step_clock altert -> Timer too
+            # close beim ersten Print-Start-Submit. Bei Klipper-Idle
+            # >16.78s (= CLOCK_DIFF_MAX @ 48MHz) garantiert Crash.
+            #
+            # Fix: hall_empty-Gate nur aktiv wenn use_flush_callback_-
+            # bang_bang=False (klassischer Reactor-Tick-Pfad). Im
+            # flush-callback-Pfad muss Watchdog auch bei hall_empty
+            # feuern — er ist die einzige Schutzschicht gegen stale
+            # step_gen_time bei Klipper-Idle. _continuous_feed-Sub-
+            # Gate bleibt aktiv (kein Race mit aktivem Stream),
+            # hall_full-Sub-Gate bleibt aktiv (kein Forward-Feed bei
+            # vollem Buffer).
+            #
+            # Siehe test_3_hall_empty_blocks_watchdog (P7-75 klassischer
+            # Pfad, bleibt grün mit default use_flush_callback_bang_-
+            # bang=False) UND test_3c_hall_empty_with_flush_callback_-
+            # bangbang_allows_watchdog (Hotfix 10 neuer Pfad).
+            hall_empty_block = (self.hall_empty
+                                and not self.use_flush_callback_bang_bang)
             if (self._state in (STATE_IDLE, STATE_AUTO)
                     and not self._stepper_synced_to
                     and not self._pending_disable
                     and not self._move_in_flight()
                     and self._pending_remaining_mm == 0.0
                     and not self._continuous_feed
-                    and not self.hall_empty
+                    and not hall_empty_block
                     and not self.hall_full
                     and not self._needs_overflow_prime
                     and not _print_active):  # P7-77 A + P7-78 Override
@@ -2988,6 +3019,42 @@ class BufferFeeder:
                     self.hall_overflow,
                     self.velocity_tracker.is_ready())
             return
+
+        # Hotfix 10b (Hardware 2026-05-14 klippy.log Z.397: c=31 i=0
+        # Invalid sequence beim SET_KINEMATIC_POSITION nach 2min Klipper-
+        # Idle mit Hotfix 10 aktiv). Wurzel: Hotfix 10 Watchdog feuert
+        # bei Klipper-Idle 1x, motion_queuing verarbeitet den Anchor-
+        # Submit -> flush-callback _on_mcu_flush wird gerufen -> Hotfix 7
+        # MIN_FLOOR-Pfad (HALL3:on + vel<15) submitted weitere 5mm chunks
+        # -> motion_queuing flushed -> Loop. Ueber 2min Idle: 360+ mm
+        # Filament gepusht, Hunderte lazy-pending Trapezoide in step-
+        # compress. SET_KINEMATIC_POSITION (Teil von PRINT_START/Homing/
+        # QGL) ruft flush_step_generation -> alle Trapezoide auf einmal
+        # kompiliert -> stepcompress c=31 i=0 Invalid sequence.
+        #
+        # Fix: bei Klipper-Idle (not _print_active) im flush-callback-
+        # Pfad: suppress auto-stream. Watchdog (P7-78/Hotfix 10) macht
+        # weiterhin periodische Anchor-Submits via _main_tick (last_-
+        # step_clock frisch), aber _on_mcu_flush perpetuiert das nicht
+        # zu continuous streaming. Bei aktivem Print: unveraendert,
+        # Hotfix 7 MIN_FLOOR voll aktiv.
+        if self.use_flush_callback_bang_bang:
+            _print_active_10b = False
+            try:
+                _ps_10b = self.printer.lookup_object('print_stats', None)
+                if _ps_10b is not None:
+                    _print_active_10b = (
+                        _ps_10b.get_status(self.reactor.monotonic())
+                        .get('state') == 'printing')
+            except Exception:
+                _print_active_10b = False
+            if not _print_active_10b:
+                if self.buffer_debug_metrics:
+                    logging.debug(
+                        "buffer_feeder: idle-suppress auto-stream "
+                        "(target=%.1f, not _print_active, Hotfix 10b)",
+                        target_speed)
+                return
 
         # Lookahead check: is a move still in flight? P7-66 streaming
         # pattern.
