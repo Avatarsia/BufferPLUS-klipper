@@ -2215,6 +2215,8 @@ class BufferFeeder:
 
         mcu = self.stepper.get_mcu()
         mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
+        if forced_t0 is not None:
+            self._sanitize_forced_t0_floors(mcu_now)
         gap = mcu_now - self._last_move_end_time
 
         was_primed = self._stepcompress_primed
@@ -2232,6 +2234,35 @@ class BufferFeeder:
             return  # anchor skipped (far-future), nothing queued
 
         self._append_trapezoid_and_record(t0, signed_distance, speed)
+
+    def _sanitize_forced_t0_floors(self, mcu_now):
+        """Drop stale future floors before a forced_t0 submit.
+
+        The flush-callback path passes an explicit anchor based on
+        step_gen_time. If no move is actually in flight, a far-future
+        `_last_move_end_time` or `_last_enable_schedule_time` can only
+        be stale internal state. Letting those values survive into
+        `_enable_stepper()` or the forced_t0 max() would override the
+        safe flush anchor and re-open timer/sequence faults.
+        """
+        live_move = (self._current_move is not None
+                     and self._current_move.get('end_time', 0.0) > mcu_now)
+        if live_move:
+            return
+
+        if self._last_move_end_time > mcu_now + MAX_T0_LOOKAHEAD_S:
+            logging.warning(
+                "buffer_feeder: forced_t0 guard clamped stale "
+                "_last_move_end_time %.2fs ahead (no in-flight move)",
+                self._last_move_end_time - mcu_now)
+            self._last_move_end_time = mcu_now
+        if self._last_enable_schedule_time > mcu_now + MAX_T0_LOOKAHEAD_S:
+            logging.warning(
+                "buffer_feeder: forced_t0 guard clamped stale "
+                "_last_enable_schedule_time %.2fs ahead "
+                "(no in-flight move)",
+                self._last_enable_schedule_time - mcu_now)
+            self._last_enable_schedule_time = mcu_now
 
     def _reprime_stepcompress_if_needed(self, forced_t0, gap):
         """Re-prime stepcompress when the MCU step-gen cursor is stale.

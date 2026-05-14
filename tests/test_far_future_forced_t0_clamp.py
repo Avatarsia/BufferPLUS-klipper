@@ -233,7 +233,46 @@ def test_just_past_cap_forced_t0_clamped():
 
 
 # ---------------------------------------------------------------------------
-# Test 5: Post-clamp queue_step interval is within int32 timer range
+# Test 5: Stale future floors must not override a healthy forced_t0
+# ---------------------------------------------------------------------------
+
+def test_stale_future_floors_do_not_override_healthy_forced_t0():
+    """A healthy flush anchor must still win when the internal floors
+    are stale and far in the future.
+
+    This is the gap left by the original P7-73 guard: clamping
+    `forced_t0` alone is not enough if `_last_move_end_time` or
+    `_last_enable_schedule_time` are already corrupted and no move is
+    actually in flight.
+    """
+    printer, feeder = make_feeder()
+    motion_q = printer.lookup_object('motion_queuing')
+
+    feeder.reactor.now = 5.0  # mcu_now
+    feeder._last_move_end_time = 25.0
+    feeder._last_enable_schedule_time = 26.0
+    feeder._stepcompress_primed = True
+    feeder._current_move = None
+
+    appends_before = len(motion_q.append_calls)
+    feeder._submit_single_trapezoid(
+        15.0, feeder.feed_speed, forced_t0=5.55)
+
+    own = _submitted_to_own_trapq(motion_q, feeder, appends_before)
+    assert own, "expected submit"
+    t0 = own[0][1]
+
+    assert t0 == pytest.approx(5.55, abs=0.01), (
+        "forced_t0 guard broken: stale future floors overrode a "
+        "healthy forced_t0=5.55. Got t0=%.3f." % t0)
+    assert feeder._last_enable_schedule_time <= 5.0 + feeder.lead_time + 0.01, (
+        "forced_t0 guard broken: stale _last_enable_schedule_time was "
+        "not sanitized before enable_stepper. Got %.3f." % (
+            feeder._last_enable_schedule_time))
+
+
+# ---------------------------------------------------------------------------
+# Test 6: Post-clamp queue_step interval is within int32 timer range
 # ---------------------------------------------------------------------------
 
 def test_post_clamp_queue_step_interval_within_int32():
