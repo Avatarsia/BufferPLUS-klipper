@@ -298,3 +298,103 @@ def test_anchor_after_two_full_windows_fires_again(monkeypatch):
     assert len(calls) == 2, (
         "After a full idle_anchor_gap elapses since the previous "
         "anchor, the watchdog must re-fire.")
+
+
+# ---------------------------------------------------------------------------
+# Issue #31 Refactor-Port Regression: Watchdog vs. hall_empty + flush_callback
+# ---------------------------------------------------------------------------
+#
+# Hotfix 10 (Hardware 2026-05-14, klippy.log Z.363): MCU 'LLL_PLUS' shutdown
+# "Timer too close" beim ersten Druckstart nach Klipper-Idle (gap=257.7s).
+#
+# Wurzel: Der P7-75 Sub-Gate `not self.hall_empty` blockierte den Watchdog
+# auch im flush-callback-bang-bang-Pfad (use_flush_callback_bang_bang=True).
+# Dort ist `_bang_bang_tick` ein No-Op — der Race vor dem das Gate
+# schuetzen sollte (Bang-Bang-Feed-Request vs. Watchdog-Anchor) existiert
+# nur im klassischen Reactor-Tick-Pfad. Im flush-callback-Pfad ist der
+# Watchdog die EINZIGE Schutzschicht gegen stale last_step_clock waehrend
+# Klipper-Idle (kein motion_queuing-Callback ohne Steps).
+#
+# Fix: hall_empty-Gate konditional an use_flush_callback_bang_bang=False
+# binden. Mit flush_callback_bang_bang=True (= C-cont Streaming-Modus)
+# feuert der Watchdog auch bei hall_empty=True.
+#
+# Status: Im Refactor (Commit 02e9b33) wurde nur Teil 2 von Hotfix 10
+# portiert (Idle-Suppression in _on_mcu_flush). Teil 1 (Watchdog-Gate-
+# Anpassung) fehlt — diese Tests sind die TDD-Regression.
+
+
+def test_watchdog_fires_in_auto_with_hall_empty_when_flush_callback_bangbang(
+        monkeypatch):
+    """Hotfix 10 (Issue #31 Refactor-Port-Regression):
+    Im flush-callback-bang-bang-Pfad (use_flush_callback_bang_bang=True)
+    muss der Watchdog auch bei hall_empty=True feuern.
+
+    Pre-condition fuer den realen Hardware-Crash:
+      - state=AUTO, kein Druck aktiv (print_stats=standby)
+      - hall_empty=True (Buffer-Arm in entrance-Position, normales Idle)
+      - use_flush_callback_bang_bang=True (C-cont Streaming-Modus)
+      - _continuous_feed=False (Bang-Bang nicht aktiv)
+      - gap > idle_anchor_gap
+
+    Ohne Fix bleibt last_step_clock stale → erster Submit nach PRINT_START
+    crasht mit Timer-too-close. Mit Fix feuert der Watchdog regelmaessig
+    den 0.05mm-Micro-Anchor und haelt den Cursor frisch.
+
+    Hardware-Beleg: klippy_refactor_timer_too_close.log Z.3086 (clock=
+    4052274463, 0 'auto anchor fired' Events in der gesamten Idle-Phase).
+    """
+    _, feeder = make_idle_feeder(
+        values={'use_flush_callback_bang_bang': True})
+    feeder._state = buffer_feeder.STATE_AUTO
+    # Bang-Bang muss quiescent sein (sonst greift der continuous_feed-Gate).
+    feeder._continuous_feed = False
+    # hall_empty=True simuliert Filament-im-Buffer-Idle: Arm haengt in
+    # entrance-Position.
+    set_sensor_active(feeder, 'hall_empty', True)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+
+    calls = count_anchor_calls(monkeypatch, feeder)
+    feeder.reactor.now = 20.0
+    feeder._last_move_end_time = 0.0
+    feeder._main_tick(eventtime=20.0)
+
+    assert len(calls) == 1, (
+        "Hotfix 10: Watchdog MUSS in STATE_AUTO mit hall_empty=True "
+        "feuern, wenn use_flush_callback_bang_bang=True. Ohne diesen "
+        "Anchor altert last_step_clock waehrend Klipper-Idle und der "
+        "erste Submit nach PRINT_START crasht mit Timer-too-close.")
+
+
+def test_watchdog_still_blocks_in_auto_with_hall_empty_when_classic_bangbang(
+        monkeypatch):
+    """Regression P7-75 klassischer Pfad: bei use_flush_callback_bang_-
+    bang=False bleibt das hall_empty-Gate aktiv.
+
+    Hier laeuft _bang_bang_tick im Reactor-Tick als echter Submitter.
+    Ein Watchdog-Anchor parallel dazu wuerde mit dem Bang-Bang-Feed-
+    Request racen — genau der Race vor dem P7-75 urspruenglich
+    geschuetzt hatte. Das Gate muss in diesem Pfad weiter blocken.
+    """
+    _, feeder = make_idle_feeder(
+        values={'use_flush_callback_bang_bang': False})
+    feeder._state = buffer_feeder.STATE_AUTO
+    feeder._continuous_feed = False
+    set_sensor_active(feeder, 'hall_empty', True)
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    # Bang-bang-tick patchen um Observation eng zu halten (existierendes
+    # Pattern in test_state_auto_with_active_bangbang_does_not_fire).
+    monkeypatch.setattr(feeder, "_bang_bang_tick", lambda et: None)
+
+    calls = count_anchor_calls(monkeypatch, feeder)
+    feeder.reactor.now = 20.0
+    feeder._last_move_end_time = 0.0
+    feeder._main_tick(eventtime=20.0)
+
+    assert calls == [], (
+        "P7-75 klassischer Reactor-Tick-Pfad: hall_empty-Gate muss "
+        "Watchdog weiter blocken, wenn use_flush_callback_bang_bang="
+        "False. Sonst race zwischen Watchdog-Anchor und Bang-Bang-"
+        "Feed-Request im _bang_bang_tick.")

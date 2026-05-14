@@ -1120,13 +1120,42 @@ class BufferFeeder:
                     _print_active = False
                     _p778_override = True
 
+            # Hotfix 10 (Issue #31 Refactor-Port, Hardware 2026-05-14
+            # klippy.log: MCU 'LLL_PLUS' shutdown "Timer too close" beim
+            # ersten Druckstart nach Klipper-Idle, 0 Watchdog-Anchor-
+            # Fires in der gesamten Idle-Phase).
+            #
+            # P7-75 Original-Bedingung `not self.hall_empty` schuetzt
+            # vor Race mit Bang-Bang-Feed-Request. Diese Race existiert
+            # NUR im Reactor-Tick-Bang-Bang-Pfad (use_flush_callback_-
+            # bang_bang=False). Bei use_flush_callback_bang_bang=True
+            # ist _bang_bang_tick ein No-Op, Bang-Bang feuert NUR via
+            # _on_mcu_flush, der waehrend Klipper-Idle gar nicht
+            # gerufen wird (keine motion_queuing-Aktivitaet). Resultat:
+            # hall_empty=True + Klipper-Idle + flush_callback-Pfad ->
+            # kein Submit -> last_step_clock altert -> Timer too close
+            # beim ersten Print-Start-Submit nach > CLOCK_DIFF_MAX
+            # (~16.78s @ 48MHz).
+            #
+            # Fix: hall_empty-Gate nur aktiv wenn use_flush_callback_-
+            # bang_bang=False (klassischer Reactor-Tick-Pfad). Im
+            # flush-callback-Pfad muss Watchdog auch bei hall_empty
+            # feuern. Andere Sub-Gates (_continuous_feed, hall_full,
+            # _needs_overflow_prime) bleiben unveraendert — kein Race
+            # mit aktivem Stream, kein Forward-Feed in vollen Buffer.
+            #
+            # Siehe tests/test_idle_watchdog_anchor.py:
+            #   test_watchdog_fires_in_auto_with_hall_empty_when_flush_callback_bangbang
+            #   test_watchdog_still_blocks_in_auto_with_hall_empty_when_classic_bangbang
+            hall_empty_block = (self.hall_empty
+                                and not self.use_flush_callback_bang_bang)
             if (self._state in (STATE_IDLE, STATE_AUTO)
                     and not self._stepper_synced_to
                     and not self._pending_disable
                     and not self._move_in_flight()
                     and self._pending_remaining_mm == 0.0
                     and not self._continuous_feed
-                    and not self.hall_empty
+                    and not hall_empty_block
                     and not self.hall_full
                     and not self._needs_overflow_prime
                     and not _print_active):  # P7-77 A + P7-78 Override
