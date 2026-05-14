@@ -3092,11 +3092,44 @@ class BufferFeeder:
         # interrupt_chunk_mm Chunk -> kein _pending_remaining_mm im
         # Continuous-Mode, HALL1-Trigger stoppt die Pipeline sofort beim
         # naechsten flush-callback.
+
+        # C-cont Hotfix 16 (C1) — Always-Streaming Mode
+        # (Hardware 2026-05-14 Runs 2-5: c=N i=0 Invalid sequence nach
+        # 4.8-7.2 min Druckzeit, statistisch konsistent). Hypothese
+        # zur Ursache: Submit-Mode-Wechsel im _on_mcu_flush triggert
+        # eine LEST-Bumping-Diskontinuitaet in _submit_single_trapezoid.
+        #   streaming=True:  kein _enable_stepper, LEST stehengelassen
+        #   streaming=False: _enable_stepper, LEST per Tick gebumped
+        # A<->B-Wechsel -> nicht-monoton-konsistente t0-Floors ->
+        # Stepcompress-State driftet -> compress_bisect_add erzeugt
+        # interval=0, count>1 -> Crash.
+        #
+        # Vorherige Versuche WIDERLEGT:
+        #   Hotfix 14 (1ms t0-Padding) — keine Wirkung
+        #   Hotfix 15 (50ms Null-Move-Trapezoid) — keine Wirkung
+        # -> Wurzel ist nicht 'Steps zu nah' sondern Pfad-Wechsel.
+        #
+        # Fix C1: streaming=True konstant. Pfad invariant -> kein Drift.
+        #
+        # Mitigation 1 — Stepper-Enable: streaming=True ueberspringt
+        # _enable_stepper(). Wenn Stepper disabled (post-OVERFLOW,
+        # _pending_disable, primed=False), explizit enable VOR Submit.
+        #
+        # Mitigation 2 — Anchor-Floor: bei move_active=False ist
+        # anchor=step_gen+lead_time. _submit_single_trapezoid
+        # t0=max(forced_t0, lme, en, mcu_now) -> mcu_now-Floor
+        # schuetzt vor stale anchor.
+        #
+        # Siehe specs/2026-05-14-c-cont-hotfix16-always-streaming.md.
+        if (not self._stepcompress_primed
+                or self._pending_disable
+                or self._stepper_enable is None):
+            self._enable_stepper()
         self._submit_move(
             self.interrupt_chunk_mm,
             target_speed,
             forced_t0=anchor,
-            streaming=move_active,
+            streaming=True,  # C1: konstant streaming, kein Pfad-Wechsel
             submit_chunk_cap=self.interrupt_chunk_mm)
 
     def _exit_phase3_stable(self, *, set_grace, respond_text):

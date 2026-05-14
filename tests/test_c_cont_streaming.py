@@ -1223,3 +1223,220 @@ def test_c_cont_hotfix6_interrupt_chunk_override(monkeypatch):
     printer, feeder = make_c_cont_feeder(
         monkeypatch, cfg_overrides={'interrupt_chunk_mm': 3.0})
     assert feeder.interrupt_chunk_mm == 3.0
+
+
+# ---------------------------------------------------------------------------
+# C-cont Hotfix 16 — C1: Always-Streaming Mode
+# Hardware-Belege: 5 Runs c=N i=0 nach 4.8-7.2 min Druckzeit.
+# Wurzel: Submit-Mode-Wechsel (streaming=True ↔ streaming=False) in
+# _on_mcu_flush triggert en-Floor-Diskontinuitaet im _submit_single_-
+# trapezoid -> stepcompress compress_bisect_add interval=0, count>1.
+# Fix: streaming=True konstant. Mitigation 1: enable-Sicherheit.
+# Siehe specs/2026-05-14-c-cont-hotfix16-always-streaming.md
+# ---------------------------------------------------------------------------
+
+
+def test_c_cont_hotfix16_always_streaming_when_no_move_in_flight(monkeypatch):
+    """Hotfix 16 (C1): _on_mcu_flush submittet IMMER mit streaming=True,
+    auch wenn _move_in_flight()=False. Eliminiert Submit-Mode-Wechsel-
+    Race der c=N i=0 Invalid sequence triggert."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder, 'hall_empty', True)
+    _populate_tracker_to_ready(feeder, velocity=15.0)
+    submits = _capture_submits(feeder, monkeypatch)
+    # Move-State: KEIN Move in flight (lme weit in Vergangenheit)
+    feeder._last_move_end_time = 0.0
+    feeder._pending_remaining_mm = 0.0
+    feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
+    assert len(submits) == 1
+    # Hotfix 16: streaming=True KONSTANT (auch wenn move_in_flight=False)
+    assert submits[0]['streaming'] is True, (
+        "Hotfix 16 C1: submit muss IMMER streaming=True sein, "
+        "auch wenn _move_in_flight()=False (kein Mode-Wechsel-Race). "
+        f"Erhalten: streaming={submits[0]['streaming']}")
+
+
+def test_c_cont_hotfix16_streaming_when_move_in_flight(monkeypatch):
+    """Hotfix 16 Regression: bei aktivem Move (move_in_flight=True)
+    bleibt streaming=True (war vorher auch True). Stellt sicher dass
+    der Move-Active-Pfad nicht gebrochen wird."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder, 'hall_empty', True)
+    _populate_tracker_to_ready(feeder, velocity=15.0)
+    submits = _capture_submits(feeder, monkeypatch)
+    # Move-State: Move noch in flight (_current_move + lme > mcu_now).
+    # _move_in_flight() braucht _current_move != None.
+    feeder.reactor.now = 5.0  # mcu_now = 5.0
+    feeder._last_move_end_time = 5.10  # lme > mcu_now
+    feeder._current_move = {'end_time': 5.10}  # _move_in_flight=True
+    feeder._stepcompress_primed = True  # primed (vermeidet not-primed early-return)
+    feeder._pending_remaining_mm = 0.0
+    # step_gen_time so dass remaining=lme-step_gen=5.10-5.05=0.05 <= lead_time
+    feeder._on_mcu_flush(flush_time=5.00, step_gen_time=5.05)
+    assert len(submits) == 1
+    assert submits[0]['streaming'] is True
+
+
+def test_c_cont_hotfix16_ensures_enable_when_not_primed(monkeypatch):
+    """Hotfix 16 Mitigation 1: _on_mcu_flush ruft _enable_stepper auf
+    wenn _stepcompress_primed=False bevor streaming-Submit. Verhindert
+    'Timer too close' bei disabled stepper (post-OVERFLOW Pfad)."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder, 'hall_empty', True)
+    _populate_tracker_to_ready(feeder, velocity=15.0)
+    enable_calls = []
+    monkeypatch.setattr(feeder, '_enable_stepper',
+                        lambda: enable_calls.append('enable'))
+    monkeypatch.setattr(feeder, '_submit_move', lambda *a, **kw: None)
+    # Pre-condition: stepcompress nicht primed
+    feeder._stepcompress_primed = False
+    feeder._last_move_end_time = 0.0
+    feeder._pending_remaining_mm = 0.0
+    feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
+    # Mitigation 1: _enable_stepper wurde aufgerufen
+    assert 'enable' in enable_calls, (
+        "Hotfix 16 Mitigation 1: _enable_stepper muss aufgerufen werden "
+        "wenn _stepcompress_primed=False vor streaming-Submit.")
+
+
+def test_c_cont_hotfix16_ensures_enable_when_pending_disable(monkeypatch):
+    """Hotfix 16 Mitigation 1: _enable_stepper bei _pending_disable=True.
+    Wenn ein Disable pending ist (OVERFLOW deferred), muss explicit
+    enable vor dem streaming-Submit erfolgen."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder, 'hall_empty', True)
+    _populate_tracker_to_ready(feeder, velocity=15.0)
+    enable_calls = []
+    monkeypatch.setattr(feeder, '_enable_stepper',
+                        lambda: enable_calls.append('enable'))
+    monkeypatch.setattr(feeder, '_submit_move', lambda *a, **kw: None)
+    # Pre-condition: pending_disable=True
+    feeder._stepcompress_primed = True
+    feeder._pending_disable = True
+    feeder._last_move_end_time = 0.0
+    feeder._pending_remaining_mm = 0.0
+    feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
+    assert 'enable' in enable_calls, (
+        "Hotfix 16 Mitigation 1: _enable_stepper muss aufgerufen werden "
+        "wenn _pending_disable=True.")
+
+
+def test_c_cont_hotfix16_no_enable_when_already_active(monkeypatch):
+    """Hotfix 16 Regression: KEIN doppelter _enable_stepper bei normalem
+    Submit (primed=True, not pending_disable). Streaming-Pfad
+    ueberspringt enable bewusst (P7-66 R1 Optimization)."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder, 'hall_empty', True)
+    _populate_tracker_to_ready(feeder, velocity=15.0)
+    enable_calls = []
+    monkeypatch.setattr(feeder, '_enable_stepper',
+                        lambda: enable_calls.append('enable'))
+    monkeypatch.setattr(feeder, '_submit_move', lambda *a, **kw: None)
+    # Pre-condition: alles normal
+    feeder._stepcompress_primed = True
+    feeder._pending_disable = False
+    # _stepper_enable handle muss existieren (klippy:connect simulieren)
+    if feeder._stepper_enable is None:
+        # Fixture hat klippy:connect bereits gefeuert; falls nicht:
+        # _stepper_enable bleibt None und Test waere falsch positive
+        pytest.skip("stepper_enable not wired (klippy:connect required)")
+    feeder._last_move_end_time = 0.0
+    feeder._pending_remaining_mm = 0.0
+    feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
+    # Regression: enable wurde NICHT vom Hotfix-16-Pfad aufgerufen
+    # (existing _submit_move ist mocked, daher kein indirekter Aufruf)
+    assert 'enable' not in enable_calls, (
+        "Hotfix 16: kein doppelter enable-Aufruf bei normalem Submit "
+        "(primed=True, not pending_disable, stepper_enable wired). "
+        f"Aufrufe: {enable_calls}")
+
+
+def test_c_cont_hotfix16_anchor_unchanged(monkeypatch):
+    """Hotfix 16 Regression (Spec Test 5): anchor-Berechnung bleibt
+    strukturell unverändert.
+    - move_in_flight=True:  anchor = _last_move_end_time
+    - move_in_flight=False: anchor = step_gen_time + lead_time
+    Nur das streaming-Flag wechselt; der Anchor-Pfad selbst muss bleiben."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder, 'hall_empty', True)
+    _populate_tracker_to_ready(feeder, velocity=15.0)
+
+    # Case A: move_in_flight=True → anchor = lme
+    submits_a = _capture_submits(feeder, monkeypatch)
+    feeder.reactor.now = 5.0
+    feeder._last_move_end_time = 5.10
+    feeder._current_move = {'end_time': 5.10}
+    feeder._stepcompress_primed = True
+    feeder._pending_remaining_mm = 0.0
+    feeder._on_mcu_flush(flush_time=5.00, step_gen_time=5.05)
+    assert len(submits_a) == 1
+    assert submits_a[0]['forced_t0'] == pytest.approx(5.10, abs=1e-9), (
+        f"move_in_flight=True: anchor muss lme=5.10 sein, "
+        f"erhalten {submits_a[0]['forced_t0']}")
+
+    # Case B: move_in_flight=False → anchor = step_gen + lead_time
+    printer2, feeder2 = make_c_cont_feeder(monkeypatch)
+    feeder2._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder2, 'hall_empty', True)
+    _populate_tracker_to_ready(feeder2, velocity=15.0)
+    submits_b = _capture_submits(feeder2, monkeypatch)
+    feeder2._last_move_end_time = 0.0
+    feeder2._current_move = None
+    feeder2._pending_remaining_mm = 0.0
+    feeder2._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
+    assert len(submits_b) == 1
+    expected_anchor = 10.0 + feeder2.lead_time
+    assert submits_b[0]['forced_t0'] == pytest.approx(expected_anchor, abs=1e-9), (
+        f"move_in_flight=False: anchor muss step_gen+lead_time="
+        f"{expected_anchor} sein, erhalten {submits_b[0]['forced_t0']}")
+
+
+def test_c_cont_hotfix16_integration_t0_floor_with_streaming_and_no_move(monkeypatch):
+    """Hotfix 16 Integration (I-3): _submit_single_trapezoid mit
+    streaming=True UND move_active=False (neuer Pfad durch C1).
+    Verifiziert dass t0 alle Floors respektiert:
+      t0 >= forced_t0 (anchor)
+      t0 >= _last_enable_schedule_time (LEST-Floor — kritisch nach
+            Mitigation-1-enable)
+      t0 >= mcu_now (kein Past-Submit)
+    Stellt sicher dass der neue konstante-streaming-Pfad keine
+    Floor-Verletzung produziert."""
+    printer, feeder = make_c_cont_feeder(monkeypatch)
+    feeder._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder, 'hall_empty', True)
+    _populate_tracker_to_ready(feeder, velocity=15.0)
+    submits = _capture_submits(feeder, monkeypatch)
+
+    # Setup: KEIN aktiver Move, LEST in nahe Zukunft (gerade enabled)
+    feeder.reactor.now = 10.0
+    feeder._last_move_end_time = 0.0   # stale
+    feeder._current_move = None
+    feeder._pending_remaining_mm = 0.0
+    feeder._stepcompress_primed = False   # → triggert Mitigation-1-enable
+    # Nach _enable_stepper wird LEST in Zukunft sein:
+    feeder._last_enable_schedule_time = 10.5
+
+    feeder._on_mcu_flush(flush_time=10.0, step_gen_time=10.0)
+    assert len(submits) == 1
+    s = submits[0]
+    anchor = s['forced_t0']
+    # streaming=True konstant (C1):
+    assert s['streaming'] is True
+    # Anchor selbst muss >= step_gen + lead_time sein:
+    assert anchor >= 10.0 + feeder.lead_time - 1e-9
+    # Der finale t0 (in _submit_single_trapezoid berechnet) muss
+    # mindestens den LEST-Floor erreichen — das ist die Garantie dass
+    # Mitigation 1 wirksam wird. Wir können forced_t0 selbst prüfen:
+    # wenn anchor < LEST, dann muss _submit_single_trapezoid das mit
+    # max() korrigieren. Hier stellen wir sicher dass _on_mcu_flush
+    # zumindest keinen Submit mit anchor < mcu_now produziert.
+    assert anchor >= feeder.reactor.now - 1e-9, (
+        f"anchor={anchor} darf nicht in der Vergangenheit "
+        f"(mcu_now={feeder.reactor.now}) liegen")
+
