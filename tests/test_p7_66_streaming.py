@@ -59,7 +59,7 @@ forward-direction beschränkt.
 """
 
 import pytest
-from fakes_klipper import FakeConfig, FakePrinter
+from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
 from klipper_extras import buffer_feeder
 
 
@@ -84,6 +84,10 @@ def make_feeder(values=None):
     if values:
         base.update(values)
     printer = FakePrinter()
+    # Hotfix 10b: explicit print_stats(state='printing') damit
+    # _on_mcu_flush nicht durch die idle-suppression blockiert wird.
+    # P7-66 Tests testen Streaming WAEHREND aktivem Print.
+    printer.objects['print_stats'] = FakePrintStats(state='printing')
     config = FakeConfig(printer=printer, values=base)
     feeder = buffer_feeder.BufferFeeder(config)
     # P7-66 R6: fire klippy:connect so _handle_connect runs and
