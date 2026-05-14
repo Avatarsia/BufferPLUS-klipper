@@ -1,35 +1,28 @@
-"""Cursor-Freshness-Contract — garantierte last_step_clock-Frische vor
-jedem streaming-Submit aus _on_mcu_flush.
+"""Cursor-Freshness-Contract (D2: Deferred-Streaming) — Pre-Anchor und
+Streaming-Submit auf zwei aufeinanderfolgende flush-callbacks aufteilen.
 
-Hardware-Beleg (2026-05-14 klippy_refactor_*_repro.log):
-
-  buffer_feeder: auto anchor fired (4× in der Idle-Phase mit hall_empty=True,
-                                    Watchdog-Fix aus PR #39 wirkt)
-  ... 8× buffer_metrics (idle continues)
-  Starting SD card print (position 0)
-  buffer_event[flush_submit]: anchor=58.698 move_active=False chunk=9.000
-  SET_KINEMATIC_POSITION pos=0.000,0.000,0.000 set_homed=xyz
+Hardware-Beleg V1 (Pre-D2-Version, klippy_refactor_*_repro.log):
+  Pre-Anchor fired (cursor_age=6.74s > 1.0s threshold),
+  Streaming-Submit folgte IM GLEICHEN flush-callback,
+  → beide queue_step-Bursts landen zusammen mit TMC-UART-Reads in
+    einem USB-Burst (Sent 83-97 alle bei T=1365910.806-.864).
+  → MCU empfaengt scheduled-step-clock bereits in der Vergangenheit
+    (lead_time=0.120s wird durch USB+MCU-CPU-Latenz aufgefressen).
   → MCU 'LLL_PLUS' shutdown: Timer too close
 
-Send-Queue-Beleg: queue_step oid=0 interval=332180349 count=1 add=0
-  (6.92s zwischen letztem Watchdog-Anchor und erstem Submit-Step). Mit
-  USB-Sende-Latenz + MCU-busy (TMC-UART-Storm in derselben Send-Sequenz)
-  landet der erste Step in der Vergangenheit relativ zur MCU-Clock zum
-  Receive-Zeitpunkt → Timer too close.
+Wurzel V2 (D2): Pre-Anchor + Streaming-Submit in einem flush-callback
+fuehrt zu USB-Burst-Race; selbst mit garantiert frischem _last_move_-
+end_time hat die MCU keinen Buffer um den Pre-Anchor-Step durchzu-
+schedulen bevor der Streaming-Step queued wird.
 
-Wurzel: _on_mcu_flush hat keinen Vertrag wie alt last_step_clock sein
-darf, bevor ein streaming-Submit ausgeloest wird. Watchdog feuert alle
-~10s als best-effort, schliesst aber das Race-Window nicht. Wenn
-streaming-Demand zwischen zwei Watchdog-Anchors landet (z.B. PRINT_START
-oeffnet das Idle-Suppression-Gate via state='printing'), schickt
-_flush_submit_streaming_chunk einen Move auf einen 7-10s alten Cursor.
-
-Fix-Vertrag (Phase 3 TDD): _flush_submit_streaming_chunk sichert vor
-JEDEM eigentlichen Streaming-Submit einen garantierten anchor-Step,
-wenn _last_move_end_time aelter als MIN_CURSOR_FRESHNESS_S ist und kein
-move_in_flight laeuft. Effekt: queue_step interval ist nach dem
-Pre-Anchor << 1s — keine Race-Anfaelligkeit mehr fuer Timer-too-close
-in dieser Wurzel-Klasse.
+Fix D2: Pre-Anchor submitten und SOFORT return (kein streaming-Submit
+in derselben flush-callback). Naechster flush-callback (~10-25ms
+spaeter via motion_queuing.flush_handler) findet _last_move_end_time
+frisch (vom Pre-Anchor), _move_in_flight() korrekt True solange
+Pre-Anchor laeuft, und faellt in den existierenden P7-66-Lookahead-
+Pfad zurueck (streaming abuttend an lme). MCU bekommt Pre-Anchor-
+Bytes und Streaming-Bytes in zwei separaten USB-Bursts mit
+ausreichendem Abstand — keine Race-Anfaelligkeit mehr.
 
 Komplementaer zu:
   - PR #39 (Watchdog feuert bei hall_empty=True im flush_callback-Pfad)
@@ -99,16 +92,18 @@ def own_trapq_appends(motion_q, feeder, before_count):
 # ---------------------------------------------------------------------------
 
 
-def test_freshness_anchor_fires_when_cursor_stale_and_no_move_in_flight():
-    """Wurzel-Fall: _last_move_end_time ist >MIN_CURSOR_FRESHNESS_S
-    alt, kein move in flight, streaming demand vorhanden
-    (hall_empty=True). Erwartung: ZWEI trapq_append-Calls — zuerst
-    ein Anchor-Step (Cursor-Refresh, 0.05mm), dann der eigentliche
-    streaming chunk (interrupt_chunk_mm).
+def test_freshness_anchor_fires_alone_when_cursor_stale_d2_deferred():
+    """D2 Wurzel-Fall: bei stale cursor submittet _flush_submit_-
+    streaming_chunk nur den Pre-Anchor und KEHRT ZURUECK (kein
+    streaming-Submit in derselben flush-callback). Der streaming-
+    Submit wird auf den NAECHSTEN flush-callback verschoben — so
+    landen die queue_step-Bytes in zwei separaten USB-Bursts mit
+    ausreichendem MCU-Verarbeitungs-Buffer dazwischen.
 
-    Pre-Fix: nur EIN append (streaming submit mit interval > 1s).
-    Hardware-Crash: queue_step interval=332M Ticks (6.92s) → Timer
-    too close beim ersten Submit nach PRINT_START.
+    Pre-D2 (PR #40 V1): 2 appends (Anchor + Streaming sofort)
+    -> USB-Burst-Race -> Timer too close.
+
+    D2: 1 append (nur Anchor diese flush-callback).
     """
     printer, feeder = make_streaming_feeder()
     motion_q = printer.lookup_object('motion_queuing')
@@ -122,23 +117,67 @@ def test_freshness_anchor_fires_when_cursor_stale_and_no_move_in_flight():
     motion_q.trigger_flush(flush_time=10.0, step_gen_time=10.0)
     own = own_trapq_appends(motion_q, feeder, appends_before)
 
-    assert len(own) == 2, (
-        "Erwartung: Cursor-Freshness-Anchor zuerst, dann streaming "
-        "submit (2 own_trapq appends). Erhalten: %d" % len(own))
-    # Erstes append = Anchor (0.05mm, kleine Distanz im accel/cruise/decel)
+    assert len(own) == 1, (
+        "D2: Pre-Anchor allein in dieser flush-callback. "
+        "Streaming-Submit erst beim naechsten flush-callback. "
+        "Erhalten: %d appends" % len(own))
+    # Sole append ist der Anchor (kleine Distanz)
     anchor_call = own[0]
-    streaming_call = own[1]
-    # axes_r ist Argument 9 in trapq_append signature (x-Komponente):
-    # (trapq, t0, accel_time, cruise_time, decel_time,
-    #  start_pos_x, _, _, axes_r_x, _, _, start_v, cruise_v, accel)
-    # Anchor sollte deutlich kleinere Bewegungszeit haben als Streaming.
-    anchor_total_time = anchor_call[2] + anchor_call[3] + anchor_call[4]
-    streaming_total_time = (streaming_call[2] + streaming_call[3]
-                            + streaming_call[4])
-    assert anchor_total_time < streaming_total_time, (
-        "Anchor-Move soll kuerzer sein als streaming chunk. "
-        "Anchor=%.4fs Streaming=%.4fs" % (anchor_total_time,
-                                          streaming_total_time))
+    # Anchor-Distanz aus Trapezoid-Profil rekonstruieren
+    accel_time = anchor_call[2]
+    cruise_time = anchor_call[3]
+    decel_time = anchor_call[4]
+    cruise_v = anchor_call[12]
+    total_dist = (cruise_v * cruise_time
+                  + 0.5 * cruise_v * (accel_time + decel_time))
+    assert total_dist == pytest.approx(ANCHOR_NUDGE_MM, abs=0.001), (
+        "Sole append in D2-deferred ist der Anchor. "
+        "Erwartete Distanz: %.3fmm, erhalten: %.4fmm"
+        % (ANCHOR_NUDGE_MM, total_dist))
+
+
+def test_streaming_follows_pre_anchor_on_next_flush_callback():
+    """D2 Vertrag: nach dem Pre-Anchor (1. flush-callback) erfolgt
+    der streaming-Submit beim NAECHSTEN flush-callback. Da der
+    Pre-Anchor _last_move_end_time auf mcu_now+lead_time gesetzt
+    hat, ist der naechste flush-callback im move_in_flight=True
+    Pfad (P7-66 Lookahead-Submit, abuttend an lme)."""
+    printer, feeder = make_streaming_feeder()
+    motion_q = printer.lookup_object('motion_queuing')
+
+    # 1. flush-callback: stale cursor
+    feeder.reactor.now = 10.0
+    feeder._last_move_end_time = 0.0
+    feeder._current_move = None
+
+    appends_before = len(motion_q.append_calls)
+    motion_q.trigger_flush(flush_time=10.0, step_gen_time=10.0)
+    own_first = own_trapq_appends(motion_q, feeder, appends_before)
+    assert len(own_first) == 1, "1. flush: nur Pre-Anchor"
+
+    # Pre-Anchor hat lme auf naehe mcu_now gesetzt:
+    assert feeder._last_move_end_time > 10.0, (
+        "Pre-Anchor muss _last_move_end_time setzen. "
+        "Erhalten: %.3f" % feeder._last_move_end_time)
+    pre_anchor_end = feeder._last_move_end_time
+
+    # 2. flush-callback (10ms spaeter): pre-anchor in flight,
+    # remaining = lme - step_gen_time < lead_time -> Lookahead
+    # streaming-submit abuttend an lme.
+    appends_before = len(motion_q.append_calls)
+    # step_gen_time so dass remaining = pre_anchor_end - sg klein
+    motion_q.trigger_flush(flush_time=10.01,
+                           step_gen_time=pre_anchor_end - 0.05)
+    own_second = own_trapq_appends(motion_q, feeder, appends_before)
+    assert len(own_second) == 1, (
+        "2. flush: streaming-Submit nach Pre-Anchor. "
+        "Erhalten: %d appends" % len(own_second))
+    # Streaming-Submit muss abuttend an pre_anchor_end starten
+    streaming_t0 = own_second[0][1]
+    assert streaming_t0 == pytest.approx(pre_anchor_end, abs=0.001), (
+        "Streaming-Submit muss abuttend an Pre-Anchor-Ende starten "
+        "(P7-66 Lookahead). t0=%.3f erwartet=%.3f"
+        % (streaming_t0, pre_anchor_end))
 
 
 def test_no_freshness_anchor_when_cursor_fresh():
@@ -224,9 +263,8 @@ def test_no_freshness_anchor_when_target_speed_zero():
 
 def test_freshness_anchor_distance_is_anchor_nudge_mm():
     """Der Pre-Anchor verwendet ANCHOR_NUDGE_MM (0.05mm) — minimal
-    physisch spuerbar, aber genug fuer cursor refresh. axes_r_x +
-    Trapezoid-Profile lassen sich daraus rekonstruieren: distance =
-    0.5*cruise_v*(accel_time+decel_time) + cruise_v*cruise_time."""
+    physisch spuerbar, aber genug fuer cursor refresh. Distanz aus
+    Trapezoid-Profil rekonstruieren."""
     printer, feeder = make_streaming_feeder()
     motion_q = printer.lookup_object('motion_queuing')
 
@@ -238,7 +276,8 @@ def test_freshness_anchor_distance_is_anchor_nudge_mm():
     motion_q.trigger_flush(flush_time=10.0, step_gen_time=10.0)
     own = own_trapq_appends(motion_q, feeder, appends_before)
 
-    assert len(own) >= 1, "Anchor muss gefeuert haben"
+    # D2: 1 append in dieser flush-callback (nur Pre-Anchor)
+    assert len(own) == 1, "Anchor muss gefeuert haben (D2: sole append)"
     anchor_call = own[0]
     # Trapq-Append-Signatur, accel_time=arg[2], cruise_time=arg[3],
     # decel_time=arg[4], cruise_v=arg[12], accel=arg[13].
@@ -257,9 +296,7 @@ def test_freshness_anchor_distance_is_anchor_nudge_mm():
 
 def test_freshness_anchor_direction_positive_in_normal_demand():
     """Im normalen Demand-Pfad (kein hall_overflow): Anchor laeuft
-    in feed-direction (positiv). hall_overflow=True ist ein
-    separater Pfad — der flush-callback hat dafuer einen
-    Hall1Context.SUBMIT_MOVE early-return weiter oben."""
+    in feed-direction (positiv)."""
     printer, feeder = make_streaming_feeder()
     motion_q = printer.lookup_object('motion_queuing')
     # Default: hall_overflow=False bereits via make_streaming_feeder
@@ -272,7 +309,8 @@ def test_freshness_anchor_direction_positive_in_normal_demand():
     motion_q.trigger_flush(flush_time=10.0, step_gen_time=10.0)
     own = own_trapq_appends(motion_q, feeder, appends_before)
 
-    assert len(own) == 2, "Anchor + streaming expected"
+    # D2: 1 append in dieser flush-callback (nur Pre-Anchor)
+    assert len(own) == 1, "D2: Pre-Anchor allein"
     anchor_call = own[0]
     # direction (axes_r_x) = Argument 8 (0-indexed) in trapq_append:
     # (trapq, t0, accel_time, cruise_time, decel_time,
@@ -300,20 +338,17 @@ def test_freshness_anchor_advances_last_move_end_time():
     motion_q.trigger_flush(flush_time=10.0, step_gen_time=10.0)
     own = own_trapq_appends(motion_q, feeder, appends_before)
 
-    assert len(own) == 2, "Anchor + streaming expected"
+    # D2: nur Pre-Anchor in dieser flush-callback. Streaming kommt
+    # erst beim naechsten flush-callback.
+    assert len(own) == 1, "D2: nur Pre-Anchor"
     assert feeder._last_move_end_time > lme_before, (
         "_last_move_end_time muss nach dem anchor vorruecken. "
         "Vorher %.3f Nachher %.3f" % (lme_before,
                                        feeder._last_move_end_time))
-    # Anchor + streaming chunk enden in naher Zukunft nach mcu_now.
-    # Anchor: 0.05mm @ feed_speed (~3ms duration). Streaming chunk:
-    # interrupt_chunk_mm=9mm @ feed_speed (~0.6s + accel/decel ~0.9s).
-    # Total <= 1.5s nach mcu_now+lead_time. lme darf NICHT mehr in
-    # far-future Toolhead-Time zeigen (step_gen_time = 10.0 hier,
-    # aber mit forced_t0-Clamp auf mcu_now+lead_time landet lme bei
-    # ~mcu_now + lead_time + 1s = 11.x — NICHT bei 58+s wie im
-    # Crash-Pattern).
-    assert feeder._last_move_end_time < 10.0 + 2.0, (
-        "_last_move_end_time nach Anchor+Streaming sollte nahe "
-        "mcu_now (forced_t0-Clamp greift). Erhalten: %.3f"
-        % feeder._last_move_end_time)
+    # Pre-Anchor: 0.05mm @ feed_speed (~3ms duration). forced_t0
+    # wird intern auf mcu_now+lead_time geclampt. lme nach Anchor
+    # = mcu_now+lead_time+anchor_dur ≈ mcu_now + 0.125s.
+    assert feeder._last_move_end_time < 10.0 + 0.5, (
+        "_last_move_end_time nach Pre-Anchor sollte nahe mcu_now "
+        "(forced_t0-Clamp greift, Anchor ist 3-5ms). "
+        "Erhalten: %.3f" % feeder._last_move_end_time)

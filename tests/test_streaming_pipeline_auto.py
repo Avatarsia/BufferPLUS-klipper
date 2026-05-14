@@ -711,6 +711,10 @@ def test_streaming_then_halt_motion_clears_all_pending():
     # motion-Cleanup-Path zu testen (Sub-Chunk-Stream-Cleanup bleibt
     # relevant fuer Legacy-Pfade ausserhalb Continuous-Streaming).
     feeder.reactor.now = 5.00
+    # D2 Cursor-Freshness-Contract: damit der flush den primaeren
+    # streaming-submit-Pfad nimmt (nicht den deferred-anchor-Pfad
+    # bei stale cursor), _last_move_end_time frisch setzen.
+    feeder._last_move_end_time = 4.9
     motion_q.trigger_flush(flush_time=5.00, step_gen_time=5.05)
     assert feeder._continuous_feed is True
     feeder._pending_remaining_mm = 27.0  # Kuenstlich seeden

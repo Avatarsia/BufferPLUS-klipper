@@ -1791,28 +1791,31 @@ class BufferFeeder:
                 self._pending_remaining_mm, min_interval=1.0)
             return  # sub-chunk pipeline already running
 
-        # Cursor-Freshness-Contract (Hardware-Beleg 2026-05-14
-        # klippy_refactor_*_repro.log): wenn kein move in flight UND
-        # _last_move_end_time aelter als MIN_CURSOR_FRESHNESS_S, dann
-        # ist die MCU-side last_step_clock potenziell ueber USB-Sende-
-        # Latenz + MCU-busy in "Step in der Vergangenheit"-Race
-        # anfaellig (queue_step interval = mcu_now + lead_time -
-        # last_step_clock). Watchdog-Anchor alle 10s ist best-effort,
-        # schliesst aber das Race-Window nicht; PR #39 Watchdog-Fix
-        # haelt Cursor im IDLE frisch, aber das Race-Window zwischen
-        # Watchdog-Anchor und erstem streaming-Submit nach PRINT_START
-        # bleibt.
+        # Cursor-Freshness-Contract D2 (Hardware-Belege 2026-05-14):
         #
-        # Fix: pre-anchor (0.05mm @ feed_speed) als garantierter
-        # Cursor-Refresh vor dem streaming-Submit, wenn cursor zu alt.
-        # forced_t0 wird intern (siehe _plan_t0_anchor) auf
-        # mcu_now + lead_time geclampt — anchor landet sicher in
-        # naher Zukunft, last_step_clock danach <= lead_time alt.
-        # Effekt: queue_step interval fuer den danach folgenden
-        # streaming-Submit << 1s, race-frei unter jeder USB-Latenz.
+        # Lauf 1 (klippy_refactor_*_repro.log): ohne pre-anchor sah
+        # _flush_submit_streaming_chunk einen 7-10s alten Cursor und
+        # submittete den streaming-chunk mit forced_t0 weit voraus —
+        # queue_step interval=332M Ticks (6.92s) -> Timer too close.
+        #
+        # Lauf 2 (klippy_combined_fix_crash.log): pre-anchor +
+        # streaming-Submit IN DERSELBEN flush-callback brachten beide
+        # queue_step-Bursts plus TMC-UART-Reads in einen USB-Burst
+        # (Sent 83-97 alle innerhalb 58ms). MCU-CPU-busy + USB-Latenz
+        # frassen den lead_time-Buffer auf; Pre-Anchor-Step war beim
+        # MCU-Receive bereits in der Vergangenheit -> Timer too close.
+        #
+        # D2 Fix: Pre-Anchor allein in dieser flush-callback, SOFORT
+        # return. Streaming-Submit erfolgt im NAECHSTEN flush-callback
+        # via P7-66 Lookahead-Pfad (move_in_flight=True, abuttend an
+        # _last_move_end_time). MCU bekommt die queue_step-Bytes des
+        # Pre-Anchors und des Streaming-Submits in zwei getrennten
+        # USB-Bursts mit ausreichendem Verarbeitungs-Buffer dazwischen
+        # (typisch 10-25ms via motion_queuing.flush_handler).
         #
         # Komplementaer zu PR #39 (Watchdog-Hall-Empty-Bypass) und
         # 97e97e7 (sanitize stale-future-floors). Defense-in-depth.
+        # Siehe tests/test_cursor_freshness_before_submit.py.
         if not move_active:
             mcu_now = self.stepper.get_mcu().estimated_print_time(
                 self.reactor.monotonic())
@@ -1820,13 +1823,18 @@ class BufferFeeder:
             if cursor_age > MIN_CURSOR_FRESHNESS_S:
                 self._debug_event(
                     'flush_freshness_anchor',
-                    "pre-anchor cursor_age=%.2fs > %.2fs threshold",
+                    "deferred-anchor cursor_age=%.2fs > %.2fs "
+                    "threshold (D2: streaming auf naechste flush "
+                    "verschoben)",
                     cursor_age, MIN_CURSOR_FRESHNESS_S, min_interval=2.0)
                 anchor_dir = -1.0 if self.hall_overflow else 1.0
                 self._submit_move(
                     anchor_dir * ANCHOR_NUDGE_MM,
                     self.feed_speed,
                     forced_t0=step_gen_time + self.lead_time)
+                # D2: return statt continue — streaming-Submit erfolgt
+                # im naechsten flush-callback via P7-66 Lookahead-Pfad.
+                return
 
         if move_active:
             anchor = self._last_move_end_time

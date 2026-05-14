@@ -94,6 +94,12 @@ def test_flush_submits_when_hall3_active_and_state_auto():
     # mcu_now + 2.0s, so an artificial reactor.now=0 + step_gen_time=
     # 5.05 would now (correctly) trip the far-future clamp.
     feeder.reactor.now = 5.0
+    # D2 Cursor-Freshness-Contract: damit dieser Test den
+    # primaeren streaming-submit-Pfad prueft (nicht den deferred-
+    # anchor-Pfad bei stale cursor), _last_move_end_time frisch
+    # setzen. Cursor-Freshness ist separat in
+    # test_cursor_freshness_before_submit.py getestet.
+    feeder._last_move_end_time = 4.9
 
     appends_before = len(motion_q.append_calls)
     motion_q.trigger_flush(flush_time=5.0, step_gen_time=5.05)

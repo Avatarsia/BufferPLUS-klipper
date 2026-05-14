@@ -47,6 +47,10 @@ def test_debug_event_logging_emits_flush_submit_when_enabled(caplog):
     )
     set_sensor_active(feeder, 'hall_empty', True)
     feeder.reactor.now = 5.0
+    # D2 Cursor-Freshness-Contract: damit dieser Test den
+    # flush_submit-Pfad sieht (nicht den deferred-anchor-Pfad),
+    # _last_move_end_time frisch setzen.
+    feeder._last_move_end_time = 4.9
 
     with caplog.at_level(logging.INFO, logger=""):
         feeder._on_mcu_flush(flush_time=5.0, step_gen_time=5.05)
