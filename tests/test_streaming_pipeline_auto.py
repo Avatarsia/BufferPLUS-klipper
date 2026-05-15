@@ -466,6 +466,51 @@ def test_streaming_anchor_floors_at_mcu_now():
             "im forced_t0-Pfad — Timer-too-close-Risiko." % t0)
 
 
+def test_streaming_uses_step_gen_cursor_when_reactor_time_is_ahead():
+    """Flush-callback must not fall back to the first-chunk path just
+    because reactor.now() has moved past the previous end_time.
+
+    Real crash pattern: reactor wall-clock is already slightly ahead,
+    `_move_in_flight()` says False, but `step_gen_time` still sits
+    before `_current_move['end_time']`. Treating that as a fresh
+    non-streaming chunk re-runs `_enable_stepper()` and can reorder the
+    feeder submit sequence inside the flush handler.
+    """
+    printer, feeder = make_feeder()
+    motion_q = printer.lookup_object('motion_queuing')
+    enable = get_enable_handle(feeder)
+    set_sensor_active(feeder, 'hall_empty', True)
+
+    feeder.reactor.now = 10.00
+    feeder._continuous_feed = True
+    feeder._continuous_feed_direction = 1
+    feeder._continuous_feed_speed = feeder.feed_speed
+    feeder._last_enable_schedule_time = 0.0
+    feeder._last_move_end_time = 9.85
+    feeder._current_move = {
+        'end_time': 9.85,
+        'direction': 1.0,
+        'distance': feeder.flush_callback_chunk_mm,
+        'speed': feeder.feed_speed,
+    }
+    feeder._stepcompress_primed = True
+
+    enables_before = len(enable.enables)
+    appends_before = len(motion_q.append_calls)
+    motion_q.trigger_flush(flush_time=9.70, step_gen_time=9.72)
+
+    own = [c for c in motion_q.append_calls[appends_before:]
+           if c[0] is feeder.trapq]
+    assert own, "expected flush submit in cursor-lag race"
+    assert len(enable.enables) == enables_before, (
+        "flush cursor-lag race re-entered _enable_stepper() instead of "
+        "staying on the streaming path")
+    t0 = own[0][1]
+    assert t0 == pytest.approx(10.0, abs=0.01), (
+        "expected mcu_now-floor streaming anchor after cursor-lag race; "
+        "got %.3f" % t0)
+
+
 # ---------------------------------------------------------------------------
 # P7-66b — Interrupt-on-HALL via Move-Splitting.
 # ---------------------------------------------------------------------------

@@ -1883,6 +1883,31 @@ class BufferFeeder:
         return (not self._stepcompress_primed
                 and itersolve_end > step_gen_time)
 
+    def _flush_move_in_flight(self, step_gen_time):
+        """Flush-callback specific in-flight detection.
+
+        `reactor.monotonic()` can run slightly ahead of the callback's
+        `step_gen_time`. In that window `_move_in_flight()` may already
+        say False even though the step-generator cursor has not yet
+        advanced past the previously submitted trapezoid. Treat that as
+        still active so the next submit stays on the streaming path
+        (no extra motor_enable, no first-chunk re-anchor).
+        """
+        if self._current_move is None:
+            return False
+        if self._move_in_flight():
+            return True
+        current_end = self._current_move.get('end_time', 0.0)
+        if current_end > step_gen_time:
+            self._debug_event(
+                'flush_cursor_lag',
+                "treat in-flight by step_gen_time current_end=%.3f "
+                "step_gen=%.3f lme=%.3f",
+                current_end, step_gen_time, self._last_move_end_time,
+                min_interval=1.0)
+            return True
+        return False
+
     def _handle_overflow_prime_via_flush(self, step_gen_time):
         """Post-OVERFLOW prime via the flush-callback path.
 
@@ -1947,9 +1972,12 @@ class BufferFeeder:
                     self._critical_action_guard_remaining(eventtime))
             return
 
-        move_active = self._move_in_flight()
+        current_end = (self._current_move['end_time']
+                       if self._current_move is not None
+                       else self._last_move_end_time)
+        move_active = self._flush_move_in_flight(step_gen_time)
         if move_active:
-            remaining = self._last_move_end_time - step_gen_time
+            remaining = current_end - step_gen_time
             if remaining > self.lead_time:
                 self._debug_event(
                     'flush_skip_inflight',
@@ -1964,7 +1992,7 @@ class BufferFeeder:
             return  # sub-chunk pipeline already running
 
         if move_active:
-            anchor = self._last_move_end_time
+            anchor = current_end
         else:
             anchor = step_gen_time + self.lead_time
 
