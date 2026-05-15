@@ -1886,27 +1886,61 @@ class BufferFeeder:
     def _flush_move_in_flight(self, step_gen_time):
         """Flush-callback specific in-flight detection.
 
-        `reactor.monotonic()` can run slightly ahead of the callback's
-        `step_gen_time`. In that window `_move_in_flight()` may already
-        say False even though the step-generator cursor has not yet
-        advanced past the previously submitted trapezoid. Treat that as
-        still active so the next submit stays on the streaming path
-        (no extra motor_enable, no first-chunk re-anchor).
+        step_gen_time is the AUTHORITATIVE clock for "did the previous
+        move complete from stepcompress' perspective". `reactor.monotonic()`
+        can race in either direction relative to current_end, but only
+        step_gen_time decides whether new steps land before or after
+        stepcompress.last_step_clock.
+
+        Two reactor-race cases — both must be answered correctly:
+
+        1. reactor AHEAD of step_gen (c5b2e19): reactor.now() has moved
+           past current_end while step_gen_time still sits before it.
+           `_move_in_flight()` says False (False-Negative). Without the
+           cursor-lag branch, the next chunk would take the first-chunk
+           path with `_enable_stepper()` + re-anchor → inter-chunk gap
+           reopens and pipeline stalls. Fix (existing): treat as
+           in-flight when step_gen < current_end.
+
+        2. reactor BEHIND step_gen (2026-05-15): reactor.now() still
+           sits before current_end while step_gen_time has advanced
+           past it. `_move_in_flight()` says True (False-Positive).
+           Hardware-Crash 2026-05-15 klippy.log Z. 12848:
+             current_end=846.893  mcu_now=846.458  step_gen=847.158
+             remaining = current_end - step_gen = -0.265s (negative!)
+           Old code returned True via `_move_in_flight()`, anchored at
+           current_end=846.893. stepcompress.last_step_clock had already
+           advanced to ~847.158 → 7 steps landed before that clock →
+           collapsed to clock=0 → `stepcompress c=7 i=0`. Fix: check
+           step_gen against current_end FIRST and return False if past,
+           regardless of reactor — let the fresh-anchor path place t0
+           at step_gen + lead_time, safely ahead of last_step_clock.
+
+        See test_streaming_returns_done_when_step_gen_past_current_end_
+        and_reactor_behind for case 2,
+        test_streaming_uses_step_gen_cursor_when_reactor_time_is_ahead
+        for case 1.
         """
         if self._current_move is None:
             return False
+        current_end = self._current_move.get('end_time', 0.0)
+        # Case 2 (2026-05-15): step-gen authoritative. Past current_end
+        # ⇒ move done, no matter what reactor.now() says.
+        if step_gen_time >= current_end:
+            return False
+        # step_gen is still before current_end. Move is in flight per
+        # the authoritative clock. Two sub-cases for the reactor read:
         if self._move_in_flight():
             return True
-        current_end = self._current_move.get('end_time', 0.0)
-        if current_end > step_gen_time:
-            self._debug_event(
-                'flush_cursor_lag',
-                "treat in-flight by step_gen_time current_end=%.3f "
-                "step_gen=%.3f lme=%.3f",
-                current_end, step_gen_time, self._last_move_end_time,
-                min_interval=1.0)
-            return True
-        return False
+        # Case 1 (c5b2e19): reactor.now() raced ahead of step_gen but
+        # step_gen is still behind current_end. Log + treat in-flight.
+        self._debug_event(
+            'flush_cursor_lag',
+            "treat in-flight by step_gen_time current_end=%.3f "
+            "step_gen=%.3f lme=%.3f",
+            current_end, step_gen_time, self._last_move_end_time,
+            min_interval=1.0)
+        return True
 
     def _handle_overflow_prime_via_flush(self, step_gen_time):
         """Post-OVERFLOW prime via the flush-callback path.

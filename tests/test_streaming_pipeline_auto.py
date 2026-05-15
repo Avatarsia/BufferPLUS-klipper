@@ -511,6 +511,62 @@ def test_streaming_uses_step_gen_cursor_when_reactor_time_is_ahead():
         "got %.3f" % t0)
 
 
+def test_streaming_returns_done_when_step_gen_past_current_end_and_reactor_behind():
+    """Mirror of cursor-lag race: step_gen has advanced PAST current_end
+    while reactor.now() is still BEHIND it. Old logic returned True from
+    `_flush_move_in_flight` (because `_move_in_flight()` reads reactor),
+    anchored the next chunk at current_end, and stepcompress saw the
+    new steps land BEFORE its last_step_clock → c=N i=0 crash.
+
+    Hardware-Crash 2026-05-15 klippy.log Z. 12848:
+        current_end=846.893  mcu_now=846.458  step_gen=847.158
+        remaining = current_end - step_gen = -0.265  (NEGATIVE)
+    → next submit must take the fresh-anchor path with
+      anchor = step_gen + lead_time, not anchor = current_end.
+    """
+    printer, feeder = make_feeder()
+    motion_q = printer.lookup_object('motion_queuing')
+    set_sensor_active(feeder, 'hall_empty', True)
+
+    # Hardware-derived state: reactor BEHIND current_end, step_gen AHEAD.
+    feeder.reactor.now = 9.50
+    feeder._continuous_feed = True
+    feeder._continuous_feed_direction = 1
+    feeder._continuous_feed_speed = feeder.feed_speed
+    feeder._last_enable_schedule_time = 8.5
+    feeder._last_move_end_time = 9.85
+    feeder._current_move = {
+        'end_time': 9.85,
+        'direction': 1.0,
+        'distance': feeder.flush_callback_chunk_mm,
+        'speed': feeder.feed_speed,
+    }
+    feeder._stepcompress_primed = True
+
+    # Direct API contract: with step_gen >= current_end, move is done.
+    assert feeder._flush_move_in_flight(step_gen_time=10.20) is False, (
+        "step_gen=10.20 is past current_end=9.85 → move must be reported "
+        "as done. Reactor.now()=9.50 < current_end is irrelevant — only "
+        "step_gen_time is authoritative for stepcompress cursor state.")
+
+    # Boundary case: step_gen exactly at current_end → also done.
+    assert feeder._flush_move_in_flight(step_gen_time=9.85) is False, (
+        "step_gen == current_end must report move done (>= boundary).")
+
+    # End-to-end: trigger flush in the crashing scenario and verify the
+    # submitted anchor lands AHEAD of step_gen, not behind it.
+    appends_before = len(motion_q.append_calls)
+    motion_q.trigger_flush(flush_time=10.18, step_gen_time=10.20)
+
+    own = [c for c in motion_q.append_calls[appends_before:]
+           if c[0] is feeder.trapq]
+    assert own, "expected fresh-anchor submit when step_gen past current_end"
+    t0 = own[0][1]
+    assert t0 >= 10.20, (
+        "anchor t0=%.4f must be >= step_gen_time=10.20 to land after "
+        "stepcompress.last_step_clock and avoid c=N i=0 collapse" % t0)
+
+
 # ---------------------------------------------------------------------------
 # P7-66b — Interrupt-on-HALL via Move-Splitting.
 # ---------------------------------------------------------------------------
