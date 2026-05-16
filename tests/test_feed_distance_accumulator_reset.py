@@ -96,8 +96,7 @@ def make_feeder(values=None):
            "0.5 * extruder_velocity (SpeedModulator); accumulator-reset "
            "via hall_full edge no longer happens in _on_mcu_flush. "
            "SAFETY_DISTANCE remains bypassed in AUTO+bang-bang (P7-63 "
-           "stelle 6) so accumulator growth is harmless. See "
-           "docs/superpowers/plans/2026-05-13-c-cont-streaming.md T7.")
+           "stelle 6) so accumulator growth is harmless.")
 def test_hall_full_resets_accumulator():
     """When hall_full transitions to True via _on_mcu_flush, the
     accumulator must reset to 0. Pre-P7-63 only _continuous_feed was
@@ -246,8 +245,7 @@ def test_safety_distance_backstop_matrix(state, bang_bang, expect_jam):
            "Continuous-streaming no longer ends an AUTO 'session' via "
            "grace-timer; _auto_between_since is never armed. The "
            "Issue #26 false-JAM-Pfad is already bypassed by P7-63 "
-           "stelle 6 (SAFETY_DISTANCE off in AUTO+bang-bang). See "
-           "docs/superpowers/plans/2026-05-13-c-cont-streaming.md T7.")
+           "stelle 6 (SAFETY_DISTANCE off in AUTO+bang-bang).")
 def test_issue26_steady_flow_with_grace_timer_resets_session():
     """The actual Issue #26 path: a steady-flow print never asserts
     hall_full. The accumulator grows on every chunk in the hall_empty
@@ -377,8 +375,7 @@ def test_issue26_bouncing_does_not_reset_under_grace():
            "_on_mcu_flush no longer enters Zwischen-Zone branch on "
            "hall_empty=False+hall_full=False — instead it computes "
            "target_speed = extruder_velocity (Balance) and keeps "
-           "streaming. The grace-timer is dead code in C-cont. See "
-           "docs/superpowers/plans/2026-05-13-c-cont-streaming.md T7.")
+           "streaming. The grace-timer is dead code in C-cont.")
 def test_grace_timer_resets_on_hall_empty_return():
     """When the arm enters the Zwischen-Zone and the timer arms, a
     return to hall_empty BEFORE STABLE_DROP_GRACE expires must clear
@@ -426,8 +423,7 @@ def test_grace_timer_resets_on_hall_empty_return():
     reason="C-cont T7 removed both _auto_between_since arming AND "
            "hall_full -> _continuous_feed=False/accumulator-reset "
            "semantic. Continuous-streaming holds these fields steady "
-           "and modulates only target_speed. See docs/superpowers/plans/"
-           "2026-05-13-c-cont-streaming.md T7.")
+           "and modulates only target_speed.")
 def test_grace_timer_resets_on_hall_full():
     """When the arm enters the Zwischen-Zone and the timer arms, then
     transitions directly to hall_full, the hall_full-branch must clear

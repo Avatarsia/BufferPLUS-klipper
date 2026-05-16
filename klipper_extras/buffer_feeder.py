@@ -20,9 +20,6 @@
 #     idle longer than CLOCK_DIFF_MAX (~17s) so the stepcompress cursor
 #     wouldn't overflow on the next move.
 # It is NOT called per-move during normal feed streaming.
-#
-# See docs/superpowers/specs/2026-04-23-python-ansatz-design.md for the
-# full design rationale and feature mapping.
 
 import collections
 import inspect

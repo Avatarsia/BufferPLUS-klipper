@@ -1,5 +1,5 @@
 #!/bin/bash
-# Interaktiver Installer für die BufferPLUS-klipper (python-ansatz)-Extension.
+# Interaktiver Installer fuer die BufferPLUS-klipper-Extension.
 #
 # Führt nach einer Übersicht/Checkliste die ausgewählten Schritte automatisch
 # aus. Jeder Schritt ist idempotent: ein bereits erledigter Schritt wird als
@@ -18,6 +18,7 @@ PRINTER_CFG_DIR="${PRINTER_CFG_DIR:-${HOME}/printer_data/config}"
 MOONRAKER_CONF="${MOONRAKER_CONF:-${PRINTER_CFG_DIR}/moonraker.conf}"
 KLIPPER_SERVICE="${KLIPPER_SERVICE:-klipper}"
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+CURRENT_BRANCH="$(git -C "${REPO_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
 
 EXT_SOURCE="${REPO_DIR}/klipper_extras/buffer_feeder.py"
 EXT_TARGET="${KLIPPER_DIR}/klippy/extras/buffer_feeder.py"
@@ -194,7 +195,7 @@ status_moonraker() {
 # ---------- Banner + Status ----------
 
 hr
-say "${C_BOLD}BufferPLUS-klipper Installer (python-ansatz)${C_RESET}"
+say "${C_BOLD}BufferPLUS-klipper Installer (${CURRENT_BRANCH})${C_RESET}"
 hr
 say "Repo:          ${REPO_DIR}"
 say "Klipper:       ${KLIPPER_DIR}"
@@ -456,7 +457,7 @@ for ACT in $ACTIONS; do
 type: git_repo
 path: ${REPO_DIR}
 origin: https://github.com/Avatarsia/BufferPLUS-klipper.git
-primary_branch: python-ansatz
+primary_branch: ${CURRENT_BRANCH}
 is_system_service: False
 managed_services: ${KLIPPER_SERVICE}
 EOF
