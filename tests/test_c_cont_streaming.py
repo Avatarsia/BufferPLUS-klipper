@@ -107,6 +107,10 @@ def test_c_cont_cfg_params_loaded(monkeypatch):
     printer, feeder = make_c_cont_feeder(monkeypatch)
     assert hasattr(feeder, 'max_feed_speed')
     assert feeder.max_feed_speed == 100.0
+    assert hasattr(feeder, 'min_feed_floor')
+    assert feeder.min_feed_floor == 15.0
+    assert hasattr(feeder, 'feed_speed_gain')
+    assert feeder.feed_speed_gain == 1.10
     assert hasattr(feeder, 'high_flow_mm3s_threshold')
     assert feeder.high_flow_mm3s_threshold == 24.0
     assert hasattr(feeder, 'hall1_persist_timeout')
@@ -119,12 +123,16 @@ def test_c_cont_cfg_params_custom(monkeypatch):
     """Custom cfg-Params funktionieren."""
     overrides = {
         'max_feed_speed': 80.0,
+        'min_feed_floor': 12.0,
+        'feed_speed_gain': 1.25,
         'high_flow_mm3s_threshold': 30.0,
         'hall1_persist_timeout': 3.0,
         'buffer_debug_metrics': True,
     }
     printer, feeder = make_c_cont_feeder(monkeypatch, cfg_overrides=overrides)
     assert feeder.max_feed_speed == 80.0
+    assert feeder.min_feed_floor == 12.0
+    assert feeder.feed_speed_gain == 1.25
     assert feeder.high_flow_mm3s_threshold == 30.0
     assert feeder.hall1_persist_timeout == 3.0
     assert feeder.buffer_debug_metrics is True
@@ -144,6 +152,15 @@ def _populate_tracker_to_ready(feeder, *, velocity):
         fake_ext.last_position = t * velocity
         feeder.velocity_tracker.tick(t)
         t += 0.025
+
+
+def _stub_tracker(monkeypatch, feeder, *, velocity, flow, ready=True):
+    monkeypatch.setattr(feeder.velocity_tracker, 'is_ready',
+                        lambda: ready)
+    monkeypatch.setattr(feeder.velocity_tracker, 'get_velocity',
+                        lambda: velocity)
+    monkeypatch.setattr(feeder.velocity_tracker, 'get_volumetric_flow',
+                        lambda: flow)
 
 
 def test_c_cont_modulator_hall1_zero(monkeypatch):
@@ -197,19 +214,67 @@ def test_c_cont_modulator_zwischenzone_balance(monkeypatch):
 
 
 def test_c_cont_modulator_zwischenzone_high_flow_carries_below_floor(monkeypatch):
-    """~24 mm^3/s sind bei 1.75 mm Filament nur ~10 mm/s linear.
+    """Below-floor carry is allowed shortly after real HALL3 demand.
 
-    Vor dem Fix fiel die Zwischenzone deshalb trotz echtem High-Flow-
-    Print auf 0.0 zurueck, weil 10 * 1.10 < min_feed_floor=15. Jetzt
-    bleibt der proportionale Carry-Pfad aktiv.
+    The tracker window lags a little behind the physical HALL3->middle-
+    zone transition. The carry-session grace lets the same feed episode
+    continue once flow crosses the threshold, but only if HALL3 demand
+    happened just before.
     """
-    printer, feeder = make_c_cont_feeder(monkeypatch)
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'high_flow_mm3s_threshold': 20.0})
+    feeder.reactor.now = 1.0
+    set_sensor_active(feeder, 'hall_empty', True)
+    _stub_tracker(monkeypatch, feeder, velocity=6.8, flow=16.5)
+    assert feeder._compute_target_feed_speed() == 15.0
+
+    feeder.reactor.now = 1.2
     set_sensor_active(feeder, 'hall_empty', False)
-    set_sensor_active(feeder, 'hall_full', False)
-    set_sensor_active(feeder, 'hall_overflow', False)
-    _populate_tracker_to_ready(feeder, velocity=10.0)
-    assert feeder.velocity_tracker.get_volumetric_flow() > feeder.high_flow_mm3s_threshold
-    assert feeder._compute_target_feed_speed() == pytest.approx(11.0, abs=0.5)
+    _stub_tracker(monkeypatch, feeder, velocity=8.8, flow=21.3)
+    assert feeder._compute_target_feed_speed() == pytest.approx(9.68, abs=0.05)
+
+
+def test_c_cont_modulator_zwischenzone_high_flow_hysteresis_hold(monkeypatch):
+    """Once feeding, stop-floor hysteresis should avoid immediate dropouts.
+
+    This is the smoothing layer between HALL3 release and the strict
+    high-flow threshold. It keeps the same feed session alive for a
+    short moment when proposed speed remains above the configured stop
+    factor.
+    """
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'high_flow_mm3s_threshold': 20.0})
+    feeder.reactor.now = 2.0
+    set_sensor_active(feeder, 'hall_empty', True)
+    _stub_tracker(monkeypatch, feeder, velocity=7.0, flow=17.0)
+    assert feeder._compute_target_feed_speed() == 15.0
+
+    feeder.reactor.now = 2.2
+    set_sensor_active(feeder, 'hall_empty', False)
+    _stub_tracker(monkeypatch, feeder, velocity=10.0, flow=19.4)
+    assert feeder._compute_target_feed_speed() == pytest.approx(11.0, abs=0.05)
+
+
+def test_c_cont_modulator_zwischenzone_high_flow_does_not_restart_after_grace(monkeypatch):
+    """Regression for klippy(15): no late restart in hall-neutral zone.
+
+    Root cause: HIGH_FLOW_MM3S=20 allowed a below-floor carry to start
+    again about a second after HALL3 had already dropped. That delayed
+    restart produced the unsafe flush submit that later crashed in
+    stepcompress. After the carry grace expires, the middle zone must
+    stay quiet until a fresh real demand signal arrives again.
+    """
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={'high_flow_mm3s_threshold': 20.0})
+    feeder.reactor.now = 3.0
+    set_sensor_active(feeder, 'hall_empty', True)
+    _stub_tracker(monkeypatch, feeder, velocity=6.9, flow=16.5)
+    assert feeder._compute_target_feed_speed() == 15.0
+
+    feeder.reactor.now = 4.0
+    set_sensor_active(feeder, 'hall_empty', False)
+    _stub_tracker(monkeypatch, feeder, velocity=8.8, flow=21.3)
+    assert feeder._compute_target_feed_speed() == 0.0
 
 
 def test_c_cont_modulator_zwischenzone_subthreshold_still_skips(monkeypatch):

@@ -56,6 +56,10 @@ from .buffer_stepper import SyncCoordinator
 from .buffer_types import AnchorPlan, CleanupOptions, Hall1Context
 
 
+HIGH_FLOW_EXIT_HYSTERESIS_MM3S = 1.0
+HIGH_FLOW_CARRY_GRACE_S = 0.75
+
+
 class BufferFeeder:
     # This class remains the Klipper-facing entry-point, but the config,
     # runtime state, guard typing, and cleanup logic now live in
@@ -178,20 +182,58 @@ class BufferFeeder:
             self._debug_event_last[key] = now
         logging.log(level, "buffer_event[%s]: " + message, key, *args)
 
-    def _is_high_flow_active(self, flow_mm3_s):
-        """True once volumetric flow is high enough that the
-        Zwischenzone should keep proportionally feeding even when the
-        linear filament speed is below min_feed_floor.
+    def _arm_high_flow_carry(self, eventtime, reason):
+        """Keep the high-flow carry session alive briefly after real
+        feed demand.
 
-        Example: 24 mm^3/s with 1.75 mm filament is only about 10 mm/s
-        linear. The old min_feed_floor=15 gate suppressed that case
-        completely, which made the buffer wait for HALL3 bursts instead
-        of carrying continuously through the middle zone.
+        The velocity tracker uses a sliding window. After HALL3 drops,
+        the volumetric estimate may cross the high-flow threshold only a
+        few hundred milliseconds later. This grace window lets that
+        lagging estimate continue the same feed episode, but prevents a
+        cold restart later in a hall-neutral quiet zone.
         """
-        return (
-            self.high_flow_mm3s_threshold > 0.0
-            and flow_mm3_s >= self.high_flow_mm3s_threshold
-        )
+        until = eventtime + HIGH_FLOW_CARRY_GRACE_S
+        if until > self._high_flow_carry_armed_until + 1e-6:
+            self._high_flow_carry_armed_until = until
+            self._debug_event(
+                'high_flow_arm',
+                "arm until %.3f reason=%s",
+                until, reason, min_interval=0.25)
+
+    def _disarm_high_flow_carry(self, reason):
+        if self._high_flow_carry_armed_until <= 0.0:
+            return
+        self._high_flow_carry_armed_until = 0.0
+        self._debug_event(
+            'high_flow_disarm',
+            "disarm reason=%s",
+            reason, min_interval=0.25)
+
+    def _is_high_flow_carry_armed(self, eventtime):
+        if self._high_flow_carry_armed_until <= 0.0:
+            return False
+        if eventtime < self._high_flow_carry_armed_until:
+            return True
+        self._disarm_high_flow_carry('grace_expired')
+        return False
+
+    def _is_high_flow_active(self, flow_mm3_s):
+        """Latched high-flow decision with a small exit hysteresis."""
+        threshold = self.high_flow_mm3s_threshold
+        if threshold <= 0.0:
+            active = False
+        elif self._high_flow_active_latched:
+            active = flow_mm3_s >= max(
+                0.0, threshold - HIGH_FLOW_EXIT_HYSTERESIS_MM3S)
+        else:
+            active = flow_mm3_s >= threshold
+        if active != self._high_flow_active_latched:
+            self._debug_event(
+                'high_flow_state',
+                "active=%s flow=%.1f threshold=%.1f",
+                active, flow_mm3_s, threshold, min_interval=0.0)
+            self._high_flow_active_latched = active
+        return active
 
     def _register_flush_callback_if_supported(self, config):
         register_flush = getattr(
@@ -1740,22 +1782,30 @@ class BufferFeeder:
         """
         floor = self.min_feed_floor
         floor_epsilon = 1e-6
+        stop_floor = floor * self.feed_hysteresis_stop_factor
+        eventtime = self.reactor.monotonic()
         if self.hall_overflow:
             self._modulator_feeding = False
+            self._high_flow_active_latched = False
+            self._disarm_high_flow_carry('hall_overflow')
             return 0.0
         if self.hall_full:
             self._modulator_feeding = False
+            self._high_flow_active_latched = False
+            self._disarm_high_flow_carry('hall_full')
             return 0.0
         vel_ready = self.velocity_tracker.is_ready()
         extruder_vel = self.velocity_tracker.get_velocity() if vel_ready else 0.0
         flow = self.velocity_tracker.get_volumetric_flow() if vel_ready else 0.0
         high_flow_active = self._is_high_flow_active(flow)
+        carry_armed = self._is_high_flow_carry_armed(eventtime)
         if self.hall_empty:
             # Wurzel-C-Praevention γ: HALL3 ohne aktiven Extruder ist
             # kein Demand-Signal sondern Idle-Resting-Position.
             if not vel_ready or extruder_vel <= floor_epsilon:
                 self._modulator_feeding = False
                 return 0.0
+            self._arm_high_flow_carry(eventtime, 'hall3_demand')
             if extruder_vel < floor - floor_epsilon:
                 self._modulator_feeding = True
                 return floor
@@ -1765,18 +1815,39 @@ class BufferFeeder:
             self._modulator_feeding = False
             return 0.0
         proposed = extruder_vel * self.feed_speed_gain
-        if proposed < floor - floor_epsilon and not high_flow_active:
-            self._modulator_feeding = False
-            return 0.0
-        if proposed < floor - floor_epsilon and high_flow_active:
+        if proposed >= floor - floor_epsilon:
+            self._arm_high_flow_carry(eventtime, 'betweenzone_above_floor')
+            self._modulator_feeding = True
+            return min(proposed, self.feed_speed)
+        if (self._modulator_feeding and carry_armed
+                and proposed >= stop_floor - floor_epsilon):
+            self._debug_event(
+                'high_flow_hysteresis_hold',
+                "hold below-floor carry flow=%.1fmm3/s vel=%.3f "
+                "target=%.3f stop_floor=%.3f",
+                flow, extruder_vel, proposed, stop_floor,
+                min_interval=1.0)
+            return min(proposed, self.feed_speed)
+        if proposed < floor - floor_epsilon and high_flow_active and carry_armed:
+            self._arm_high_flow_carry(eventtime, 'high_flow_carry')
             self._debug_event(
                 'high_flow_carry',
                 "allow below-floor carry flow=%.1fmm3/s vel=%.3f "
+                "target=%.3f threshold=%.1f armed_left=%.3f",
+                flow, extruder_vel, proposed, self.high_flow_mm3s_threshold,
+                max(0.0, self._high_flow_carry_armed_until - eventtime),
+                min_interval=1.0)
+            self._modulator_feeding = True
+            return min(proposed, self.feed_speed)
+        if proposed < floor - floor_epsilon and high_flow_active and not carry_armed:
+            self._debug_event(
+                'high_flow_block_unarmed',
+                "block below-floor restart flow=%.1fmm3/s vel=%.3f "
                 "target=%.3f threshold=%.1f",
                 flow, extruder_vel, proposed, self.high_flow_mm3s_threshold,
                 min_interval=1.0)
-        self._modulator_feeding = True
-        return min(proposed, self.feed_speed)
+        self._modulator_feeding = False
+        return 0.0
 
     def _on_mcu_flush(self, flush_time, step_gen_time):
         """Flush-callback driven continuous-streaming submit.
@@ -2698,6 +2769,8 @@ class BufferFeeder:
         # next AUTO session re-arms from live sensor/tracker state,
         # not from a stale "was feeding" hysteresis decision.
         self._modulator_feeding = False
+        self._high_flow_active_latched = False
+        self._disarm_high_flow_carry('halt_motion')
         # Reset accumulator on every halt. After a halt the
         # accumulator is stale — leaving it set would cause a false
         # JAM_SAFETY_DISTANCE on the very first chunk of the next
@@ -3587,9 +3660,13 @@ class BufferFeeder:
         "Live-tune buffer parameters without restart. All args optional:\n"
         "  CHUNK_MM              flush_callback_chunk_mm (mm,  default 15, lll.cfg 45)\n"
         "  SPEED                 feed_speed              (mm/s, default 30, lll.cfg 70)\n"
+        "  ACCEL                 accel                   (mm/s^2, move ramp for new chunks)\n"
         "  INTERRUPT_CHUNK_MM    interrupt_chunk_mm      (mm,  default 9, cap <= MAX_MOVE_CHUNK_MM)\n"
         "  LEAD_TIME             lead_time               (s,   default 0.3, lll.cfg 0.12; warn outside 0.05..1.0)\n"
         "  MAX_MOVE_CHUNK_MM     max_move_chunk_mm       (mm,  default 50)\n"
+        "  FEED_SPEED_GAIN       feed_speed_gain         (x,   between-zone multiplier)\n"
+        "  MIN_FEED_FLOOR        min_feed_floor          (mm/s, low-speed minimum for HALL3)\n"
+        "  FILAMENT_DIAMETER     filament_diameter       (mm,  volumetric flow conversion)\n"
         "  DEBUG_EVENTS          buffer_debug_events     (0/1, handler trace logs)\n"
         "  DEBUG_METRICS         buffer_debug_metrics    (0/1, per-second metrics)\n"
         "  STRICT_START_GUARD    strict_print_start_guard(0/1, block AUTO until real extrusion)\n"
@@ -3603,9 +3680,13 @@ class BufferFeeder:
         # All args optional. above=0. ensures only positive values.
         new_chunk      = gcmd.get_float('CHUNK_MM',           None, above=0.)
         new_speed      = gcmd.get_float('SPEED',              None, above=0.)
+        new_accel      = gcmd.get_float('ACCEL',              None, above=0.)
         new_interrupt  = gcmd.get_float('INTERRUPT_CHUNK_MM', None, above=0.)
         new_lead       = gcmd.get_float('LEAD_TIME',          None, above=0.)
         new_max_move   = gcmd.get_float('MAX_MOVE_CHUNK_MM',  None, above=0.)
+        new_gain       = gcmd.get_float('FEED_SPEED_GAIN',    None, minval=1.0)
+        new_floor      = gcmd.get_float('MIN_FEED_FLOOR',     None, above=0.)
+        new_filament_dia = gcmd.get_float('FILAMENT_DIAMETER', None, above=0.)
         new_debug_events = gcmd.get_int('DEBUG_EVENTS',       None, minval=0, maxval=1)
         new_debug_metrics = gcmd.get_int('DEBUG_METRICS',     None, minval=0, maxval=1)
         new_strict_start = gcmd.get_int('STRICT_START_GUARD', None, minval=0, maxval=1)
@@ -3668,6 +3749,13 @@ class BufferFeeder:
                             % (old, new_speed))
             changed = True
 
+        if new_accel is not None:
+            old = self.accel
+            self.accel = new_accel
+            gc.respond_info("BUFFER_SET: accel  %.3f -> %.3f mm/s^2"
+                            % (old, self.accel))
+            changed = True
+
         if new_lead is not None:
             old = self.lead_time
             self.lead_time = new_lead
@@ -3678,6 +3766,28 @@ class BufferFeeder:
                     "BUFFER_SET: WARNING lead_time=%.4f outside typical "
                     "hardware range 0.05..1.0 s — proceed with caution"
                     % new_lead)
+            changed = True
+
+        if new_gain is not None:
+            old = self.feed_speed_gain
+            self.feed_speed_gain = new_gain
+            gc.respond_info("BUFFER_SET: feed_speed_gain %.3f -> %.3f"
+                            % (old, self.feed_speed_gain))
+            changed = True
+
+        if new_floor is not None:
+            old = self.min_feed_floor
+            self.min_feed_floor = new_floor
+            gc.respond_info("BUFFER_SET: min_feed_floor %.3f -> %.3f mm/s"
+                            % (old, self.min_feed_floor))
+            changed = True
+
+        if new_filament_dia is not None:
+            old = self.filament_diameter
+            self.filament_diameter = new_filament_dia
+            self.velocity_tracker.set_filament_diameter(new_filament_dia)
+            gc.respond_info("BUFFER_SET: filament_diameter %.3f -> %.3f mm"
+                            % (old, self.filament_diameter))
             changed = True
 
         if new_debug_events is not None:
@@ -3730,12 +3840,20 @@ class BufferFeeder:
                             % self.flush_callback_chunk_mm)
             gc.respond_info("  feed_speed              = %.3f mm/s"
                             % self.feed_speed)
+            gc.respond_info("  accel                   = %.3f mm/s^2"
+                            % self.accel)
             gc.respond_info("  interrupt_chunk_mm      = %.3f mm"
                             % self.interrupt_chunk_mm)
             gc.respond_info("  lead_time               = %.4f s"
                             % self.lead_time)
             gc.respond_info("  max_move_chunk_mm       = %.3f mm"
                             % self.max_move_chunk_mm)
+            gc.respond_info("  feed_speed_gain         = %.3f"
+                            % self.feed_speed_gain)
+            gc.respond_info("  min_feed_floor          = %.3f mm/s"
+                            % self.min_feed_floor)
+            gc.respond_info("  filament_diameter       = %.3f mm"
+                            % self.filament_diameter)
             gc.respond_info("  buffer_debug_events     = %s"
                             % self.buffer_debug_events)
             gc.respond_info("  buffer_debug_metrics    = %s"

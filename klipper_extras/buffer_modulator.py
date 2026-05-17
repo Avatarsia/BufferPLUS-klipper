@@ -104,6 +104,10 @@ class ExtruderVelocityTracker:
         """Returns volumetric flow (mm^3/s)."""
         return self.get_velocity() * self._cross_section
 
+    def set_filament_diameter(self, filament_diameter):
+        """Update volumetric conversion for live tuning."""
+        self._cross_section = math.pi * (filament_diameter / 2.0) ** 2
+
     def is_ready(self):
         """True after sliding window has filled (window_size seconds
         of samples accumulated)."""

@@ -7,9 +7,13 @@ to lll.cfg manually after hardware test.
 Covered parameters:
 - CHUNK_MM            -> flush_callback_chunk_mm
 - SPEED               -> feed_speed
+- ACCEL               -> accel
 - INTERRUPT_CHUNK_MM  -> interrupt_chunk_mm (capped <= max_move_chunk_mm)
 - LEAD_TIME           -> lead_time (warn outside 0.05..1.0)
 - MAX_MOVE_CHUNK_MM   -> max_move_chunk_mm
+- FEED_SPEED_GAIN     -> feed_speed_gain
+- MIN_FEED_FLOOR      -> min_feed_floor
+- FILAMENT_DIAMETER   -> filament_diameter
 - DEBUG_EVENTS        -> buffer_debug_events
 - DEBUG_METRICS       -> buffer_debug_metrics
 - STRICT_START_GUARD  -> strict_print_start_guard
@@ -78,6 +82,14 @@ def test_buffer_set_speed_updates_feed_speed():
     assert feeder.feed_speed == 50.0
     gcode = printer.lookup_object('gcode')
     assert any('feed_speed' in m for m in gcode.info_messages)
+
+
+def test_buffer_set_accel_updates_accel():
+    printer, feeder = make_feeder()
+    feeder.cmd_BUFFER_SET(FakeGCmd({"ACCEL": 1500}))
+    assert feeder.accel == 1500.0
+    gcode = printer.lookup_object('gcode')
+    assert any('accel' in m for m in gcode.info_messages)
 
 
 def test_buffer_set_lead_time_updates_lead_time():
@@ -238,6 +250,40 @@ def test_buffer_set_high_flow_threshold_updates_value():
     assert 'high_flow_mm3s_threshold' in joined
 
 
+def test_buffer_set_feed_gain_updates_value():
+    printer, feeder = make_feeder()
+    assert feeder.feed_speed_gain == 1.10
+
+    feeder.cmd_BUFFER_SET(FakeGCmd({"FEED_SPEED_GAIN": 1.25}))
+
+    assert feeder.feed_speed_gain == 1.25
+    joined = "\n".join(printer.lookup_object('gcode').info_messages)
+    assert 'feed_speed_gain' in joined
+
+
+def test_buffer_set_min_feed_floor_updates_value():
+    printer, feeder = make_feeder()
+    assert feeder.min_feed_floor == 15.0
+
+    feeder.cmd_BUFFER_SET(FakeGCmd({"MIN_FEED_FLOOR": 12.5}))
+
+    assert feeder.min_feed_floor == 12.5
+    joined = "\n".join(printer.lookup_object('gcode').info_messages)
+    assert 'min_feed_floor' in joined
+
+
+def test_buffer_set_filament_diameter_updates_tracker_cross_section():
+    printer, feeder = make_feeder()
+    before = feeder.velocity_tracker._cross_section
+
+    feeder.cmd_BUFFER_SET(FakeGCmd({"FILAMENT_DIAMETER": 2.85}))
+
+    assert feeder.filament_diameter == 2.85
+    assert feeder.velocity_tracker._cross_section != before
+    joined = "\n".join(printer.lookup_object('gcode').info_messages)
+    assert 'filament_diameter' in joined
+
+
 # ---------------------------------------------------------------------------
 # No-op without args: emit current values
 # ---------------------------------------------------------------------------
@@ -250,9 +296,13 @@ def test_buffer_set_no_args_dumps_current_values():
     joined = "\n".join(gcode.info_messages)
     assert 'flush_callback_chunk_mm' in joined
     assert 'feed_speed' in joined
+    assert 'accel' in joined
     assert 'interrupt_chunk_mm' in joined
     assert 'lead_time' in joined
     assert 'max_move_chunk_mm' in joined
+    assert 'feed_speed_gain' in joined
+    assert 'min_feed_floor' in joined
+    assert 'filament_diameter' in joined
     assert 'buffer_debug_events' in joined
     assert 'buffer_debug_metrics' in joined
     assert 'strict_print_start_guard' in joined
@@ -264,12 +314,14 @@ def test_buffer_set_no_args_dumps_current_values():
 def test_buffer_set_no_args_does_not_change_state():
     printer, feeder = make_feeder()
     before = (feeder.flush_callback_chunk_mm, feeder.feed_speed,
-              feeder.interrupt_chunk_mm, feeder.lead_time,
-              feeder.max_move_chunk_mm)
+              feeder.accel, feeder.interrupt_chunk_mm, feeder.lead_time,
+              feeder.max_move_chunk_mm, feeder.feed_speed_gain,
+              feeder.min_feed_floor, feeder.filament_diameter)
     feeder.cmd_BUFFER_SET(FakeGCmd({}))
     after = (feeder.flush_callback_chunk_mm, feeder.feed_speed,
-             feeder.interrupt_chunk_mm, feeder.lead_time,
-             feeder.max_move_chunk_mm)
+             feeder.accel, feeder.interrupt_chunk_mm, feeder.lead_time,
+             feeder.max_move_chunk_mm, feeder.feed_speed_gain,
+             feeder.min_feed_floor, feeder.filament_diameter)
     assert before == after
 
 
@@ -315,8 +367,10 @@ def test_buffer_set_default_mux_registered_when_single_instance():
 
 def test_buffer_set_help_text_lists_all_params():
     help_text = buffer_feeder.BufferFeeder.cmd_BUFFER_SET_help
-    for token in ('CHUNK_MM', 'SPEED', 'INTERRUPT_CHUNK_MM',
+    for token in ('CHUNK_MM', 'SPEED', 'ACCEL', 'INTERRUPT_CHUNK_MM',
                   'LEAD_TIME', 'MAX_MOVE_CHUNK_MM',
+                  'FEED_SPEED_GAIN', 'MIN_FEED_FLOOR',
+                  'FILAMENT_DIAMETER',
                   'DEBUG_EVENTS', 'DEBUG_METRICS',
                   'STRICT_START_GUARD', 'CRITICAL_GUARD_S',
                   'HIGH_FLOW_MM3S',

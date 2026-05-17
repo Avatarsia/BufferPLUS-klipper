@@ -53,6 +53,8 @@ class BufferRuntimeState:
     _hall1_active_since: Optional[float] = None
     _last_metrics_log_time: float = 0.0
     _modulator_feeding: bool = False
+    _high_flow_active_latched: bool = False
+    _high_flow_carry_armed_until: float = 0.0
     _needs_overflow_prime: bool = False
     _feed_deadline_time: Optional[float] = None
     _measure_load_active: bool = False
