@@ -520,6 +520,56 @@ Dann sind vor allem diese Punkte relevant:
 Fuer die aktuelle Logik ist der kritische Bereich besonders um
 `24 mm^3/s` und darueber relevant.
 
+### Serientests fuer Baselines
+
+Fuer systematische Versuche liegt im Repo ein Host-Tool:
+
+`tools/buffer_baseline_suite.py`
+
+Damit kannst du:
+
+- eine komplette Multi-Case-Testdatei erzeugen
+- mehrere Flow-Stufen und mehrere Tuning-Werte automatisch durchfahren
+- das resultierende `klippy.log` spaeter in CSV/JSON auswerten
+
+Beispiel Generator:
+
+```bash
+python3 tools/buffer_baseline_suite.py generate \
+  --output buffer_baseline_suite.gcode \
+  --manifest buffer_baseline_suite_manifest.csv \
+  --flows 24 30 40 \
+  --feed-speed-gains 1.10 1.20 \
+  --min-feed-floors 10 12 \
+  --high-flow-thresholds 20 24 \
+  --speeds 100 \
+  --durations 60
+```
+
+Die erzeugte G-Code-Datei ruft pro Fall `BUFFER_BASELINE_RUN` auf und
+markiert jeden Case mit `BFX_CASE_START` / `BFX_CASE_END` im
+`klippy.log`.
+
+Beispiel Auswertung:
+
+```bash
+python3 tools/buffer_baseline_suite.py analyze \
+  --log ~/printer_data/logs/klippy_real.log \
+  --manifest buffer_baseline_suite_manifest.csv \
+  --summary-out buffer_baseline_summary.csv \
+  --samples-out buffer_baseline_samples.csv \
+  --json-out buffer_baseline_summary.json
+```
+
+Die Summary zeigt unter anderem:
+
+- wie oft der Buffer am `min_feed_floor` hing
+- ob `target_speed` sichtbar ueber den Floor kam
+- H3/H2/H1-Haeufigkeiten
+- High-Flow-Anteile
+- Log-Fehler wie `Invalid sequence`, `Exception in flush_handler`,
+  `Timer too close`
+
 ### "Exception in flush_handler" oder "Invalid sequence"
 
 Dann zuerst das `klippy.log` sichern, bevor du neu startest.
