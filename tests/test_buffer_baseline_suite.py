@@ -56,8 +56,8 @@ def test_generate_gcode_and_manifest(tmp_path: Path):
     assert manifest_cases == cases
 
     text = gcode.read_text(encoding="utf-8")
-    assert suite.SUITE_START_TOKEN in text
-    assert suite.CASE_START_TOKEN in text
+    assert "BUFFER_BENCHMARK_MARK BUFFER=mellow EVENT=SUITE_START" in text
+    assert "BUFFER_BENCHMARK_MARK BUFFER=mellow EVENT=CASE_START" in text
     assert "BUFFER_BASELINE_RUN FLOW=24" in text
     assert "BUFFER_BASELINE_RUN FLOW=30" in text
     assert "MIN_FEED_FLOOR=10" in text

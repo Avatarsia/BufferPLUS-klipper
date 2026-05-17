@@ -314,6 +314,7 @@ class BufferFeeder:
             ('STOP_BUFFER_FILL',            self.cmd_STOP_BUFFER_FILL,            None),
             ('BUFFER_STATE_DUMP',           self.cmd_BUFFER_STATE_DUMP,           None),
             ('BUFFER_SET',                  self.cmd_BUFFER_SET,                  None),
+            ('BUFFER_BENCHMARK_MARK',       self.cmd_BUFFER_BENCHMARK_MARK,       None),
             ('BUFFER_PREP_BASELINE',        self.cmd_BUFFER_PREP_BASELINE,        None),
             ('CALIBRATE_FEEDER_SYNC',       self.cmd_CALIBRATE_FEEDER_SYNC,       None),
             ('MEASURE_LOAD_START',          self.cmd_MEASURE_LOAD_START,          None),
@@ -3250,6 +3251,43 @@ class BufferFeeder:
             "BUFFER_PREP_BASELINE failed — no neutral zone after %.1f mm "
             "(H3=%s H2=%s H1=%s)"
             % (moved, self.hall_empty, self.hall_full, self.hall_overflow))
+
+    cmd_BUFFER_BENCHMARK_MARK_help = (
+        "Write a stable benchmark marker into klippy.log. "
+        "EVENT={SUITE_START|SUITE_END|CASE_START|CASE_END|MEASURE_START|MEASURE_END}"
+    )
+    def cmd_BUFFER_BENCHMARK_MARK(self, gcmd):
+        event = (gcmd.get('EVENT', '') or '').upper()
+        token_map = {
+            'SUITE_START': 'BFX_SUITE_START',
+            'SUITE_END': 'BFX_SUITE_END',
+            'CASE_START': 'BFX_CASE_START',
+            'CASE_END': 'BFX_CASE_END',
+            'MEASURE_START': 'BFX_MEASURE_START',
+            'MEASURE_END': 'BFX_MEASURE_END',
+        }
+        token = token_map.get(event)
+        if token is None:
+            raise self._cmd_error(
+                "BUFFER_BENCHMARK_MARK: invalid EVENT=%r" % event)
+
+        parts = [token]
+
+        def append_field(param_name, key_name):
+            value = gcmd.get(param_name, None)
+            if value is not None:
+                parts.append("%s=%s" % (key_name, value))
+
+        append_field('CASE_ID', 'id')
+        append_field('FLOW', 'flow')
+        append_field('DURATION', 'duration')
+        append_field('SPEED', 'speed')
+        append_field('GAIN', 'gain')
+        append_field('FLOOR', 'floor')
+        append_field('HIGHFLOW', 'highflow')
+        append_field('CASES', 'cases')
+
+        logging.info("buffer_benchmark: %s", " ".join(parts))
 
     def _check_phase_entry(self, cmd_name, allowed_states):
         """Reject a phase command if the current state isn't in the

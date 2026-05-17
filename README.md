@@ -550,8 +550,11 @@ Default-Ausgabe:
 - Manifest: `~/printer_data/config/buffer_baseline_suite_manifest.csv`
 
 Die erzeugte G-Code-Datei ruft pro Fall `BUFFER_BASELINE_RUN` auf und
-markiert jeden Case mit `BFX_CASE_START` / `BFX_CASE_END` im
-`klippy.log`.
+schreibt pro Fall stabile Benchmark-Marker ins `klippy.log`:
+
+- `BFX_SUITE_START` / `BFX_SUITE_END`
+- `BFX_CASE_START` / `BFX_CASE_END`
+- `BFX_MEASURE_START` / `BFX_MEASURE_END`
 
 `BUFFER_BASELINE_RUN` bringt den Buffer vor dem eigentlichen Messlauf
 zuerst automatisch in eine neutrale Sensorzone (nicht H3, nicht H2,

@@ -391,10 +391,18 @@ def generate_gcode(
     lines = [
         "; BufferPLUS baseline suite",
         f"; generated_utc={created}",
-        f"M118 {SUITE_START_TOKEN} cases={len(cases)}",
+        f"BUFFER_BENCHMARK_MARK BUFFER=mellow EVENT=SUITE_START CASES={len(cases)}",
     ]
     for case in cases:
-        lines.append(f"M118 {CASE_START_TOKEN} {case.marker()}")
+        lines.append(
+            "BUFFER_BENCHMARK_MARK BUFFER=mellow EVENT=CASE_START "
+            f"CASE_ID={case.case_id} FLOW={case.flow_mm3s:g} "
+            f"DURATION={case.duration_s:g}"
+            + (f" SPEED={case.speed_mm_s:g}" if case.speed_mm_s is not None else "")
+            + (f" GAIN={case.feed_speed_gain:g}" if case.feed_speed_gain is not None else "")
+            + (f" FLOOR={case.min_feed_floor:g}" if case.min_feed_floor is not None else "")
+            + (f" HIGHFLOW={case.high_flow_mm3s_threshold:g}" if case.high_flow_mm3s_threshold is not None else "")
+        )
         lines.append(
             case.macro_call(
                 temp_c=temp_c,
@@ -406,10 +414,14 @@ def generate_gcode(
                 filament_diameter_mm=filament_diameter_mm,
             )
         )
-        lines.append(f"M118 {CASE_END_TOKEN} id={case.case_id}")
+        lines.append(
+            f"BUFFER_BENCHMARK_MARK BUFFER=mellow EVENT=CASE_END CASE_ID={case.case_id}"
+        )
         if pause_ms > 0:
             lines.append(f"G4 P{pause_ms}")
-    lines.append(f"M118 {SUITE_END_TOKEN} cases={len(cases)}")
+    lines.append(
+        f"BUFFER_BENCHMARK_MARK BUFFER=mellow EVENT=SUITE_END CASES={len(cases)}"
+    )
     return "\n".join(lines) + "\n"
 
 
