@@ -58,6 +58,7 @@ from .buffer_types import AnchorPlan, CleanupOptions, Hall1Context
 
 HIGH_FLOW_EXIT_HYSTERESIS_MM3S = 1.0
 HIGH_FLOW_CARRY_GRACE_S = 0.75
+DEFAULT_BENCHMARK_MODE_S = 900.0
 
 
 class BufferFeeder:
@@ -235,6 +236,61 @@ class BufferFeeder:
             self._high_flow_active_latched = active
         return active
 
+    def _benchmark_mode_remaining(self, eventtime=None):
+        if eventtime is None:
+            eventtime = self.reactor.monotonic()
+        return max(0.0, self._benchmark_mode_until - eventtime)
+
+    def _benchmark_mode_active(self, eventtime=None):
+        if eventtime is None:
+            eventtime = self.reactor.monotonic()
+        if self._benchmark_mode_until <= 0.0:
+            return False
+        if eventtime < self._benchmark_mode_until:
+            return True
+        self._benchmark_mode_until = 0.0
+        self._benchmark_mode_reason = ""
+        self._debug_event(
+            'bench_mode_off',
+            "benchmark mode expired",
+            min_interval=0.0)
+        return False
+
+    def _set_benchmark_mode(self, enabled, duration_s=None, reason=""):
+        now = self.reactor.monotonic()
+        if enabled:
+            if duration_s is None:
+                duration_s = DEFAULT_BENCHMARK_MODE_S
+            duration_s = max(float(duration_s), 0.0)
+            self._benchmark_mode_until = now + duration_s
+            self._benchmark_mode_reason = reason or "manual"
+            self._hall2_start_time = None
+            self._hall3_start_time = None
+            self._hall3_drop_since = None
+            self._debug_event(
+                'bench_mode_on',
+                "benchmark mode enabled for %.1fs reason=%s",
+                duration_s, self._benchmark_mode_reason,
+                min_interval=0.0)
+            self._respond(
+                "Benchmark mode enabled for %.0fs — JAM/CLOG detection suppressed"
+                % duration_s)
+            return
+
+        was_active = self._benchmark_mode_until > 0.0
+        self._benchmark_mode_until = 0.0
+        self._benchmark_mode_reason = ""
+        self._hall2_start_time = None
+        self._hall3_start_time = None
+        self._hall3_drop_since = None
+        if was_active:
+            self._debug_event(
+                'bench_mode_off',
+                "benchmark mode disabled",
+                min_interval=0.0)
+            self._respond(
+                "Benchmark mode disabled — JAM/CLOG detection restored")
+
     def _register_flush_callback_if_supported(self, config):
         register_flush = getattr(
             self.motion_queuing, 'register_flush_callback', None)
@@ -315,6 +371,7 @@ class BufferFeeder:
             ('BUFFER_STATE_DUMP',           self.cmd_BUFFER_STATE_DUMP,           None),
             ('BUFFER_SET',                  self.cmd_BUFFER_SET,                  None),
             ('BUFFER_BENCHMARK_MARK',       self.cmd_BUFFER_BENCHMARK_MARK,       None),
+            ('BUFFER_BENCH_MODE',           self.cmd_BUFFER_BENCH_MODE,           None),
             ('BUFFER_PREP_BASELINE',        self.cmd_BUFFER_PREP_BASELINE,        None),
             ('CALIBRATE_FEEDER_SYNC',       self.cmd_CALIBRATE_FEEDER_SYNC,       None),
             ('MEASURE_LOAD_START',          self.cmd_MEASURE_LOAD_START,          None),
@@ -2219,6 +2276,12 @@ class BufferFeeder:
             if not self.jam_detection_enabled or self._jam_active:
                 return eventtime + JAM_TICK_INTERVAL
 
+            if self._benchmark_mode_active(eventtime):
+                self._hall2_start_time = None
+                self._hall3_start_time = None
+                self._hall3_drop_since = None
+                return eventtime + JAM_TICK_INTERVAL
+
             # Jam-detection is a
             # PRINT-only safety. The CLOG detector triggers when HALL2
             # stays active while the extruder accumulates extrusion —
@@ -3289,6 +3352,22 @@ class BufferFeeder:
 
         logging.info("buffer_benchmark: %s", " ".join(parts))
 
+    cmd_BUFFER_BENCH_MODE_help = (
+        "Enable/disable benchmark mode with auto-expiry. "
+        "Suppresses JAM/CLOG detection for bench runs."
+    )
+    def cmd_BUFFER_BENCH_MODE(self, gcmd):
+        enable = bool(gcmd.get_int('ENABLE', 1, minval=0, maxval=1))
+        duration_s = None
+        if enable:
+            duration_s = gcmd.get_float(
+                'DURATION', DEFAULT_BENCHMARK_MODE_S, above=0.0)
+        reason = gcmd.get('REASON', None)
+        self._set_benchmark_mode(
+            enable=enable,
+            duration_s=duration_s,
+            reason=reason or ('gcode_enable' if enable else 'gcode_disable'))
+
     def _check_phase_entry(self, cmd_name, allowed_states):
         """Reject a phase command if the current state isn't in the
         allow-list. Callers pass exactly the states from which a legit
@@ -3740,6 +3819,10 @@ class BufferFeeder:
             "synced_to_extruder = %s" % self._stepper_synced_to,
             "debug_flags        = events=%s metrics=%s" % (
                 self.buffer_debug_events, self.buffer_debug_metrics),
+            "benchmark_mode     = active=%s left=%.1fs reason=%s" % (
+                self._benchmark_mode_active(),
+                self._benchmark_mode_remaining(),
+                self._benchmark_mode_reason or '-'),
             "print_phase        = %s seen_extrusion=%s guard_left=%.3fs reason=%s" % (
                 self._refresh_print_phase(self.reactor.monotonic()),
                 self._print_extrusion_seen,
@@ -4127,6 +4210,8 @@ class BufferFeeder:
             'total_accumulated_mm':     self._accumulated_feed_distance,
             'commanded_pos_mm':         self._commanded_pos,
             'print_running':            self._print_running,
+            'benchmark_mode_active':    self._benchmark_mode_active(eventtime),
+            'benchmark_mode_left_s':    self._benchmark_mode_remaining(eventtime),
             'jam_active':               self._jam_active,
             'fault_overflow':           self._fault_overflow,
             'overflow_overlay_enabled': self.use_overflow_overlay,

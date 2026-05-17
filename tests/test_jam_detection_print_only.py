@@ -133,6 +133,23 @@ def test_tracker_variables_reset_when_print_ends(feeder_factory):
     assert feeder._hall3_start_time is None
 
 
+def test_benchmark_mode_suppresses_jam_detection_even_if_printing(feeder_factory):
+    """Bench runs execute from a printed file, so _print_running can be
+    re-armed by idle_timeout:printing after DISABLE_RUNOUT_SENSOR.
+
+    Benchmark mode must still suppress the print-only JAM/CLOG watchers.
+    """
+    _, feeder = feeder_factory(state=buffer_feeder.STATE_AUTO)
+    setup_clog_scenario(feeder)
+    feeder._print_running = True
+    feeder._set_benchmark_mode(True, duration_s=30.0, reason="test")
+
+    feeder._jam_tick(eventtime=10.0)
+
+    assert feeder._jam_active is False
+    assert feeder._hall2_start_time is None
+
+
 # ---------------------------------------------------------------------------
 # P7-56b: jam_action runs deferred (not blocking the reactor)
 # ---------------------------------------------------------------------------
