@@ -553,6 +553,10 @@ Die erzeugte G-Code-Datei ruft pro Fall `BUFFER_BASELINE_RUN` auf und
 markiert jeden Case mit `BFX_CASE_START` / `BFX_CASE_END` im
 `klippy.log`.
 
+`BUFFER_BASELINE_RUN` bringt den Buffer vor dem eigentlichen Messlauf
+zuerst automatisch in eine neutrale Sensorzone (nicht H3, nicht H2,
+nicht H1) und startet erst danach die timed Extrusion.
+
 Beispiel Auswertung:
 
 ```bash
@@ -574,6 +578,10 @@ Die Summary zeigt unter anderem:
 - High-Flow-Anteile
 - Log-Fehler wie `Invalid sequence`, `Exception in flush_handler`,
   `Timer too close`
+
+Falls die Makro-Version Messmarker `BFX_MEASURE_START` /
+`BFX_MEASURE_END` schreibt, wertet das Tool nur noch die eigentliche
+Messphase aus und ignoriert die Vorbereitungsbewegung.
 
 ### "Exception in flush_handler" oder "Invalid sequence"
 

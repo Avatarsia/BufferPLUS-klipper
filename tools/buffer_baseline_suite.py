@@ -42,6 +42,8 @@ from typing import Iterable
 
 CASE_START_TOKEN = "BFX_CASE_START"
 CASE_END_TOKEN = "BFX_CASE_END"
+MEASURE_START_TOKEN = "BFX_MEASURE_START"
+MEASURE_END_TOKEN = "BFX_MEASURE_END"
 SUITE_START_TOKEN = "BFX_SUITE_START"
 SUITE_END_TOKEN = "BFX_SUITE_END"
 
@@ -154,6 +156,7 @@ class Case:
             f"X={x_mm:g}",
             f"Y={y_mm:g}",
             f"Z={z_mm:g}",
+            f"CASE_ID={self.case_id}",
             f"CHUNK_E={chunk_e_mm:g}",
             f"TRAVEL_F={travel_f:g}",
             f"FILAMENT_DIAMETER={self.filament_diameter_mm or filament_diameter_mm:g}",
@@ -447,10 +450,15 @@ def analyze_log(log_path: Path, manifest_path: Path) -> tuple[list[CaseSummary],
     case_by_id = {case.case_id: case for case in cases}
 
     current_case_id: str | None = None
+    current_measure_id: str | None = None
     completed: dict[str, bool] = {case.case_id: False for case in cases}
-    metrics_by_case: dict[str, list[MetricSample]] = {case.case_id: [] for case in cases}
-    errors_by_case: dict[str, list[str]] = {case.case_id: [] for case in cases}
-    error_lines_by_case: dict[str, list[int]] = {case.case_id: [] for case in cases}
+    measure_seen: dict[str, bool] = {case.case_id: False for case in cases}
+    fallback_metrics_by_case: dict[str, list[MetricSample]] = {case.case_id: [] for case in cases}
+    fallback_errors_by_case: dict[str, list[str]] = {case.case_id: [] for case in cases}
+    fallback_error_lines_by_case: dict[str, list[int]] = {case.case_id: [] for case in cases}
+    measure_metrics_by_case: dict[str, list[MetricSample]] = {case.case_id: [] for case in cases}
+    measure_errors_by_case: dict[str, list[str]] = {case.case_id: [] for case in cases}
+    measure_error_lines_by_case: dict[str, list[int]] = {case.case_id: [] for case in cases}
 
     with log_path.open("r", encoding="utf-8", errors="replace") as handle:
         for line_number, line in enumerate(handle, start=1):
@@ -468,24 +476,61 @@ def analyze_log(log_path: Path, manifest_path: Path) -> tuple[list[CaseSummary],
                     current_case_id = None
                 continue
 
-            if current_case_id is None or current_case_id not in case_by_id:
+            measure_start_data = _parse_marker_values(line, MEASURE_START_TOKEN)
+            if measure_start_data is not None:
+                case_id = measure_start_data.get("id")
+                if case_id in measure_seen:
+                    current_measure_id = case_id
+                    measure_seen[case_id] = True
                 continue
 
-            sample = _parse_metric_sample(current_case_id, line_number, line)
+            measure_end_data = _parse_marker_values(line, MEASURE_END_TOKEN)
+            if measure_end_data is not None:
+                case_id = measure_end_data.get("id")
+                if current_measure_id == case_id:
+                    current_measure_id = None
+                continue
+
+            active_case_id: str | None = None
+            target_metrics = None
+            target_errors = None
+            target_error_lines = None
+            if current_measure_id is not None and current_measure_id in case_by_id:
+                active_case_id = current_measure_id
+                target_metrics = measure_metrics_by_case
+                target_errors = measure_errors_by_case
+                target_error_lines = measure_error_lines_by_case
+            elif current_case_id is not None and current_case_id in case_by_id:
+                active_case_id = current_case_id
+                target_metrics = fallback_metrics_by_case
+                target_errors = fallback_errors_by_case
+                target_error_lines = fallback_error_lines_by_case
+
+            if active_case_id is None:
+                continue
+
+            sample = _parse_metric_sample(active_case_id, line_number, line)
             if sample is not None:
-                metrics_by_case[current_case_id].append(sample)
+                target_metrics[active_case_id].append(sample)
                 continue
 
             for error_name, pattern in ERROR_PATTERNS.items():
                 if pattern.search(line):
-                    errors_by_case[current_case_id].append(error_name)
-                    error_lines_by_case[current_case_id].append(line_number)
+                    target_errors[active_case_id].append(error_name)
+                    target_error_lines[active_case_id].append(line_number)
                     break
 
     summaries: list[CaseSummary] = []
     all_samples: list[MetricSample] = []
     for case in cases:
-        samples = metrics_by_case[case.case_id]
+        if measure_seen[case.case_id]:
+            samples = measure_metrics_by_case[case.case_id]
+            errors = measure_errors_by_case[case.case_id]
+            error_lines = measure_error_lines_by_case[case.case_id]
+        else:
+            samples = fallback_metrics_by_case[case.case_id]
+            errors = fallback_errors_by_case[case.case_id]
+            error_lines = fallback_error_lines_by_case[case.case_id]
         all_samples.extend(samples)
         targets = [sample.target_speed_mm_s for sample in samples]
         flows = [sample.flow_mm3s for sample in samples]
@@ -528,8 +573,8 @@ def analyze_log(log_path: Path, manifest_path: Path) -> tuple[list[CaseSummary],
                 hall3_samples=sum(1 for sample in samples if sample.hall_h3),
                 hall2_samples=sum(1 for sample in samples if sample.hall_h2),
                 overflow_samples=sum(1 for sample in samples if sample.hall_h1),
-                errors=errors_by_case[case.case_id],
-                error_lines=error_lines_by_case[case.case_id],
+                errors=errors,
+                error_lines=error_lines,
             )
         )
     return summaries, all_samples

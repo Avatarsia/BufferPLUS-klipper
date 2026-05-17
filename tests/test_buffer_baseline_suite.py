@@ -83,9 +83,12 @@ def test_analyze_log_summarizes_metrics_and_errors(tmp_path: Path):
             [
                 "something before",
                 "M118 BFX_CASE_START id=c001 flow=30 duration=60 speed=100 gain=1.2 floor=10 highflow=20",
+                "buffer_metrics: state=AUTO hall=[H3:on H2:off H1:off] tracker_vel=1.0mm/s flow=2.0mm3/s high_flow=False ready=True target_speed=0.0mm/s pending_remaining=0.0mm hall1_persist=off",
+                "M118 BFX_MEASURE_START id=c001",
                 "buffer_metrics: state=AUTO hall=[H3:on H2:off H1:off] tracker_vel=12.5mm/s flow=30.0mm3/s high_flow=True ready=True target_speed=18.7mm/s pending_remaining=0.0mm hall1_persist=off",
                 "buffer_metrics: state=AUTO hall=[H3:off H2:off H1:off] tracker_vel=11.0mm/s flow=26.4mm3/s high_flow=True ready=True target_speed=9.8mm/s pending_remaining=0.0mm hall1_persist=off",
                 "stepcompress o=0 i=0 c=0 a=0: Invalid sequence",
+                "M118 BFX_MEASURE_END id=c001",
                 "M118 BFX_CASE_END id=c001",
             ]
         ),

@@ -314,6 +314,7 @@ class BufferFeeder:
             ('STOP_BUFFER_FILL',            self.cmd_STOP_BUFFER_FILL,            None),
             ('BUFFER_STATE_DUMP',           self.cmd_BUFFER_STATE_DUMP,           None),
             ('BUFFER_SET',                  self.cmd_BUFFER_SET,                  None),
+            ('BUFFER_PREP_BASELINE',        self.cmd_BUFFER_PREP_BASELINE,        None),
             ('CALIBRATE_FEEDER_SYNC',       self.cmd_CALIBRATE_FEEDER_SYNC,       None),
             ('MEASURE_LOAD_START',          self.cmd_MEASURE_LOAD_START,          None),
             ('MEASURE_LOAD_STOP',           self.cmd_MEASURE_LOAD_STOP,           None),
@@ -3179,6 +3180,76 @@ class BufferFeeder:
                 break
             self.reactor.pause(self.reactor.monotonic() + 0.05)
         self._raise_if_locked_out(gcmd)
+
+    def _wait_for_move_drain_allowing_lockout(self):
+        """Wait until current trapq/pending motion drains.
+
+        Used by bench/prep helpers that may intentionally move while
+        HALL1/HALL2 transitions are active. Unlike _wait_for_move_done,
+        this helper ignores OVERFLOW/HALL1 lockout while the queued move
+        is draining, but still honours an explicit HALT.
+        """
+        while self._move_in_flight() or self._pending_remaining_mm > 0:
+            if self._halt_requested:
+                break
+            self.reactor.pause(self.reactor.monotonic() + 0.05)
+        if self._halt_requested:
+            self._halt_requested = False
+            raise self._cmd_error(
+                "BufferFeeder: HALT requested — aborting workflow")
+
+    def _baseline_prep_direction(self):
+        if self.hall_overflow or self.hall_full:
+            return -1
+        if self.hall_empty:
+            return +1
+        return 0
+
+    cmd_BUFFER_PREP_BASELINE_help = (
+        "Bring buffer into neutral sensor zone for bench tests. "
+        "Feeds from H3 or retracts from H2/H1 in small chunks until all halls are off."
+    )
+    def cmd_BUFFER_PREP_BASELINE(self, gcmd):
+        chunk_mm = gcmd.get_float('CHUNK_MM', 5.0, above=0.0)
+        speed = gcmd.get_float('SPEED', self.manual_speed, above=0.0)
+        max_distance = gcmd.get_float('MAX_DISTANCE', 200.0, above=0.0)
+        settle_ms = gcmd.get_int('SETTLE_MS', 150, minval=0)
+
+        if self._state in BUSY_PHASE_STATES:
+            raise self._cmd_error(
+                "BUFFER_PREP_BASELINE rejected — feeder busy "
+                "(state=%s)" % self._state)
+        self._raise_if_jam()
+
+        # Stop any stale auto/manual continuation before centering.
+        self._continuous_feed = False
+        self._pending_remaining_mm = 0.0
+        moved = 0.0
+        settle_s = settle_ms / 1000.0
+
+        while moved < max_distance:
+            direction = self._baseline_prep_direction()
+            if direction == 0:
+                self._set_state(STATE_IDLE)
+                self._respond(
+                    "BASELINE_PREP: neutral zone reached after %.1f mm "
+                    "(H3=%s H2=%s H1=%s)"
+                    % (moved, self.hall_empty, self.hall_full,
+                       self.hall_overflow))
+                return
+            self._set_state(
+                STATE_MANUAL_FEED if direction > 0 else STATE_MANUAL_RETRACT)
+            self._submit_move(direction * chunk_mm, speed)
+            self._wait_for_move_drain_allowing_lockout()
+            moved += chunk_mm
+            if settle_s > 0:
+                self.reactor.pause(self.reactor.monotonic() + settle_s)
+
+        self._set_state(STATE_IDLE)
+        raise self._cmd_error(
+            "BUFFER_PREP_BASELINE failed — no neutral zone after %.1f mm "
+            "(H3=%s H2=%s H1=%s)"
+            % (moved, self.hall_empty, self.hall_full, self.hall_overflow))
 
     def _check_phase_entry(self, cmd_name, allowed_states):
         """Reject a phase command if the current state isn't in the
