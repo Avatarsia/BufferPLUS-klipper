@@ -256,7 +256,8 @@ class BufferFeeder:
             min_interval=0.0)
         return False
 
-    def _set_benchmark_mode(self, enabled, duration_s=None, reason=""):
+    def _set_benchmark_mode(self, enabled, duration_s=None, reason="",
+                            notify=True):
         now = self.reactor.monotonic()
         if enabled:
             if duration_s is None:
@@ -272,9 +273,10 @@ class BufferFeeder:
                 "benchmark mode enabled for %.1fs reason=%s",
                 duration_s, self._benchmark_mode_reason,
                 min_interval=0.0)
-            self._respond(
-                "Benchmark mode enabled for %.0fs — JAM/CLOG detection suppressed"
-                % duration_s)
+            if notify:
+                self._respond(
+                    "Benchmark mode enabled for %.0fs — JAM/CLOG detection suppressed"
+                    % duration_s)
             return
 
         was_active = self._benchmark_mode_until > 0.0
@@ -288,8 +290,9 @@ class BufferFeeder:
                 'bench_mode_off',
                 "benchmark mode disabled",
                 min_interval=0.0)
-            self._respond(
-                "Benchmark mode disabled — JAM/CLOG detection restored")
+            if notify:
+                self._respond(
+                    "Benchmark mode disabled — JAM/CLOG detection restored")
 
     def _register_flush_callback_if_supported(self, config):
         register_flush = getattr(
@@ -542,6 +545,7 @@ class BufferFeeder:
 
     def _handle_shutdown(self):
         # Stop timers and halt motion.
+        self._set_benchmark_mode(False, reason='shutdown', notify=False)
         if self._main_timer is not None:
             try:
                 self.reactor.unregister_timer(self._main_timer)
@@ -831,6 +835,7 @@ class BufferFeeder:
                     self._halt_motion()
                 self._respond("Print paused — bang-bang suspended until RESUME")
             else:
+                self._set_benchmark_mode(False, reason='print_ready', notify=False)
                 self._print_extrusion_seen = False
                 self._critical_action_guard_until = 0.0
                 self._critical_action_guard_reason = ""
@@ -926,6 +931,7 @@ class BufferFeeder:
         self._hall1_active_since = None
 
     def _enter_overflow(self):
+        self._set_benchmark_mode(False, reason='overflow', notify=False)
         self._respond("*** HALL1 OVERFLOW — Feeder disabled, lockout engaged ***")
         self._continuous_feed = False
         # Save the interrupted state and pending distance BEFORE
@@ -2354,6 +2360,8 @@ class BufferFeeder:
     def _trigger_jam(self, kind, message):
         if self._jam_active:
             return
+        self._set_benchmark_mode(False, reason='jam_%s' % kind.lower(),
+                                 notify=False)
         self._jam_active = True
         self._respond("*** JAM %s: %s ***" % (kind, message))
         self._continuous_feed = False
@@ -3096,6 +3104,7 @@ class BufferFeeder:
         # preserve_lockout=True keeps OVERFLOW/JAM intact (safety
         # supersedes user halt), no full-reset (no recovery-flag clear,
         # no E-mode-restore — operator may want to inspect state).
+        self._set_benchmark_mode(False, reason='halt', notify=False)
         self._full_reset_to_idle(label="HALT", preserve_lockout=True)
         self._respond("HALT — workflow will abort at next wait")
 
@@ -3366,7 +3375,8 @@ class BufferFeeder:
         self._set_benchmark_mode(
             enabled=enable,
             duration_s=duration_s,
-            reason=reason or ('gcode_enable' if enable else 'gcode_disable'))
+            reason=reason or ('gcode_enable' if enable else 'gcode_disable'),
+            notify=True)
 
     def _check_phase_entry(self, cmd_name, allowed_states):
         """Reject a phase command if the current state isn't in the

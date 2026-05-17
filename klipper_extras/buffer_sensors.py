@@ -254,6 +254,15 @@ class HallSensorMonitor:
                             STATE_MANUAL_RETRACT):
             return
 
+        if owner._benchmark_mode_active(eventtime):
+            owner._set_benchmark_mode(
+                False, reason='benchmark_entrance_runout', notify=False)
+            owner._respond("Entrance runout during benchmark — stepper off")
+            owner._continuous_feed = False
+            owner._halt_motion()
+            owner._set_state(STATE_IDLE)
+            return
+
         if not owner._print_running:
             owner._respond("Entrance runout outside print — stepper off")
             owner._continuous_feed = False

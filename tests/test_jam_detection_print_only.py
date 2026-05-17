@@ -150,6 +150,44 @@ def test_benchmark_mode_suppresses_jam_detection_even_if_printing(feeder_factory
     assert feeder._hall2_start_time is None
 
 
+def test_benchmark_mode_suppresses_runout_pause_and_clears_itself(feeder_factory):
+    """Bench runs should not emit PAUSE on entrance-runout even if the
+    printed-file context re-armed _print_running=True."""
+    printer, feeder = feeder_factory(
+        values={"runout_pause": True},
+        state=buffer_feeder.STATE_AUTO,
+        grace_done=False,
+    )
+    gcode = printer.lookup_object("gcode")
+    feeder._print_running = True
+    feeder._set_benchmark_mode(True, duration_s=30.0, reason="test")
+
+    feeder._on_entrance_runout(eventtime=0.0)
+    feeder.reactor.fire_pending_timers()
+
+    pause_calls = [s for _, s in gcode.scripts if "PAUSE" in s.upper()]
+    assert not pause_calls
+    assert feeder._state == buffer_feeder.STATE_IDLE
+    assert feeder._benchmark_mode_active(0.0) is False
+
+
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        lambda feeder: feeder._enter_overflow(),
+        lambda feeder: feeder.cmd_BUFFER_HALT(None),
+    ],
+    ids=["overflow", "halt"],
+)
+def test_benchmark_mode_clears_on_abort_paths(feeder_factory, trigger):
+    _, feeder = feeder_factory(state=buffer_feeder.STATE_AUTO)
+    feeder._set_benchmark_mode(True, duration_s=30.0, reason="test")
+
+    trigger(feeder)
+
+    assert feeder._benchmark_mode_active(0.0) is False
+
+
 # ---------------------------------------------------------------------------
 # P7-56b: jam_action runs deferred (not blocking the reactor)
 # ---------------------------------------------------------------------------
