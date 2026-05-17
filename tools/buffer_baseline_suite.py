@@ -8,14 +8,12 @@ Typical workflow:
 1. Generate a multi-case G-code suite plus a manifest CSV:
 
        python3 tools/buffer_baseline_suite.py generate \
-           --output buffer_baseline_suite.gcode \
-           --manifest buffer_baseline_suite_manifest.csv \
            --flows 24 30 40 \
            --feed-speed-gains 1.10 1.20 \
            --min-feed-floors 10 12 \
            --high-flow-thresholds 20 24 \
-           --speed 100 \
-           --duration 60
+           --speeds 100 \
+           --durations 60
 
 2. Run the generated G-code on the printer. The file calls the
    BUFFER_BASELINE_RUN macro for every case and writes BFX_CASE_START /
@@ -24,11 +22,7 @@ Typical workflow:
 3. Analyze the resulting klippy.log:
 
        python3 tools/buffer_baseline_suite.py analyze \
-           --log ~/printer_data/logs/klippy_real.log \
-           --manifest buffer_baseline_suite_manifest.csv \
-           --summary-out buffer_baseline_summary.csv \
-           --samples-out buffer_baseline_samples.csv \
-           --json-out buffer_baseline_summary.json
+           --log ~/printer_data/logs/klippy_real.log
 """
 
 from __future__ import annotations
@@ -50,6 +44,13 @@ CASE_START_TOKEN = "BFX_CASE_START"
 CASE_END_TOKEN = "BFX_CASE_END"
 SUITE_START_TOKEN = "BFX_SUITE_START"
 SUITE_END_TOKEN = "BFX_SUITE_END"
+
+DEFAULT_PRINTER_DATA_DIR = Path.home() / "printer_data"
+DEFAULT_GCODE_OUTPUT = DEFAULT_PRINTER_DATA_DIR / "gcodes" / "buffer_baseline_suite.gcode"
+DEFAULT_MANIFEST_OUTPUT = DEFAULT_PRINTER_DATA_DIR / "config" / "buffer_baseline_suite_manifest.csv"
+DEFAULT_SUMMARY_OUTPUT = DEFAULT_PRINTER_DATA_DIR / "config" / "buffer_baseline_summary.csv"
+DEFAULT_SAMPLES_OUTPUT = DEFAULT_PRINTER_DATA_DIR / "config" / "buffer_baseline_samples.csv"
+DEFAULT_JSON_OUTPUT = DEFAULT_PRINTER_DATA_DIR / "config" / "buffer_baseline_summary.json"
 
 ERROR_PATTERNS: dict[str, re.Pattern[str]] = {
     "invalid_sequence": re.compile(r"Invalid sequence", re.IGNORECASE),
@@ -570,8 +571,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     gen = sub.add_parser("generate", help="Generate suite G-code + manifest")
-    gen.add_argument("--output", required=True, type=Path, help="Output G-code file")
-    gen.add_argument("--manifest", required=True, type=Path, help="Output manifest CSV")
+    gen.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_GCODE_OUTPUT,
+        help=f"Output G-code file (default: {DEFAULT_GCODE_OUTPUT})",
+    )
+    gen.add_argument(
+        "--manifest",
+        type=Path,
+        default=DEFAULT_MANIFEST_OUTPUT,
+        help=f"Output manifest CSV (default: {DEFAULT_MANIFEST_OUTPUT})",
+    )
     gen.add_argument("--mode", choices=("product", "zip"), default="product")
     gen.add_argument("--flows", nargs="+", type=float, required=True)
     gen.add_argument("--durations", nargs="+", type=float, default=[60.0])
@@ -594,10 +605,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     ana = sub.add_parser("analyze", help="Analyze a Klipper log against a suite manifest")
     ana.add_argument("--log", required=True, type=Path, help="klippy.log to analyze")
-    ana.add_argument("--manifest", required=True, type=Path, help="Manifest CSV used for the run")
-    ana.add_argument("--summary-out", required=True, type=Path, help="Summary CSV output")
-    ana.add_argument("--samples-out", type=Path, help="Optional raw metric samples CSV output")
-    ana.add_argument("--json-out", type=Path, help="Optional summary JSON output")
+    ana.add_argument(
+        "--manifest",
+        type=Path,
+        default=DEFAULT_MANIFEST_OUTPUT,
+        help=f"Manifest CSV used for the run (default: {DEFAULT_MANIFEST_OUTPUT})",
+    )
+    ana.add_argument(
+        "--summary-out",
+        type=Path,
+        default=DEFAULT_SUMMARY_OUTPUT,
+        help=f"Summary CSV output (default: {DEFAULT_SUMMARY_OUTPUT})",
+    )
+    ana.add_argument(
+        "--samples-out",
+        type=Path,
+        default=DEFAULT_SAMPLES_OUTPUT,
+        help=f"Raw metric samples CSV output (default: {DEFAULT_SAMPLES_OUTPUT})",
+    )
+    ana.add_argument(
+        "--json-out",
+        type=Path,
+        default=DEFAULT_JSON_OUTPUT,
+        help=f"Summary JSON output (default: {DEFAULT_JSON_OUTPUT})",
+    )
     return parser
 
 

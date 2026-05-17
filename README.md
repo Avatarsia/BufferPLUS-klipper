@@ -536,8 +536,6 @@ Beispiel Generator:
 
 ```bash
 python3 tools/buffer_baseline_suite.py generate \
-  --output buffer_baseline_suite.gcode \
-  --manifest buffer_baseline_suite_manifest.csv \
   --flows 24 30 40 \
   --feed-speed-gains 1.10 1.20 \
   --min-feed-floors 10 12 \
@@ -545,6 +543,11 @@ python3 tools/buffer_baseline_suite.py generate \
   --speeds 100 \
   --durations 60
 ```
+
+Default-Ausgabe:
+
+- G-Code: `~/printer_data/gcodes/buffer_baseline_suite.gcode`
+- Manifest: `~/printer_data/config/buffer_baseline_suite_manifest.csv`
 
 Die erzeugte G-Code-Datei ruft pro Fall `BUFFER_BASELINE_RUN` auf und
 markiert jeden Case mit `BFX_CASE_START` / `BFX_CASE_END` im
@@ -554,12 +557,14 @@ Beispiel Auswertung:
 
 ```bash
 python3 tools/buffer_baseline_suite.py analyze \
-  --log ~/printer_data/logs/klippy_real.log \
-  --manifest buffer_baseline_suite_manifest.csv \
-  --summary-out buffer_baseline_summary.csv \
-  --samples-out buffer_baseline_samples.csv \
-  --json-out buffer_baseline_summary.json
+  --log ~/printer_data/logs/klippy_real.log
 ```
+
+Default-Ausgabe der Auswertung:
+
+- Summary: `~/printer_data/config/buffer_baseline_summary.csv`
+- Samples: `~/printer_data/config/buffer_baseline_samples.csv`
+- JSON: `~/printer_data/config/buffer_baseline_summary.json`
 
 Die Summary zeigt unter anderem:
 

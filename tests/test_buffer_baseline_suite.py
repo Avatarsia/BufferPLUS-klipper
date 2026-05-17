@@ -3,6 +3,20 @@ from pathlib import Path
 from tools import buffer_baseline_suite as suite
 
 
+def test_parser_defaults_target_printer_data():
+    parser = suite.build_parser()
+
+    gen_args = parser.parse_args(["generate", "--flows", "24"])
+    assert gen_args.output == suite.DEFAULT_GCODE_OUTPUT
+    assert gen_args.manifest == suite.DEFAULT_MANIFEST_OUTPUT
+
+    ana_args = parser.parse_args(["analyze", "--log", "klippy.log"])
+    assert ana_args.manifest == suite.DEFAULT_MANIFEST_OUTPUT
+    assert ana_args.summary_out == suite.DEFAULT_SUMMARY_OUTPUT
+    assert ana_args.samples_out == suite.DEFAULT_SAMPLES_OUTPUT
+    assert ana_args.json_out == suite.DEFAULT_JSON_OUTPUT
+
+
 def test_generate_gcode_and_manifest(tmp_path: Path):
     cases = suite.build_cases(
         flows=[24.0, 30.0],
