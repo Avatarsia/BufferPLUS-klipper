@@ -3364,7 +3364,7 @@ class BufferFeeder:
                 'DURATION', DEFAULT_BENCHMARK_MODE_S, above=0.0)
         reason = gcmd.get('REASON', None)
         self._set_benchmark_mode(
-            enable=enable,
+            enabled=enable,
             duration_s=duration_s,
             reason=reason or ('gcode_enable' if enable else 'gcode_disable'))
 
