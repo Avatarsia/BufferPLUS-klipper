@@ -220,6 +220,7 @@ getunter Arbeitsstand. Wichtige Beispiele:
 | Parameter | Wert in `lll.cfg` | Bedeutung |
 |---|---:|---|
 | `feed_speed` | `70` | obere Nachfoerdergeschwindigkeit im AUTO-Betrieb |
+| `min_feed_floor` | `10.0` | niedriger H3-Mindestwert, damit mittlere bis hohe Flows frueher in die dynamische Regelung kommen |
 | `lead_time` | `0.12` | zeitlicher Vorlauf fuer geplante Moves |
 | `use_flush_callback_bang_bang` | `True` | moderner Druckpfad ueber `motion_queuing` |
 | `flush_callback_chunk_mm` | `45` | groessere Chunks fuer besseren Durchsatz |
@@ -248,6 +249,9 @@ unterhalb des klassischen `min_feed_floor` liegt.
 Der praktische Grund:
 
 - `24 mm^3/s` sind bei `1.75 mm` Filament nur rund `10 mm/s` linear.
+- Auf diesem Referenzsystem ist `min_feed_floor` deshalb bewusst auf
+  `10.0` gesetzt, damit der Buffer bei ca. `24-30 mm^3/s` frueher aus
+  dem festen H3-Minimum in die dynamische Regelung kommt.
 - Ohne diesen Sonderfall waere der Buffer bei hohem Flow oft zu
   burst-lastig und koennte unterfoerdern.
 
@@ -506,6 +510,8 @@ Pruefen:
 Dann sind vor allem diese Punkte relevant:
 
 - `feed_speed`
+- `min_feed_floor`
+- `feed_speed_gain`
 - `flush_callback_chunk_mm`
 - `interrupt_chunk_mm`
 - `high_flow_mm3s_threshold`
