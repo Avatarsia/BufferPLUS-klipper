@@ -100,6 +100,39 @@ def test_attached_handler_writes_only_buffer_lines(tmp_path):
     assert "gcodein=0" not in content
 
 
+def test_attach_writes_session_start_marker(tmp_path):
+    target = tmp_path / "session.log"
+    log = BaselineLogfile(str(target))
+    root = logging.getLogger()
+    saved_level = root.level
+    root.setLevel(logging.INFO)
+    try:
+        log.attach(reason="baseline_run")
+    finally:
+        log.detach(reason="manual_end")
+        root.setLevel(saved_level)
+
+    content = target.read_text(encoding="utf-8")
+    assert "SESSION_START reason=baseline_run" in content
+    assert "SESSION_END reason=manual_end" in content
+
+
+def test_detach_records_overflow_reason(tmp_path):
+    target = tmp_path / "session.log"
+    log = BaselineLogfile(str(target))
+    root = logging.getLogger()
+    saved_level = root.level
+    root.setLevel(logging.INFO)
+    try:
+        log.attach(reason="baseline_run")
+    finally:
+        log.detach(reason="overflow")
+        root.setLevel(saved_level)
+
+    content = target.read_text(encoding="utf-8")
+    assert "SESSION_END reason=overflow" in content
+
+
 def test_write_one_appends_without_attach(tmp_path):
     target = tmp_path / "marks.log"
     log = BaselineLogfile(str(target))

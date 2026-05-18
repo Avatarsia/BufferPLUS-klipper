@@ -272,6 +272,35 @@ def test_buffer_set_min_feed_floor_updates_value():
     assert 'min_feed_floor' in joined
 
 
+def test_buffer_set_jam_action_disabled_by_none_keyword():
+    printer, feeder = make_feeder()
+    feeder.jam_action = "PAUSE"
+
+    feeder.cmd_BUFFER_SET(FakeGCmd({"JAM_ACTION": "NONE"}))
+
+    assert feeder.jam_action == ""
+    joined = "\n".join(printer.lookup_object('gcode').info_messages)
+    assert 'jam_action' in joined
+
+
+def test_buffer_set_jam_action_disabled_by_disabled_keyword():
+    printer, feeder = make_feeder()
+    feeder.jam_action = "PAUSE"
+
+    feeder.cmd_BUFFER_SET(FakeGCmd({"JAM_ACTION": "DISABLED"}))
+
+    assert feeder.jam_action == ""
+
+
+def test_buffer_set_jam_action_restored_to_pause():
+    printer, feeder = make_feeder()
+    feeder.jam_action = ""
+
+    feeder.cmd_BUFFER_SET(FakeGCmd({"JAM_ACTION": "PAUSE"}))
+
+    assert feeder.jam_action == "PAUSE"
+
+
 def test_buffer_set_filament_diameter_updates_tracker_cross_section():
     printer, feeder = make_feeder()
     before = feeder.velocity_tracker._cross_section

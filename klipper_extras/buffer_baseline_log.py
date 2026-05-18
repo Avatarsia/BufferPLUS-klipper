@@ -17,6 +17,7 @@ PREFIX_FILTERS = (
     "buffer_event[",
     "buffer_metrics:",
     "buffer_benchmark:",
+    "buffer_baseline_session:",
     "buffer_feeder:",
     "BufferFeeder:",
 )
@@ -57,12 +58,14 @@ class BaselineLogfile:
             datefmt="%Y-%m-%d %H:%M:%S",
         )
 
-    def attach(self):
+    def attach(self, reason=""):
         """Open the file and attach to the root logger. Idempotent.
 
         Creates the parent directory if missing. On any IO error this
         method swallows the exception and returns False so a faulty path
-        does not block benchmark mode from enabling."""
+        does not block benchmark mode from enabling. The optional reason
+        is recorded as a SESSION_START marker so the lifecycle of the
+        bench-mode window is auditable in the file itself."""
         if self._handler is not None:
             return True
         try:
@@ -76,6 +79,11 @@ class BaselineLogfile:
             handler.addFilter(_PrefixFilter())
             logging.getLogger().addHandler(handler)
             self._handler = handler
+            # Write SESSION_START via write_one so it always lands even
+            # if a transient race makes the handler attach incomplete.
+            self.write_one(
+                "buffer_baseline_session: SESSION_START reason=%s path=%s"
+                % (reason or "unknown", self.path))
             logging.info(
                 "buffer_feeder: baseline logfile attached -> %s", self.path)
             return True
@@ -83,12 +91,24 @@ class BaselineLogfile:
             self._handler = None
             return False
 
-    def detach(self):
-        """Detach the handler and close the file. Idempotent."""
+    def detach(self, reason=""):
+        """Detach the handler and close the file. Idempotent.
+
+        Records a SESSION_END marker with reason so a future analyzer
+        can pair START/END pairs and see what triggered each off."""
         if self._handler is None:
             return
         handler = self._handler
         self._handler = None
+        # Write SESSION_END BEFORE removing the handler so the marker
+        # still flows through the live FileHandler (cleaner than write_one
+        # which reopens the file).
+        try:
+            logging.info(
+                "buffer_baseline_session: SESSION_END reason=%s",
+                reason or "unknown")
+        except Exception:
+            pass
         try:
             logging.getLogger().removeHandler(handler)
         finally:

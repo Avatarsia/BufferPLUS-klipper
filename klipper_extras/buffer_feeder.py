@@ -303,7 +303,7 @@ class BufferFeeder:
         expired_reason = self._benchmark_mode_reason or "timer_expired"
         self._benchmark_mode_until = 0.0
         self._benchmark_mode_reason = ""
-        self._baseline_logfile.detach()
+        self._baseline_logfile.detach(reason="expired_was_%s" % expired_reason)
         self._debug_event(
             'bench_mode_off',
             "benchmark mode expired (was: %s)",
@@ -323,7 +323,7 @@ class BufferFeeder:
             self._hall2_start_time = None
             self._hall3_start_time = None
             self._hall3_drop_since = None
-            self._baseline_logfile.attach()
+            self._baseline_logfile.attach(reason=self._benchmark_mode_reason)
             self._debug_event(
                 'bench_mode_on',
                 "benchmark mode enabled for %.1fs reason=%s",
@@ -348,7 +348,7 @@ class BufferFeeder:
                 "benchmark mode disabled reason=%s",
                 off_reason,
                 min_interval=0.0)
-            self._baseline_logfile.detach()
+            self._baseline_logfile.detach(reason=off_reason)
             if notify:
                 self._respond(
                     "Benchmark mode disabled — JAM/CLOG detection restored")
@@ -4020,6 +4020,7 @@ class BufferFeeder:
         "  CRITICAL_GUARD_S      critical_action_guard_s (s,   quiet window after risky actions)\n"
         "  CONSERVATIVE_MODE     buffer_conservative_mode(0/1, longer safety guards)\n"
         "  HIGH_FLOW_MM3S        high_flow_mm3s_threshold(mm3/s, allow carry below min_feed_floor)\n"
+        "  JAM_ACTION            jam_action              (gcode macro on JAM; pass empty string to disable)\n"
         "Without args: prints current values. No persistence — copy "
         "the final value into lll.cfg manually."
     )
@@ -4033,6 +4034,7 @@ class BufferFeeder:
         new_max_move   = gcmd.get_float('MAX_MOVE_CHUNK_MM',  None, above=0.)
         new_gain       = gcmd.get_float('FEED_SPEED_GAIN',    None, minval=1.0)
         new_h3_gain    = gcmd.get_float('HALL3_DEMAND_GAIN',  None, minval=1.0)
+        new_jam_action = gcmd.get('JAM_ACTION',                None)
         new_floor      = gcmd.get_float('MIN_FEED_FLOOR',     None, above=0.)
         new_filament_dia = gcmd.get_float('FILAMENT_DIAMETER', None, above=0.)
         new_debug_events = gcmd.get_int('DEBUG_EVENTS',       None, minval=0, maxval=1)
@@ -4130,6 +4132,22 @@ class BufferFeeder:
                             % (old, self.hall3_demand_gain))
             changed = True
 
+        if new_jam_action is not None:
+            old = self.jam_action
+            # Pass NONE/DISABLED/"" to disable jam_action entirely
+            # (no script run on JAM). Useful during baseline runs to
+            # keep the suite from being PAUSEd by spurious JAM
+            # detection. Klipper's gcode parser handles empty-value
+            # tokens inconsistently, so accept NONE/DISABLED as the
+            # well-defined disable keyword.
+            normalized = (new_jam_action or "").strip()
+            if normalized.upper() in ("NONE", "DISABLED"):
+                normalized = ""
+            self.jam_action = normalized
+            gc.respond_info("BUFFER_SET: jam_action %r -> %r"
+                            % (old, self.jam_action))
+            changed = True
+
         if new_floor is not None:
             old = self.min_feed_floor
             self.min_feed_floor = new_floor
@@ -4207,6 +4225,8 @@ class BufferFeeder:
                             % self.feed_speed_gain)
             gc.respond_info("  hall3_demand_gain       = %.3f"
                             % self.hall3_demand_gain)
+            gc.respond_info("  jam_action              = %r"
+                            % self.jam_action)
             gc.respond_info("  min_feed_floor          = %.3f mm/s"
                             % self.min_feed_floor)
             gc.respond_info("  filament_diameter       = %.3f mm"
