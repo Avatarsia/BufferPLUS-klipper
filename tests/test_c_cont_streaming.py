@@ -277,6 +277,76 @@ def test_c_cont_modulator_zwischenzone_high_flow_does_not_restart_after_grace(mo
     assert feeder._compute_target_feed_speed() == 0.0
 
 
+def test_c_cont_modulator_hall2_clamps_neutral_bias_until_hall3(monkeypatch):
+    """After HALL2 the neutral zone must not refill with positive bias.
+
+    Regression for the slow H2->H1 drift seen in klippy(17): the
+    buffer hit H2 correctly, target dropped to 0, but after H2 cleared
+    the neutral carry resumed at vel*gain and slowly walked back into
+    H1. Until a fresh H3 demand arrives, neutral carry may at most
+    match real consumption.
+    """
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={
+            'high_flow_mm3s_threshold': 20.0,
+            'min_feed_floor': 10.0,
+        })
+
+    set_sensor_active(feeder, 'hall_full', True)
+    _stub_tracker(monkeypatch, feeder, velocity=12.5, flow=30.1)
+    assert feeder._compute_target_feed_speed() == 0.0
+    assert feeder._post_full_bias_clamp is True
+
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_empty', False)
+    _stub_tracker(monkeypatch, feeder, velocity=12.5, flow=30.1)
+    assert feeder._compute_target_feed_speed() == pytest.approx(12.5, abs=0.05)
+    assert feeder._post_full_bias_clamp is True
+
+
+def test_c_cont_modulator_post_hall2_below_floor_high_flow_stays_quiet(monkeypatch):
+    """Below-floor high-flow carry must not restart right after HALL2.
+
+    HIGH_FLOW_MM3S=20 is allowed in production now, but after a recent
+    full-buffer event the hall-neutral middle zone must stay quiet
+    until either H3 reappears or velocity rises above the floor.
+    """
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={
+            'high_flow_mm3s_threshold': 20.0,
+            'min_feed_floor': 10.0,
+        })
+
+    set_sensor_active(feeder, 'hall_full', True)
+    _stub_tracker(monkeypatch, feeder, velocity=12.5, flow=30.1)
+    assert feeder._compute_target_feed_speed() == 0.0
+
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_empty', False)
+    _stub_tracker(monkeypatch, feeder, velocity=8.8, flow=21.3)
+    assert feeder._compute_target_feed_speed() == 0.0
+
+
+def test_c_cont_modulator_hall3_releases_post_full_bias_clamp(monkeypatch):
+    """Fresh H3 demand re-enables assertive refill after a full phase."""
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={
+            'high_flow_mm3s_threshold': 20.0,
+            'min_feed_floor': 10.0,
+        })
+
+    set_sensor_active(feeder, 'hall_full', True)
+    _stub_tracker(monkeypatch, feeder, velocity=12.5, flow=30.1)
+    assert feeder._compute_target_feed_speed() == 0.0
+    assert feeder._post_full_bias_clamp is True
+
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_empty', True)
+    _stub_tracker(monkeypatch, feeder, velocity=12.5, flow=30.1)
+    assert feeder._compute_target_feed_speed() == pytest.approx(18.75, abs=0.05)
+    assert feeder._post_full_bias_clamp is False
+
+
 def test_c_cont_modulator_zwischenzone_subthreshold_still_skips(monkeypatch):
     """Unterhalb der High-Flow-Schwelle bleibt der alte Schutz aktiv."""
     printer, feeder = make_c_cont_feeder(monkeypatch)

@@ -236,6 +236,31 @@ class BufferFeeder:
             self._high_flow_active_latched = active
         return active
 
+    def _arm_post_full_bias_clamp(self, reason):
+        """Suppress positive neutral-zone bias after HALL2.
+
+        Once HALL2 has proven the buffer is already full, resuming the
+        normal neutral-zone carry (`vel * feed_speed_gain`) can slowly
+        walk the arm back up into H1 over long steady-flow stretches.
+        Keep the clamp armed until a fresh real HALL3 demand occurs.
+        """
+        if self._post_full_bias_clamp:
+            return
+        self._post_full_bias_clamp = True
+        self._debug_event(
+            'post_full_bias_on',
+            "clamp neutral bias reason=%s",
+            reason, min_interval=0.25)
+
+    def _clear_post_full_bias_clamp(self, reason):
+        if not self._post_full_bias_clamp:
+            return
+        self._post_full_bias_clamp = False
+        self._debug_event(
+            'post_full_bias_off',
+            "release neutral bias clamp reason=%s",
+            reason, min_interval=0.25)
+
     def _benchmark_mode_remaining(self, eventtime=None):
         if eventtime is None:
             eventtime = self.reactor.monotonic()
@@ -1853,11 +1878,13 @@ class BufferFeeder:
             self._modulator_feeding = False
             self._high_flow_active_latched = False
             self._disarm_high_flow_carry('hall_overflow')
+            self._clear_post_full_bias_clamp('hall_overflow')
             return 0.0
         if self.hall_full:
             self._modulator_feeding = False
             self._high_flow_active_latched = False
             self._disarm_high_flow_carry('hall_full')
+            self._arm_post_full_bias_clamp('hall_full')
             return 0.0
         vel_ready = self.velocity_tracker.is_ready()
         extruder_vel = self.velocity_tracker.get_velocity() if vel_ready else 0.0
@@ -1870,6 +1897,7 @@ class BufferFeeder:
             if not vel_ready or extruder_vel <= floor_epsilon:
                 self._modulator_feeding = False
                 return 0.0
+            self._clear_post_full_bias_clamp('hall3_demand')
             self._arm_high_flow_carry(eventtime, 'hall3_demand')
             if extruder_vel < floor - floor_epsilon:
                 self._modulator_feeding = True
@@ -1879,6 +1907,15 @@ class BufferFeeder:
         if not vel_ready or extruder_vel <= floor_epsilon:
             self._modulator_feeding = False
             return 0.0
+        if self._post_full_bias_clamp:
+            # After HALL2 a neutral-zone carry may at most match
+            # current consumption. Positive bias is only allowed again
+            # after a fresh HALL3 demand proves the buffer needs it.
+            if extruder_vel < floor - floor_epsilon:
+                self._modulator_feeding = False
+                return 0.0
+            self._modulator_feeding = True
+            return min(extruder_vel, self.feed_speed)
         proposed = extruder_vel * self.feed_speed_gain
         if proposed >= floor - floor_epsilon:
             self._arm_high_flow_carry(eventtime, 'betweenzone_above_floor')
@@ -2844,6 +2881,7 @@ class BufferFeeder:
         self._modulator_feeding = False
         self._high_flow_active_latched = False
         self._disarm_high_flow_carry('halt_motion')
+        self._clear_post_full_bias_clamp('halt_motion')
         # Reset accumulator on every halt. After a halt the
         # accumulator is stale — leaving it set would cause a false
         # JAM_SAFETY_DISTANCE on the very first chunk of the next
@@ -3829,6 +3867,7 @@ class BufferFeeder:
             "synced_to_extruder = %s" % self._stepper_synced_to,
             "debug_flags        = events=%s metrics=%s" % (
                 self.buffer_debug_events, self.buffer_debug_metrics),
+            "post_full_bias_clamp= %s" % self._post_full_bias_clamp,
             "benchmark_mode     = active=%s left=%.1fs reason=%s" % (
                 self._benchmark_mode_active(),
                 self._benchmark_mode_remaining(),
