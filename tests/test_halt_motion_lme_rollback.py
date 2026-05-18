@@ -186,6 +186,7 @@ def test_halt_motion_resets_modulator_hysteresis_latch():
 
     feeder._modulator_feeding = True
     feeder._post_full_bias_clamp = True
+    feeder._post_full_h3_since = 12.34
     feeder._continuous_feed = True
     feeder._continuous_feed_direction = 1
     feeder._continuous_feed_speed = feeder.feed_speed
@@ -195,6 +196,7 @@ def test_halt_motion_resets_modulator_hysteresis_latch():
 
     assert feeder._modulator_feeding is False
     assert feeder._post_full_bias_clamp is False
+    assert feeder._post_full_h3_since is None
 
 
 # ---------------------------------------------------------------------------

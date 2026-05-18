@@ -56,6 +56,7 @@ class BufferRuntimeState:
     _high_flow_active_latched: bool = False
     _high_flow_carry_armed_until: float = 0.0
     _post_full_bias_clamp: bool = False
+    _post_full_h3_since: Optional[float] = None
     _needs_overflow_prime: bool = False
     _feed_deadline_time: Optional[float] = None
     _measure_load_active: bool = False

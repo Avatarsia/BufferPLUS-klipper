@@ -328,7 +328,7 @@ def test_c_cont_modulator_post_hall2_below_floor_high_flow_stays_quiet(monkeypat
 
 
 def test_c_cont_modulator_hall3_releases_post_full_bias_clamp(monkeypatch):
-    """Fresh H3 demand re-enables assertive refill after a full phase."""
+    """Fresh stable H3 demand re-enables assertive refill after a full phase."""
     printer, feeder = make_c_cont_feeder(
         monkeypatch, cfg_overrides={
             'high_flow_mm3s_threshold': 20.0,
@@ -340,11 +340,46 @@ def test_c_cont_modulator_hall3_releases_post_full_bias_clamp(monkeypatch):
     assert feeder._compute_target_feed_speed() == 0.0
     assert feeder._post_full_bias_clamp is True
 
+    feeder.reactor.now = 10.0
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_empty', True)
     _stub_tracker(monkeypatch, feeder, velocity=12.5, flow=30.1)
+    assert feeder._compute_target_feed_speed() == pytest.approx(12.5, abs=0.05)
+    assert feeder._post_full_bias_clamp is True
+
+    feeder.reactor.now = 10.6
     assert feeder._compute_target_feed_speed() == pytest.approx(18.75, abs=0.05)
     assert feeder._post_full_bias_clamp is False
+
+
+def test_c_cont_modulator_brief_h3_after_hall2_does_not_release_clamp(monkeypatch):
+    """A short H3 bounce after H2 must not re-enable the full boost."""
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={
+            'high_flow_mm3s_threshold': 20.0,
+            'min_feed_floor': 10.0,
+        })
+
+    set_sensor_active(feeder, 'hall_full', True)
+    _stub_tracker(monkeypatch, feeder, velocity=12.5, flow=30.1)
+    assert feeder._compute_target_feed_speed() == 0.0
+
+    feeder.reactor.now = 20.0
+    set_sensor_active(feeder, 'hall_full', False)
+    set_sensor_active(feeder, 'hall_empty', True)
+    _stub_tracker(monkeypatch, feeder, velocity=12.5, flow=30.1)
+    assert feeder._compute_target_feed_speed() == pytest.approx(12.5, abs=0.05)
+    assert feeder._post_full_bias_clamp is True
+
+    feeder.reactor.now = 20.2
+    set_sensor_active(feeder, 'hall_empty', False)
+    assert feeder._compute_target_feed_speed() == pytest.approx(12.5, abs=0.05)
+    assert feeder._post_full_bias_clamp is True
+
+    feeder.reactor.now = 20.3
+    set_sensor_active(feeder, 'hall_empty', True)
+    assert feeder._compute_target_feed_speed() == pytest.approx(12.5, abs=0.05)
+    assert feeder._post_full_bias_clamp is True
 
 
 def test_c_cont_modulator_zwischenzone_subthreshold_still_skips(monkeypatch):
