@@ -98,12 +98,42 @@ class FaultManager:
             return
 
         if interrupted == STATE_LOADING_PULL and owner._overflow_resume_mm > 0:
+            # Force-Reprime auf OVERFLOW-Recovery (Issue #29). Hardware-
+            # Crash 2026-05-19 klippy.log Z.7023 ``stepcompress o=0 i=0
+            # c=19 a=0`` beim 3. von 3 rapiden HALL1-OVERFLOW-Zyklen in
+            # LOAD_PHASE_1.
+            #
+            # Wurzel: Der vorherige Pending-Stream-Setup laesst
+            # _tick_pending_chunk den ersten Resume-Submit mit streaming=
+            # True ausfuehren. Bei primed=True ueberspringt
+            # _reprime_stepcompress_if_needed sowohl flush_step_generation
+            # als auch set_position. Klipper's step_gen_time-Lookahead-
+            # Window pushpt last_step_clock auf ~mcu_now+250ms; t0 baut
+            # aus dem von halt_motion geclampten lme (~mcu_now+lead) und
+            # landet im Generator-Lookahead -> Zero-Interval-Steps ->
+            # Crash.
+            #
+            # Fix: ``_stepcompress_primed = False`` vor dem Submit
+            # forciert den Reprime-Pfad. ``_submit_move(forced_t0=None)``
+            # laesst _reprime_stepcompress_if_needed flush_step_-
+            # generation + set_position(0) feuern -> Stepcompress-Cursor
+            # sauber zurueckgesetzt -> t0 landet garantiert NACH
+            # last_step_clock. Repliziert den bewaehrten Initial-LOAD_-
+            # PHASE_1-Pfad.
+            #
+            # ``_needs_overflow_prime`` wird explicit geclear't weil wir
+            # die Prime-Operation jetzt selbst durchfuehren (statt auf
+            # _handle_overflow_prime_via_flush in STATE_AUTO zu warten,
+            # der in LOAD_PHASE_1 nie feuert).
+            resume_mm = owner._overflow_resume_mm
+            resume_dir = owner._overflow_resume_dir
+            resume_spd = owner._overflow_resume_spd
+            owner._overflow_resume_mm = 0.0
+            owner._stepcompress_primed = False
+            owner._needs_overflow_prime = False
             owner._enable_stepper()
             owner._set_state(STATE_LOADING_PULL)
-            owner._pending_remaining_mm = owner._overflow_resume_mm
-            owner._pending_direction = owner._overflow_resume_dir
-            owner._pending_speed = owner._overflow_resume_spd
-            owner._overflow_resume_mm = 0.0
+            owner._submit_move(resume_dir * resume_mm, resume_spd)
             return
 
         # In overflow-overlay mode the cmd_BUFFER_LOAD_PHASE3 while-loop is
