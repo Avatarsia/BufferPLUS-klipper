@@ -101,3 +101,20 @@ class BaselineLogfile:
 
     def is_attached(self):
         return self._handler is not None
+
+    def write_one(self, message):
+        """Append a single line to the baseline logfile even when not
+        attached. Used for BUFFER_BENCHMARK_MARK so SUITE/CASE markers
+        emitted by the suite generator (before BUFFER_BENCH_MODE
+        enables) still land in the file. No-op on IO failure."""
+        try:
+            parent = os.path.dirname(self.path)
+            if parent and not os.path.isdir(parent):
+                os.makedirs(parent, exist_ok=True)
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.") \
+                + ("%03d" % (datetime.now().microsecond // 1000))
+            with open(self.path, "a", encoding="utf-8") as fh:
+                fh.write("%s %s\n" % (stamp, message))
+        except (OSError, IOError, ValueError):
+            pass

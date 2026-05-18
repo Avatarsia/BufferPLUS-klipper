@@ -300,12 +300,14 @@ class BufferFeeder:
             return False
         if eventtime < self._benchmark_mode_until:
             return True
+        expired_reason = self._benchmark_mode_reason or "timer_expired"
         self._benchmark_mode_until = 0.0
         self._benchmark_mode_reason = ""
         self._baseline_logfile.detach()
         self._debug_event(
             'bench_mode_off',
-            "benchmark mode expired",
+            "benchmark mode expired (was: %s)",
+            expired_reason,
             min_interval=0.0)
         return False
 
@@ -334,6 +336,7 @@ class BufferFeeder:
             return
 
         was_active = self._benchmark_mode_until > 0.0
+        off_reason = reason or "manual"
         self._benchmark_mode_until = 0.0
         self._benchmark_mode_reason = ""
         self._hall2_start_time = None
@@ -342,7 +345,8 @@ class BufferFeeder:
         if was_active:
             self._debug_event(
                 'bench_mode_off',
-                "benchmark mode disabled",
+                "benchmark mode disabled reason=%s",
+                off_reason,
                 min_interval=0.0)
             self._baseline_logfile.detach()
             if notify:
@@ -3487,7 +3491,15 @@ class BufferFeeder:
         append_field('HIGHFLOW', 'highflow')
         append_field('CASES', 'cases')
 
-        logging.info("buffer_benchmark: %s", " ".join(parts))
+        rendered = " ".join(parts)
+        logging.info("buffer_benchmark: %s", rendered)
+        # SUITE_START/CASE_START fire BEFORE BUFFER_BENCH_MODE enables
+        # the FileHandler, and SUITE_END/CASE_END fire AFTER it
+        # disables. The handler-filtered tail of these markers would
+        # never land in the baseline logfile. Write them directly so
+        # the analyzer sees the complete suite envelope.
+        if not self._baseline_logfile.is_attached():
+            self._baseline_logfile.write_one("buffer_benchmark: " + rendered)
 
     cmd_BUFFER_BENCH_MODE_help = (
         "Enable/disable benchmark mode with auto-expiry. "

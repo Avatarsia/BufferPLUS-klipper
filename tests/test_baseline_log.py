@@ -100,6 +100,40 @@ def test_attached_handler_writes_only_buffer_lines(tmp_path):
     assert "gcodein=0" not in content
 
 
+def test_write_one_appends_without_attach(tmp_path):
+    target = tmp_path / "marks.log"
+    log = BaselineLogfile(str(target))
+    assert not log.is_attached()
+
+    log.write_one("buffer_benchmark: BFX_SUITE_START cases=12")
+    log.write_one("buffer_benchmark: BFX_CASE_START id=c001")
+
+    content = target.read_text(encoding="utf-8")
+    assert "BFX_SUITE_START cases=12" in content
+    assert "BFX_CASE_START id=c001" in content
+    # Two lines (each with timestamp prefix)
+    assert content.count("\n") == 2
+
+
+def test_write_one_works_after_detach(tmp_path):
+    target = tmp_path / "marks.log"
+    log = BaselineLogfile(str(target))
+    log.attach()
+    log.detach()
+    log.write_one("buffer_benchmark: BFX_SUITE_END cases=12")
+
+    content = target.read_text(encoding="utf-8")
+    assert "BFX_SUITE_END cases=12" in content
+
+
+def test_write_one_creates_parent_dir(tmp_path):
+    target = tmp_path / "deep" / "nested" / "marks.log"
+    log = BaselineLogfile(str(target))
+    log.write_one("buffer_benchmark: BFX_CASE_START id=c001")
+    assert target.exists()
+    assert "BFX_CASE_START id=c001" in target.read_text(encoding="utf-8")
+
+
 def test_detach_closes_file_handler_cleanly(tmp_path):
     target = tmp_path / "out.log"
     log = BaselineLogfile(str(target))
