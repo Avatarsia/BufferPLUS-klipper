@@ -3444,7 +3444,25 @@ class BufferFeeder:
                 return
             self._set_state(
                 STATE_MANUAL_FEED if direction > 0 else STATE_MANUAL_RETRACT)
-            self._submit_move(direction * chunk_mm, speed)
+            # Hotfix 2026-05-18 (stepcompress c=21 race):
+            # During the idle phase between cases the watchdog-anchor
+            # path keeps lme = mcu_now + lead_time slightly in the
+            # future (sub-MAX_T0_LOOKAHEAD_S so the sanitizer does not
+            # clamp). A direct _submit_move with forced_t0=None then
+            # computes t0 = th_time + lead_time which can land BEFORE
+            # last_step_clock from the watchdog-anchor's queued steps,
+            # producing "stepcompress o=0 i=0 c=N: Invalid sequence".
+            # Clamp lme back to mcu_now before each manual sub-chunk
+            # when nothing is genuinely in flight. Also pass
+            # submit_chunk_cap so sub-chunks honour interrupt_chunk_mm
+            # like the AUTO streaming path does.
+            mcu_now = self.stepper.get_mcu().estimated_print_time(
+                self.reactor.monotonic())
+            if (not self._move_in_flight()
+                    and self._last_move_end_time > mcu_now):
+                self._last_move_end_time = mcu_now
+            self._submit_move(direction * chunk_mm, speed,
+                              submit_chunk_cap=self.interrupt_chunk_mm)
             self._wait_for_move_drain_allowing_lockout()
             moved += chunk_mm
             if settle_s > 0:
