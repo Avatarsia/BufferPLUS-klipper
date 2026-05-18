@@ -176,7 +176,22 @@ Es gibt zwei Wege:
 - `./update.sh`
   - nicht interaktiv
   - zieht Git-Updates und ueberschreibt `lll.cfg`
+  - rollt standardmaessig `klippy.log` vor dem Klipper-Neustart ueber
+    Moonraker
   - eher fuer Entwickler oder bewusstes Testen
+
+Falls du das Log-Rollover fuer einen Lauf nicht willst, kannst du es
+abschalten:
+
+```bash
+ROLLOVER_KLIPPY_LOG=0 ./update.sh
+```
+
+Falls Moonraker nicht auf dem lokalen Default-Port laeuft:
+
+```bash
+MOONRAKER_URL=http://127.0.0.1:7125 ./update.sh
+```
 
 ### Moonraker Auto-Update
 

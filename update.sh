@@ -11,6 +11,8 @@
 #   KLIPPER_DIR       (default: ~/klipper)
 #   PRINTER_CFG_DIR   (default: ~/printer_data/config)
 #   KLIPPER_SERVICE   (default: klipper)
+#   MOONRAKER_URL     (default: http://127.0.0.1:7125)
+#   ROLLOVER_KLIPPY_LOG (default: 1)
 #
 # Verwendung:
 #   ./update.sh
@@ -24,6 +26,8 @@ set -eu
 KLIPPER_DIR="${KLIPPER_DIR:-${HOME}/klipper}"
 PRINTER_CFG_DIR="${PRINTER_CFG_DIR:-${HOME}/printer_data/config}"
 KLIPPER_SERVICE="${KLIPPER_SERVICE:-klipper}"
+MOONRAKER_URL="${MOONRAKER_URL:-http://127.0.0.1:7125}"
+ROLLOVER_KLIPPY_LOG="${ROLLOVER_KLIPPY_LOG:-1}"
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 EXT_SOURCE="${REPO_DIR}/klipper_extras/buffer_feeder.py"
@@ -50,6 +54,38 @@ collect_ext_sub_modules() {
 }
 
 collect_ext_sub_modules
+
+moonraker_rollover_klippy_log() {
+    local response
+    if [ "${ROLLOVER_KLIPPY_LOG}" != "1" ]; then
+        echo "[update] Klippy-Log-Rollover deaktiviert (ROLLOVER_KLIPPY_LOG=${ROLLOVER_KLIPPY_LOG})"
+        return 0
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "[update] curl nicht gefunden — ueberspringe Moonraker-Log-Rollover"
+        return 0
+    fi
+    response="$(
+        curl -fsS \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            --data '{"application":"klipper"}' \
+            "${MOONRAKER_URL%/}/server/logs/rollover" \
+            2>/dev/null || true
+    )"
+    case "${response}" in
+        *'"rolled_over"'*'"klipper"'*)
+            echo "[update] Klippy-Log via Moonraker gerollt"
+            ;;
+        "")
+            echo "[update] Moonraker-Log-Rollover nicht verfuegbar oder nicht erreichbar — ueberspringe"
+            ;;
+        *)
+            echo "[update] Moonraker-Log-Rollover lieferte keine Klipper-Bestaetigung — ueberspringe"
+            echo "[update] Moonraker-Antwort: ${response}"
+            ;;
+    esac
+}
 
 # ---------- Sanity ----------
 [ -d "${KLIPPER_DIR}/klippy/extras" ] || {
@@ -125,6 +161,9 @@ else
 fi
 
 # ---------- 4) Klipper-Restart ----------
+moonraker_rollover_klippy_log
+
+# ---------- 5) Klipper-Restart ----------
 echo "[update] Klipper-Service neustarten (${KLIPPER_SERVICE})"
 ${SUDO} systemctl restart "${KLIPPER_SERVICE}"
 
