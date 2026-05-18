@@ -510,6 +510,52 @@ def test_streaming_uses_step_gen_cursor_when_reactor_time_is_ahead():
         "got %.3f" % t0)
 
 
+def test_streaming_cursor_lag_still_drops_enable_floor():
+    """Short recovery chunks can make reactor/mcu_now outrun the prior
+    move end_time while step_gen_time still sits on the old cursor.
+
+    In that window `_flush_move_in_flight()` correctly keeps the flush
+    path in streaming mode, but `_plan_t0_anchor()` must not let a stale
+    `_last_enable_schedule_time` win again. Otherwise the next recovery
+    chunk reanchors after the enable-floor instead of on the current
+    stepcompress cursor and can trigger `Invalid sequence`.
+    """
+    printer, feeder = make_feeder()
+    motion_q = printer.lookup_object('motion_queuing')
+    enable = get_enable_handle(feeder)
+    set_sensor_active(feeder, 'hall_empty', True)
+
+    feeder.reactor.now = 10.00
+    feeder._continuous_feed = True
+    feeder._continuous_feed_direction = 1
+    feeder._continuous_feed_speed = feeder.feed_speed
+    feeder._last_move_end_time = 9.85
+    feeder._last_enable_schedule_time = 10.30
+    feeder._current_move = {
+        'end_time': 9.85,
+        'direction': 1.0,
+        'distance': 3.0,
+        'speed': feeder.feed_speed,
+    }
+    feeder._stepcompress_primed = True
+
+    enables_before = len(enable.enables)
+    appends_before = len(motion_q.append_calls)
+    motion_q.trigger_flush(flush_time=9.70, step_gen_time=9.72)
+
+    own = [c for c in motion_q.append_calls[appends_before:]
+           if c[0] is feeder.trapq]
+    assert own, "expected flush submit in cursor-lag + en-floor race"
+    assert len(enable.enables) == enables_before, (
+        "cursor-lag recovery re-entered motor_enable instead of staying "
+        "on the streaming path")
+    t0 = own[0][1]
+    assert t0 == pytest.approx(10.0, abs=0.01), (
+        "enable-floor leaked back into forced_t0 streaming anchor: "
+        "expected mcu_now-floor ~10.0, got %.3f (stale en=10.30 must "
+        "not win in cursor-lag recovery)" % t0)
+
+
 # ---------------------------------------------------------------------------
 # P7-66b — Interrupt-on-HALL via Move-Splitting.
 # ---------------------------------------------------------------------------

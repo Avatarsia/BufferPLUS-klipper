@@ -2754,10 +2754,31 @@ class BufferFeeder:
     def _plan_t0_anchor(self, forced_t0, mcu_now,
                         was_primed, need_reprime, streaming):
         stale_anchor = (self._last_move_end_time <= mcu_now)
-        en = (0.0
-              if (streaming and was_primed and not need_reprime
-                  and not stale_anchor)
-              else self._last_enable_schedule_time)
+        # Distinguish two "streaming" families:
+        #
+        # 1. Legacy reactor/manual streaming (forced_t0 is None):
+        #    keep the old stale_anchor guard. If wall-clock already
+        #    outran `_last_move_end_time`, en-floor must protect the next
+        #    submit from stale-anchor corruption.
+        #
+        # 2. Flush-callback streaming (forced_t0 provided):
+        #    `_flush_move_in_flight(step_gen_time)` already proved that
+        #    the step-generator cursor is still on the prior move even if
+        #    reactor.now()/mcu_now slightly run ahead. Re-applying the
+        #    enable-floor in that window reanchors the next short
+        #    recovery chunk after motor_enable timing instead of on the
+        #    active stepcompress cursor and can reorder the sequence.
+        #
+        # In both cases mcu_now remains the safety floor against
+        # past-time anchors.
+        drop_enable_floor = False
+        if streaming and self._current_move is not None and was_primed \
+                and not need_reprime:
+            if forced_t0 is None:
+                drop_enable_floor = not stale_anchor
+            else:
+                drop_enable_floor = True
+        en = 0.0 if drop_enable_floor else self._last_enable_schedule_time
 
         if forced_t0 is not None:
             # Clamp far-future forced_t0. motion_queuing.flush_all_steps
