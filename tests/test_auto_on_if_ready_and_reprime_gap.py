@@ -223,6 +223,24 @@ def test_post_load_grace_clears_on_auto_off(feeder):
     assert feeder._post_load_overflow_grace is False
 
 
+def test_auto_off_can_skip_workflow_abort_for_benchmark_tail(feeder):
+    """Bench tail-drain needs AUTO_OFF semantics without arming the
+    sticky workflow-abort flag.
+
+    Default AUTO_OFF remains unchanged; this test only covers the
+    explicit ABORT_WORKFLOW=0 path used by BUFFER_BASELINE_RUN after
+    MEASURE_END.
+    """
+    feeder._state = buffer_feeder.STATE_AUTO
+    feeder._halt_requested = False
+
+    feeder.cmd_BUFFER_AUTO_OFF(FakeGCmdLocal({"ABORT_WORKFLOW": 0}))
+
+    assert feeder._state == buffer_feeder.STATE_IDLE
+    assert feeder._halt_requested is False
+    assert feeder._auto_off_by_user is True
+
+
 def test_post_load_grace_clears_on_stop_buffer_fill(feeder):
     feeder._state = buffer_feeder.STATE_AUTO
     feeder._post_load_overflow_grace = True

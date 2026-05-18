@@ -3147,12 +3147,14 @@ class BufferFeeder:
     def _full_reset_to_idle(self, *, label,
                             full=False,
                             sticky_auto_off=False,
-                            preserve_lockout=False):
+                            preserve_lockout=False,
+                            set_halt_requested=True):
         return self.cleanup.full_reset_to_idle(CleanupOptions(
             label=label,
             full=full,
             sticky_auto_off=sticky_auto_off,
             preserve_lockout=preserve_lockout,
+            set_halt_requested=set_halt_requested,
         ))
 
     def _measure_report(self):
@@ -3287,10 +3289,16 @@ class BufferFeeder:
         # (e.g. if the print ended uncleanly and idle_timeout never
         # fired :printing again). sticky_auto_off=True blocks
         # reinsert auto-grip until an explicit BUFFER_AUTO_ON.
+        abort_workflow = 1 if gcmd is None else gcmd.get_int(
+            'ABORT_WORKFLOW', 1, minval=0, maxval=1)
         self._full_reset_to_idle(label="AUTO_OFF",
                                  full=True,
-                                 sticky_auto_off=True)
-        self._respond("AUTO off — workflow will abort at next wait; recovery flags cleared")
+                                 sticky_auto_off=True,
+                                 set_halt_requested=bool(abort_workflow))
+        if abort_workflow:
+            self._respond("AUTO off — workflow will abort at next wait; recovery flags cleared")
+        else:
+            self._respond("AUTO off — state=IDLE, workflow abort suppressed")
 
     def _abort_signalled(self):
         """True if a wait should cut short — HALT armed or safety lockout."""

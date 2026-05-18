@@ -36,3 +36,4 @@ class CleanupOptions:
     full: bool = False
     sticky_auto_off: bool = False
     preserve_lockout: bool = False
+    set_halt_requested: bool = True

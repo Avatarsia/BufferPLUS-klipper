@@ -41,7 +41,7 @@ class CleanupCoordinator:
         if options.sticky_auto_off:
             owner._auto_off_by_user = True
         owner._runout_recovery_pending = False
-        owner._halt_requested = True
+        owner._halt_requested = options.set_halt_requested
         owner._post_load_overflow_grace = False
         if options.preserve_lockout and owner._state in (STATE_OVERFLOW, STATE_JAM):
             return
