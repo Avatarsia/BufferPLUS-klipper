@@ -59,6 +59,8 @@ from .buffer_types import AnchorPlan, CleanupOptions, Hall1Context
 HIGH_FLOW_EXIT_HYSTERESIS_MM3S = 1.0
 HIGH_FLOW_CARRY_GRACE_S = 0.75
 POST_FULL_H3_DWELL_S = 0.50
+POST_FULL_RECOVERY_S = 1.00
+POST_FULL_RECOVERY_CHUNK_MM = 3.0
 DEFAULT_BENCHMARK_MODE_S = 900.0
 
 
@@ -249,6 +251,7 @@ class BufferFeeder:
             return
         self._post_full_bias_clamp = True
         self._post_full_h3_since = None
+        self._post_full_recovery_until = 0.0
         self._debug_event(
             'post_full_bias_on',
             "clamp neutral bias reason=%s",
@@ -259,10 +262,27 @@ class BufferFeeder:
             return
         self._post_full_bias_clamp = False
         self._post_full_h3_since = None
+        if reason == 'hall3_demand':
+            self._post_full_recovery_until = (
+                self.reactor.monotonic() + POST_FULL_RECOVERY_S)
         self._debug_event(
             'post_full_bias_off',
             "release neutral bias clamp reason=%s",
             reason, min_interval=0.25)
+
+    def _post_full_recovery_active(self, eventtime):
+        if self._post_full_recovery_until <= 0.0:
+            return False
+        if eventtime < self._post_full_recovery_until:
+            return True
+        self._post_full_recovery_until = 0.0
+        return False
+
+    def _effective_interrupt_chunk_mm(self, eventtime):
+        if (self._post_full_bias_clamp
+                or self._post_full_recovery_active(eventtime)):
+            return min(self.interrupt_chunk_mm, POST_FULL_RECOVERY_CHUNK_MM)
+        return self.interrupt_chunk_mm
 
     def _benchmark_mode_remaining(self, eventtime=None):
         if eventtime is None:
@@ -2182,6 +2202,7 @@ class BufferFeeder:
             anchor = current_end
         else:
             anchor = step_gen_time + self.lead_time
+        submit_chunk_mm = self._effective_interrupt_chunk_mm(eventtime)
 
         if not self._continuous_feed:
             # Real inactive -> active transition: reset safety counters.
@@ -2193,7 +2214,7 @@ class BufferFeeder:
         self._debug_event(
             'flush_submit',
             "submit speed=%.3f anchor=%.3f move_active=%s chunk=%.3f",
-            target_speed, anchor, move_active, self.interrupt_chunk_mm,
+            target_speed, anchor, move_active, submit_chunk_mm,
             min_interval=1.0)
 
         # Pipeline-Cap: one sub-chunk in-flight at a time so a HALL1/
@@ -2201,11 +2222,11 @@ class BufferFeeder:
         # callback instead of letting an already-queued chunk overrun
         # the buffer arm.
         self._submit_move(
-            self.interrupt_chunk_mm,
+            submit_chunk_mm,
             target_speed,
             forced_t0=anchor,
             streaming=move_active,
-            submit_chunk_cap=self.interrupt_chunk_mm)
+            submit_chunk_cap=submit_chunk_mm)
 
     def _exit_phase3_stable(self, *, set_grace, respond_text):
         """Common exit-sequence when HALL2 (buffer full) or HALL1 (with
@@ -2900,6 +2921,7 @@ class BufferFeeder:
         self._disarm_high_flow_carry('halt_motion')
         self._clear_post_full_bias_clamp('halt_motion')
         self._post_full_h3_since = None
+        self._post_full_recovery_until = 0.0
         # Reset accumulator on every halt. After a halt the
         # accumulator is stale — leaving it set would cause a false
         # JAM_SAFETY_DISTANCE on the very first chunk of the next
@@ -3887,6 +3909,8 @@ class BufferFeeder:
                 self.buffer_debug_events, self.buffer_debug_metrics),
             "post_full_bias_clamp= %s" % self._post_full_bias_clamp,
             "post_full_h3_since = %s" % (self._post_full_h3_since,),
+            "post_full_recovery = %.3fs" % max(
+                0.0, self._post_full_recovery_until - self.reactor.monotonic()),
             "benchmark_mode     = active=%s left=%.1fs reason=%s" % (
                 self._benchmark_mode_active(),
                 self._benchmark_mode_remaining(),

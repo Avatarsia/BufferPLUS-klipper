@@ -382,6 +382,60 @@ def test_c_cont_modulator_brief_h3_after_hall2_does_not_release_clamp(monkeypatc
     assert feeder._post_full_bias_clamp is True
 
 
+def test_flush_submit_uses_small_chunk_while_post_full_clamp_active(monkeypatch):
+    """Near H2 we shorten the flush chunk to reduce residual overshoot."""
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={
+            'high_flow_mm3s_threshold': 20.0,
+            'min_feed_floor': 10.0,
+            'interrupt_chunk_mm': 9.0,
+        })
+    feeder.reactor.now = 30.0
+    feeder._post_full_bias_clamp = True
+    _stub_tracker(monkeypatch, feeder, velocity=12.5, flow=30.1)
+    monkeypatch.setattr(feeder, '_auto_submit_permission',
+                        lambda eventtime: (True, 'active_print'))
+    submits = []
+    monkeypatch.setattr(
+        feeder, '_submit_move',
+        lambda dist, speed, **kw: submits.append(
+            {'distance': dist, 'speed': speed, **kw}))
+
+    feeder._flush_submit_streaming_chunk(step_gen_time=30.05, eventtime=30.0)
+
+    assert submits, "expected a buffered flush submit"
+    assert submits[0]['distance'] == pytest.approx(3.0, abs=0.001)
+    assert submits[0]['submit_chunk_cap'] == pytest.approx(3.0, abs=0.001)
+
+
+def test_flush_submit_uses_small_chunk_during_post_full_recovery(monkeypatch):
+    """The first boosted chunk after H2 also stays short."""
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={
+            'high_flow_mm3s_threshold': 20.0,
+            'min_feed_floor': 10.0,
+            'interrupt_chunk_mm': 9.0,
+        })
+    feeder.reactor.now = 40.0
+    feeder._post_full_recovery_until = 41.0
+    set_sensor_active(feeder, 'hall_empty', True)
+    _stub_tracker(monkeypatch, feeder, velocity=12.5, flow=30.1)
+    monkeypatch.setattr(feeder, '_auto_submit_permission',
+                        lambda eventtime: (True, 'active_print'))
+    submits = []
+    monkeypatch.setattr(
+        feeder, '_submit_move',
+        lambda dist, speed, **kw: submits.append(
+            {'distance': dist, 'speed': speed, **kw}))
+
+    feeder._flush_submit_streaming_chunk(step_gen_time=40.05, eventtime=40.0)
+
+    assert submits, "expected a buffered flush submit"
+    assert submits[0]['distance'] == pytest.approx(3.0, abs=0.001)
+    assert submits[0]['submit_chunk_cap'] == pytest.approx(3.0, abs=0.001)
+    assert submits[0]['speed'] == pytest.approx(18.75, abs=0.05)
+
+
 def test_c_cont_modulator_zwischenzone_subthreshold_still_skips(monkeypatch):
     """Unterhalb der High-Flow-Schwelle bleibt der alte Schutz aktiv."""
     printer, feeder = make_c_cont_feeder(monkeypatch)
