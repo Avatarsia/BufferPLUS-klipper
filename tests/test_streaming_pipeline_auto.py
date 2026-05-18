@@ -556,6 +556,53 @@ def test_streaming_cursor_lag_still_drops_enable_floor():
         "not win in cursor-lag recovery)" % t0)
 
 
+def test_streaming_uses_step_gen_cursor_when_reactor_time_is_behind():
+    """After a short recovery chunk, the reactor wall-clock can still
+    lag slightly behind while step_gen_time already passed the prior
+    move end.
+
+    In that inverse race `_move_in_flight()` still says True, but the
+    flush callback must treat the old chunk as drained. Reusing the old
+    current_end as a streaming anchor submits the next recovery chunk
+    out-of-order and matches the `Invalid sequence` pattern from the
+    real bench log.
+    """
+    printer, feeder = make_feeder()
+    motion_q = printer.lookup_object('motion_queuing')
+    set_sensor_active(feeder, 'hall_empty', True)
+
+    feeder.reactor.now = 9.84
+    feeder._continuous_feed = True
+    feeder._continuous_feed_direction = 1
+    feeder._continuous_feed_speed = feeder.feed_speed
+    feeder._last_move_end_time = 9.85
+    feeder._current_move = {
+        'end_time': 9.85,
+        'direction': 1.0,
+        'distance': 3.0,
+        'speed': feeder.feed_speed,
+    }
+    feeder._stepcompress_primed = True
+    feeder._post_full_recovery_until = 10.50
+
+    assert feeder._flush_move_in_flight(9.90) is False, (
+        "step_gen_time already passed the short recovery chunk; "
+        "_flush_move_in_flight must not keep it alive just because "
+        "reactor.now() still lags behind")
+
+    appends_before = len(motion_q.append_calls)
+    motion_q.trigger_flush(flush_time=9.89, step_gen_time=9.90)
+
+    own = [c for c in motion_q.append_calls[appends_before:]
+           if c[0] is feeder.trapq]
+    assert own, "expected flush submit after drained recovery chunk"
+    t0 = own[0][1]
+    assert t0 > 9.95, (
+        "step_gen_time already passed the old recovery chunk, so the "
+        "next submit must start after the drained cursor instead of "
+        "reusing stale current_end=9.85; got %.3f" % t0)
+
+
 # ---------------------------------------------------------------------------
 # P7-66b — Interrupt-on-HALL via Move-Splitting.
 # ---------------------------------------------------------------------------

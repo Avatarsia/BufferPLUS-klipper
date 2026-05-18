@@ -2102,9 +2102,11 @@ class BufferFeeder:
         """
         if self._current_move is None:
             return False
+        current_end = self._current_move.get('end_time', 0.0)
+        if current_end <= step_gen_time:
+            return False
         if self._move_in_flight():
             return True
-        current_end = self._current_move.get('end_time', 0.0)
         if current_end > step_gen_time:
             self._debug_event(
                 'flush_cursor_lag',
