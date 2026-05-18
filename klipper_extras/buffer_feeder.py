@@ -3453,16 +3453,20 @@ class BufferFeeder:
             # last_step_clock from the watchdog-anchor's queued steps,
             # producing "stepcompress o=0 i=0 c=N: Invalid sequence".
             # Clamp lme back to mcu_now before each manual sub-chunk
-            # when nothing is genuinely in flight. Also pass
-            # submit_chunk_cap so sub-chunks honour interrupt_chunk_mm
-            # like the AUTO streaming path does.
+            # when nothing is genuinely in flight.
+            #
+            # NOT passing submit_chunk_cap here: the second run (c002
+            # PREP) hung when the 5 mm move was split into 3+2 mm —
+            # the pending-remaining stream is not consistently drained
+            # in MANUAL_FEED state, and _wait_for_move_drain blocked
+            # forever. Stay with a single trapezoid per chunk_mm; HALL
+            # latency in PREP is uncritical (low speed, manual context).
             mcu_now = self.stepper.get_mcu().estimated_print_time(
                 self.reactor.monotonic())
             if (not self._move_in_flight()
                     and self._last_move_end_time > mcu_now):
                 self._last_move_end_time = mcu_now
-            self._submit_move(direction * chunk_mm, speed,
-                              submit_chunk_cap=self.interrupt_chunk_mm)
+            self._submit_move(direction * chunk_mm, speed)
             self._wait_for_move_drain_allowing_lockout()
             moved += chunk_mm
             if settle_s > 0:

@@ -22,7 +22,9 @@ def test_buffer_prep_baseline_feeds_from_h3_to_neutral(feeder, monkeypatch):
         "SETTLE_MS": 0,
     }))
 
-    assert moves == [(5.0, 15.0, feeder.interrupt_chunk_mm)]
+    # submit_chunk_cap is intentionally NOT passed (see comment in
+    # cmd_BUFFER_PREP_BASELINE about the c002 hang).
+    assert moves == [(5.0, 15.0, None)]
     assert feeder._state == buffer_feeder.STATE_IDLE
     assert feeder.hall_empty is False
     assert feeder.hall_full is False
