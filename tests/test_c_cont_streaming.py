@@ -436,6 +436,47 @@ def test_flush_submit_uses_small_chunk_during_post_full_recovery(monkeypatch):
     assert submits[0]['speed'] == pytest.approx(18.75, abs=0.05)
 
 
+def test_flush_submit_waits_for_short_recovery_chunk_to_drain(monkeypatch):
+    """Post-H2 recovery chunks must fully drain before the next flush
+    submit, even if the remaining time already fell below lead_time.
+
+    This avoids back-to-back short recovery appends on a still active
+    stepcompress cursor, the pattern seen in the hardware `Invalid
+    sequence` logs after H2 recovery.
+    """
+    printer, feeder = make_c_cont_feeder(
+        monkeypatch, cfg_overrides={
+            'high_flow_mm3s_threshold': 20.0,
+            'min_feed_floor': 10.0,
+            'interrupt_chunk_mm': 9.0,
+        })
+    feeder.reactor.now = 50.0
+    feeder._post_full_recovery_until = 51.0
+    feeder._current_move = {
+        'end_time': 50.25,
+        'direction': 1.0,
+        'distance': 3.0,
+        'speed': 12.5,
+    }
+    feeder._last_move_end_time = 50.25
+    feeder._stepcompress_primed = True
+    set_sensor_active(feeder, 'hall_empty', True)
+    _stub_tracker(monkeypatch, feeder, velocity=12.5, flow=30.1)
+    monkeypatch.setattr(feeder, '_auto_submit_permission',
+                        lambda eventtime: (True, 'active_print'))
+    submits = []
+    monkeypatch.setattr(
+        feeder, '_submit_move',
+        lambda dist, speed, **kw: submits.append(
+            {'distance': dist, 'speed': speed, **kw}))
+
+    feeder._flush_submit_streaming_chunk(step_gen_time=50.20, eventtime=50.0)
+
+    assert submits == [], (
+        "short post-H2 recovery chunk should drain completely before "
+        "the next flush submit is allowed")
+
+
 def test_c_cont_modulator_zwischenzone_subthreshold_still_skips(monkeypatch):
     """Unterhalb der High-Flow-Schwelle bleibt der alte Schutz aktiv."""
     printer, feeder = make_c_cont_feeder(monkeypatch)

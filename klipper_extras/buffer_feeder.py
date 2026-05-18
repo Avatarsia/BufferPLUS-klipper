@@ -2198,11 +2198,22 @@ class BufferFeeder:
                 self._pending_remaining_mm, min_interval=1.0)
             return  # sub-chunk pipeline already running
 
+        submit_chunk_mm = self._effective_interrupt_chunk_mm(eventtime)
+        if move_active and submit_chunk_mm < self.interrupt_chunk_mm:
+            remaining = current_end - step_gen_time
+            if remaining > 0.0:
+                self._debug_event(
+                    'flush_skip_recovery_drain',
+                    "skip short recovery chunk remaining=%.3f lead=%.3f "
+                    "chunk=%.3f",
+                    remaining, self.lead_time, submit_chunk_mm,
+                    min_interval=0.5)
+                return
+
         if move_active:
             anchor = current_end
         else:
             anchor = step_gen_time + self.lead_time
-        submit_chunk_mm = self._effective_interrupt_chunk_mm(eventtime)
 
         if not self._continuous_feed:
             # Real inactive -> active transition: reset safety counters.
