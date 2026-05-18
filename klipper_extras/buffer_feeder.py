@@ -46,6 +46,7 @@ from ._buffer_common import (
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+from .buffer_baseline_log import BaselineLogfile
 from .buffer_fault import FaultManager
 from .buffer_cleanup import CleanupCoordinator
 from .buffer_config import BufferConfigValues
@@ -78,6 +79,9 @@ class BufferFeeder:
         self.runtime_state = BufferRuntimeState()
         self.runtime_state.apply(self)
         self._debug_event_last = {}
+        baseline_log_path = config.get(
+            'baseline_log_path', BaselineLogfile.DEFAULT_PATH)
+        self._baseline_logfile = BaselineLogfile(baseline_log_path)
 
         # ----- Stepper + trapq -----
         self.sync = SyncCoordinator(self)
@@ -298,6 +302,7 @@ class BufferFeeder:
             return True
         self._benchmark_mode_until = 0.0
         self._benchmark_mode_reason = ""
+        self._baseline_logfile.detach()
         self._debug_event(
             'bench_mode_off',
             "benchmark mode expired",
@@ -316,6 +321,7 @@ class BufferFeeder:
             self._hall2_start_time = None
             self._hall3_start_time = None
             self._hall3_drop_since = None
+            self._baseline_logfile.attach()
             self._debug_event(
                 'bench_mode_on',
                 "benchmark mode enabled for %.1fs reason=%s",
@@ -338,6 +344,7 @@ class BufferFeeder:
                 'bench_mode_off',
                 "benchmark mode disabled",
                 min_interval=0.0)
+            self._baseline_logfile.detach()
             if notify:
                 self._respond(
                     "Benchmark mode disabled — JAM/CLOG detection restored")
@@ -1939,7 +1946,8 @@ class BufferFeeder:
                 self._modulator_feeding = True
                 return floor
             self._modulator_feeding = True
-            return min(max(extruder_vel * 1.5, floor), self.feed_speed)
+            return min(max(extruder_vel * self.hall3_demand_gain, floor),
+                       self.feed_speed)
         if not vel_ready or extruder_vel <= floor_epsilon:
             self._modulator_feeding = False
             return 0.0
@@ -3991,6 +3999,7 @@ class BufferFeeder:
         "  LEAD_TIME             lead_time               (s,   default 0.3, lll.cfg 0.12; warn outside 0.05..1.0)\n"
         "  MAX_MOVE_CHUNK_MM     max_move_chunk_mm       (mm,  default 50)\n"
         "  FEED_SPEED_GAIN       feed_speed_gain         (x,   between-zone multiplier)\n"
+        "  HALL3_DEMAND_GAIN     hall3_demand_gain       (x,   HALL3 over-push multiplier, default 1.5)\n"
         "  MIN_FEED_FLOOR        min_feed_floor          (mm/s, low-speed minimum for HALL3)\n"
         "  FILAMENT_DIAMETER     filament_diameter       (mm,  volumetric flow conversion)\n"
         "  DEBUG_EVENTS          buffer_debug_events     (0/1, handler trace logs)\n"
@@ -4011,6 +4020,7 @@ class BufferFeeder:
         new_lead       = gcmd.get_float('LEAD_TIME',          None, above=0.)
         new_max_move   = gcmd.get_float('MAX_MOVE_CHUNK_MM',  None, above=0.)
         new_gain       = gcmd.get_float('FEED_SPEED_GAIN',    None, minval=1.0)
+        new_h3_gain    = gcmd.get_float('HALL3_DEMAND_GAIN',  None, minval=1.0)
         new_floor      = gcmd.get_float('MIN_FEED_FLOOR',     None, above=0.)
         new_filament_dia = gcmd.get_float('FILAMENT_DIAMETER', None, above=0.)
         new_debug_events = gcmd.get_int('DEBUG_EVENTS',       None, minval=0, maxval=1)
@@ -4101,6 +4111,13 @@ class BufferFeeder:
                             % (old, self.feed_speed_gain))
             changed = True
 
+        if new_h3_gain is not None:
+            old = self.hall3_demand_gain
+            self.hall3_demand_gain = new_h3_gain
+            gc.respond_info("BUFFER_SET: hall3_demand_gain %.3f -> %.3f"
+                            % (old, self.hall3_demand_gain))
+            changed = True
+
         if new_floor is not None:
             old = self.min_feed_floor
             self.min_feed_floor = new_floor
@@ -4176,6 +4193,8 @@ class BufferFeeder:
                             % self.max_move_chunk_mm)
             gc.respond_info("  feed_speed_gain         = %.3f"
                             % self.feed_speed_gain)
+            gc.respond_info("  hall3_demand_gain       = %.3f"
+                            % self.hall3_demand_gain)
             gc.respond_info("  min_feed_floor          = %.3f mm/s"
                             % self.min_feed_floor)
             gc.respond_info("  filament_diameter       = %.3f mm"
