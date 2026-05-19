@@ -85,13 +85,29 @@ class FaultManager:
                 and owner._overflow_interrupted_follow):
             owner._overflow_interrupted_follow = False
             if owner._overflow_resume_mm > 0:
+                # Force-Reprime symmetrisch zum STATE_LOADING_PULL-Pfad
+                # (Issue #29 / PR #47). _grip_follow_active aktiviert
+                # denselben Pending-Stream-Setup wie LOAD_PHASE_1; bei
+                # rapidem HALL1-Cycling waehrend grip-follow trifft
+                # derselbe stepcompress-Race zu (primed=True ueber-
+                # springt flush_step_generation + set_position).
+                #
+                # _stepcompress_primed=False vor Submit erzwingt im
+                # forced_t0=None-Pfad ``_reprime_stepcompress_if_needed``
+                # → flush_step_generation + set_position((0,0,0)) →
+                # Cursor sauber zurueckgesetzt, t0 garantiert NACH
+                # last_step_clock (deckt beide Drift-Richtungen ab:
+                # Past-Anchor und Lookahead-Future).
+                resume_mm = owner._overflow_resume_mm
+                resume_dir = owner._overflow_resume_dir
+                resume_spd = owner._overflow_resume_spd
+                owner._overflow_resume_mm = 0.0
+                owner._stepcompress_primed = False
+                owner._needs_overflow_prime = False
                 owner._grip_follow_active = True
                 owner._enable_stepper()
                 owner._set_state(STATE_INITIAL_GRIP)
-                owner._submit_move(
-                    owner._overflow_resume_dir * owner._overflow_resume_mm,
-                    owner._overflow_resume_spd)
-                owner._overflow_resume_mm = 0.0
+                owner._submit_move(resume_dir * resume_mm, resume_spd)
                 return
             owner._overflow_resume_mm = 0.0
             owner._maybe_auto_load()
