@@ -1498,7 +1498,16 @@ class BufferFeeder:
                                       MAX_T0_LOOKAHEAD_S))
                             self.sync._submit_anchor_move(
                                 forced_t0=_p778_forced_t0)
+                        elif self.idle_motor_disable:
+                            # Weg 2: enable-loser Idle-Anchor — Motor
+                            # bleibt stromlos/lautlos, last_step_clock
+                            # wird trotzdem aufgefrischt (Schritte werden
+                            # gequeued, der deaktivierte Treiber ignoriert
+                            # die Pulse).
+                            self.sync._submit_anchor_move(skip_enable=True)
                         else:
+                            # Weg 1 (Default): Motor bleibt in AUTO an,
+                            # Anchor enabled normal.
                             self.sync._submit_anchor_move()
                         self._last_idle_anchor_time = mcu_now
                         # Motor stromlos schalten sobald der Anchor-Move
@@ -1530,15 +1539,15 @@ class BufferFeeder:
                         # bestromt als mid-print abzuschalten. IDLE ist
                         # davon unabhaengig (tritt nie waehrend Druck auf).
                         #
-                        # AUTO-Disable ist per `idle_motor_disable` (Default
-                        # False) abschaltbar: bei aktivem StealthChop ist
-                        # das Halten ohnehin nahezu lautlos, und das
-                        # Disable/Re-Enable-Cycling erzeugt einen hoerbaren
-                        # Enable-Snap (Rotor rastet beim Einschalten ein) im
-                        # ~10s-Takt. Default-False laesst den Motor in AUTO
-                        # an (leiser StealthChop-Stand, kein Snap). True
-                        # stellt das energiesparende Abschalten wieder her
-                        # (sinnvoll ohne StealthChop). IDLE schaltet immer ab.
+                        # AUTO-Disable per `idle_motor_disable`:
+                        # - False (Default, Weg 1): Motor bleibt in AUTO an;
+                        #   StealthChop haelt ihn lautlos. Der Idle-Anchor
+                        #   enabled normal (no-op, Motor schon an).
+                        # - True (Weg 2): Motor wird stromlos geschaltet UND
+                        #   der Idle-Anchor laeuft enable-los (skip_enable,
+                        #   siehe oben) — kein Enable-Snap, kein Strom,
+                        #   last_step_clock bleibt trotzdem frisch.
+                        # IDLE schaltet immer ab (Spec: stopped AND disabled).
                         if self._state == STATE_IDLE or (
                                 self._state == STATE_AUTO
                                 and not _p778_override
@@ -2602,7 +2611,8 @@ class BufferFeeder:
             logging.exception("buffer_feeder: disable_stepper failed")
 
     def _submit_move(self, signed_distance, speed, forced_t0=None,
-                     streaming=False, submit_chunk_cap=None):
+                     streaming=False, submit_chunk_cap=None,
+                     skip_enable=False):
         """Submit a move. Chunks long moves asynchronously.
 
         Flush-free. For distances ≤ max_move_chunk_mm this queues
@@ -2693,7 +2703,8 @@ class BufferFeeder:
         first_chunk = min(distance_abs, chunk_cap)
         self._submit_single_trapezoid(direction * first_chunk, speed,
                                        forced_t0=forced_t0,
-                                       streaming=streaming)
+                                       streaming=streaming,
+                                       skip_enable=skip_enable)
         remaining = distance_abs - first_chunk
         if remaining > 0:
             self._pending_remaining_mm = remaining
@@ -2704,7 +2715,8 @@ class BufferFeeder:
             self._pending_submit_chunk_cap = chunk_cap
 
     def _submit_single_trapezoid(self, signed_distance, speed,
-                                  forced_t0=None, streaming=False):
+                                  forced_t0=None, streaming=False,
+                                  skip_enable=False):
         """Append one trapezoid to the buffer-stepper's own trapq.
 
         forced_t0: when not None, overrides the t0 anchor. Used by the
@@ -2717,6 +2729,15 @@ class BufferFeeder:
         previous chunk. Suppresses _enable_stepper() (motor already on)
         and drops the _last_enable_schedule_time floor from the t0 max,
         so chunks abut without an inter-chunk lead_time gap.
+
+        skip_enable: queue the trapezoid WITHOUT energizing the motor
+        (idle-watchdog anchor under idle_motor_disable=True / Weg 2).
+        The host-side last_step_clock still advances because steps are
+        queued regardless of the (independent) enable GPIO; the
+        de-energized TMC ignores the pulses → no movement, no enable-
+        snap, no holding current. Unlike `streaming`, it does NOT touch
+        the t0 anchor logic: the en-floor stays as a harmless past value
+        and the reprime/set_position(0) keeps the cursor fresh as usual.
 
         Returns None on success; returns early (without queuing) when
         the stepper is synced to an extruder trapq or when the
@@ -2741,8 +2762,9 @@ class BufferFeeder:
 
         # Skip motor-enable in streaming lookahead — previous chunk
         # already enabled the motor and pushed _last_enable_schedule_-
-        # time forward.
-        if not streaming:
+        # time forward. skip_enable additionally suppresses enable for
+        # the de-energized idle-watchdog anchor (Weg 2).
+        if not streaming and not skip_enable:
             self._enable_stepper()
 
         t0 = self._compute_t0_anchor(

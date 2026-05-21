@@ -286,3 +286,120 @@ def test_disable_stepper_unprimes_for_wake_safety(monkeypatch):
     assert feeder._stepcompress_primed is False, (
         "_disable_stepper MUSS _stepcompress_primed=False setzen — das "
         "ist die Wake-Safety-Garantie auf die der AUTO-Disable baut.")
+
+
+# ---------------------------------------------------------------------------
+# Weg 2: enable-loser Idle-Anchor (idle_motor_disable=True)
+# ---------------------------------------------------------------------------
+
+
+def _spy_anchor_kwargs(monkeypatch, feeder):
+    """Anchor-Spy der die kwargs (skip_enable, forced_t0) festhaelt."""
+    captured = []
+
+    def _spy(**kwargs):
+        captured.append(kwargs)
+        mcu_now = feeder.stepper.get_mcu().estimated_print_time(
+            feeder.reactor.monotonic())
+        feeder._last_move_end_time = mcu_now + 0.001
+        return 1.0
+
+    monkeypatch.setattr(feeder.sync, "_submit_anchor_move", _spy)
+    return captured
+
+
+def test_idle_anchor_skip_enable_when_flag_true(monkeypatch):
+    """Weg 2: bei idle_motor_disable=True ruft der Idle-Anchor
+    _submit_anchor_move(skip_enable=True) — der Motor wird nicht
+    re-energized, kein Enable-Snap."""
+    _, feeder = make_auto_feeder(print_state='standby',
+                                 values={'idle_motor_disable': True})
+    monkeypatch.setattr(feeder, "_bang_bang_tick", lambda et: None)
+    captured = _spy_anchor_kwargs(monkeypatch, feeder)
+
+    feeder.reactor.now = 20.0
+    feeder._last_move_end_time = 0.0
+    feeder._last_idle_anchor_time = 0.0
+    feeder._last_mcu_flush_time = 0.0
+
+    feeder._main_tick(eventtime=20.0)
+
+    assert len(captured) == 1, "Idle-Anchor muss feuern"
+    assert captured[0].get('skip_enable') is True, (
+        "idle_motor_disable=True MUSS skip_enable=True an den Anchor "
+        "uebergeben (enable-los). Got %r." % captured[0])
+
+
+def test_idle_anchor_keeps_enable_when_flag_false(monkeypatch):
+    """Weg 1 (Default): Idle-Anchor enabled normal — skip_enable=False."""
+    _, feeder = make_auto_feeder(print_state='standby')  # Flag default False
+    monkeypatch.setattr(feeder, "_bang_bang_tick", lambda et: None)
+    captured = _spy_anchor_kwargs(monkeypatch, feeder)
+
+    feeder.reactor.now = 20.0
+    feeder._last_move_end_time = 0.0
+    feeder._last_idle_anchor_time = 0.0
+    feeder._last_mcu_flush_time = 0.0
+
+    feeder._main_tick(eventtime=20.0)
+
+    assert len(captured) == 1
+    # Default-Pfad ruft _submit_anchor_move() OHNE kwarg -> Enable
+    # wird nicht uebersprungen (Motor bleibt an, Weg 1).
+    assert captured[0].get('skip_enable') is not True, (
+        "Default (idle_motor_disable=False) darf NICHT skip_enable=True "
+        "uebergeben (Motor bleibt an). Got %r." % captured[0])
+
+
+def test_submit_trapezoid_skip_enable_does_not_energize(monkeypatch):
+    """Weg-2-Kern: _submit_single_trapezoid mit skip_enable=True ruft
+    _enable_stepper NICHT, queue't den Trapezoid aber trotzdem — die
+    last_step_clock-Auffrischung haengt am Step-Queuing (trapq), nicht
+    am unabhaengigen Enable-GPIO."""
+    _, feeder = make_auto_feeder(print_state='standby',
+                                 values={'idle_motor_disable': True})
+    enable_calls = []
+    appended = []
+    monkeypatch.setattr(feeder, "_enable_stepper",
+                        lambda: enable_calls.append(True))
+    monkeypatch.setattr(feeder, "_append_trapezoid_and_record",
+                        lambda t0, d, s: appended.append((t0, d, s)))
+
+    # Kleiner Gap + primed=True -> kein Reprime-Flush im Test.
+    feeder.reactor.now = 20.0
+    mcu_now = feeder.stepper.get_mcu().estimated_print_time(
+        feeder.reactor.monotonic())
+    feeder._last_move_end_time = mcu_now - 0.05
+    feeder._stepcompress_primed = True
+
+    feeder._submit_single_trapezoid(0.05, 10.0, skip_enable=True)
+
+    assert enable_calls == [], (
+        "skip_enable=True darf _enable_stepper NICHT rufen.")
+    assert len(appended) == 1, (
+        "Trapezoid muss trotzdem gequeued werden (last_step_clock-"
+        "Advance). Got %d." % len(appended))
+
+
+def test_submit_trapezoid_default_energizes(monkeypatch):
+    """Kontrolle: ohne skip_enable enabled _submit_single_trapezoid
+    den Motor wie bisher."""
+    _, feeder = make_auto_feeder(print_state='standby')
+    enable_calls = []
+    appended = []
+    monkeypatch.setattr(feeder, "_enable_stepper",
+                        lambda: enable_calls.append(True))
+    monkeypatch.setattr(feeder, "_append_trapezoid_and_record",
+                        lambda t0, d, s: appended.append((t0, d, s)))
+
+    feeder.reactor.now = 20.0
+    mcu_now = feeder.stepper.get_mcu().estimated_print_time(
+        feeder.reactor.monotonic())
+    feeder._last_move_end_time = mcu_now - 0.05
+    feeder._stepcompress_primed = True
+
+    feeder._submit_single_trapezoid(0.05, 10.0)
+
+    assert enable_calls == [True], (
+        "Default (skip_enable=False) MUSS _enable_stepper rufen.")
+    assert len(appended) == 1

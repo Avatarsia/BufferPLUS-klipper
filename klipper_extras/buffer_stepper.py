@@ -43,7 +43,7 @@ class SyncCoordinator:
         self.trapq = self.motion_queuing.allocate_trapq()
         self.trapq_append = self.motion_queuing.lookup_trapq_append()
 
-    def _submit_anchor_move(self, *, forced_t0=None):
+    def _submit_anchor_move(self, *, forced_t0=None, skip_enable=False):
         """Submit a small anchor-step in the safe direction. Returns
         the direction sign so the caller can format its respond message
         (boot anchor vs. pre-sync REPRIME use different wording but the
@@ -57,12 +57,19 @@ class SyncCoordinator:
         print). Default None preserves the existing behaviour for all
         other callers (boot anchor, pre-sync REPRIME, non-print
         watchdog).
+
+        Keyword-only `skip_enable` (Weg 2): queue the anchor steps
+        WITHOUT energizing the motor. Used by the idle-watchdog under
+        idle_motor_disable=True so the de-energized stepper stays
+        silent (no enable-snap, no holding current) while last_step_-
+        clock is still refreshed. All other callers keep enable.
         """
         owner = self.owner
-        owner._enable_stepper()
+        if not skip_enable:
+            owner._enable_stepper()
         anchor_dir = -1.0 if owner.hall_overflow else 1.0
         owner._submit_move(anchor_dir * ANCHOR_NUDGE_MM, 10.0,
-                           forced_t0=forced_t0)
+                           forced_t0=forced_t0, skip_enable=skip_enable)
         owner._wait_for_move_done(direction=int(anchor_dir))
         return anchor_dir
 
