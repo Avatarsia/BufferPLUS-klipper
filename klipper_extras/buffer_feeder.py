@@ -1389,14 +1389,24 @@ class BufferFeeder:
             # Watchdog feuern. Boot-Schutz: _last_mcu_flush_time == 0.0
             # zaehlt nicht (frischer Boot, noch nie ein Flush).
             _print_active = False
+            # _print_state_known: True nur wenn print_stats erfolgreich
+            # gelesen wurde. Der AUTO-Idle-Disable (unten) verlangt
+            # POSITIVE Bestaetigung dass nicht gedruckt wird — bei
+            # fehlendem print_stats oder einer Exception bleibt der
+            # Status unbekannt und es wird NICHT disabled (sonst koennte
+            # ein Disable mid-print durchrutschen, weil der except-Pfad
+            # _print_active=False setzt ohne _p778_override zu markieren).
+            _print_state_known = False
             try:
                 _ps = self.printer.lookup_object('print_stats', None)
                 if _ps is not None:
                     _ps_status = _ps.get_status(eventtime)
                     _print_active = (
                         _ps_status.get('state') == 'printing')
+                    _print_state_known = True
             except Exception:
                 _print_active = False
+                _print_state_known = False
 
             # Print-Block-Stale-Override: nur evaluieren wenn
             # ueberhaupt geblockt waere und mindestens ein Flush
@@ -1491,12 +1501,38 @@ class BufferFeeder:
                         else:
                             self.sync._submit_anchor_move()
                         self._last_idle_anchor_time = mcu_now
-                        # In IDLE we re-defer the disable so IDLE
-                        # semantics (stopped AND disabled) are restored
-                        # once the anchor-move drains. In AUTO we must
-                        # NOT disable — bang-bang owns the next submit
-                        # and a disable here would race with it.
-                        if self._state == STATE_IDLE:
+                        # Motor stromlos schalten sobald der Anchor-Move
+                        # gedrained ist (IDLE-Semantik: stopped AND
+                        # disabled). In IDLE immer.
+                        #
+                        # In AUTO ebenfalls — ABER nur wenn wirklich KEIN
+                        # Druck laeuft. Hintergrund: Nach einem Druck
+                        # bleibt der Buffer bei eingelegtem Filament in
+                        # STATE_AUTO (nicht IDLE), und ohne diesen Zweig
+                        # bliebe der Stepper stundenlang bestromt (hoer-
+                        # bares Spulenfiepen). Der Watchdog-Anchor haelt
+                        # den stepcompress-Cursor ueber den 10s-Heartbeat
+                        # frisch; _disable_stepper setzt _stepcompress_-
+                        # primed=False, der naechste Submit (naechster
+                        # Anchor oder erster _on_mcu_flush bei Druckstart)
+                        # reprimt via set_position(0) → kein Issue-#29-
+                        # Race.
+                        #
+                        # NICHT disablen wenn _p778_override aktiv: dann
+                        # laeuft echter Druck (Z.1428 flippt _print_active
+                        # nur lokal auf False, um den Cursor in der HALL2-
+                        # Hysterese-Totzone zu pflegen). Ein Disable wuerde
+                        # mit dem zurueckkehrenden bang-bang racen.
+                        #
+                        # _print_state_known verlangt POSITIVE Bestaetigung
+                        # dass nicht gedruckt wird — bei unlesbarem print_-
+                        # stats (Exception/fehlend) bleibt der Motor lieber
+                        # bestromt als mid-print abzuschalten. IDLE ist
+                        # davon unabhaengig (tritt nie waehrend Druck auf).
+                        if self._state == STATE_IDLE or (
+                                self._state == STATE_AUTO
+                                and not _p778_override
+                                and _print_state_known):
                             self._schedule_stepper_disable()
                         logging.info(
                             "buffer_feeder: %s anchor fired "
