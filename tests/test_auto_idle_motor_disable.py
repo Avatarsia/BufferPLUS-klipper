@@ -98,9 +98,11 @@ def test_auto_no_print_disables_after_anchor(monkeypatch):
     """STATE_AUTO + print=standby + gap > idle_anchor_gap:
     Anchor feuert UND der Stepper-Disable wird scheduled.
 
-    Das ist der eigentliche Fix — vor dem Patch lief der Disable nur
-    in STATE_IDLE, also blieb der Motor in AUTO bestromt."""
-    _, feeder = make_auto_feeder(print_state='standby')
+    Nur bei idle_motor_disable=True (Opt-in). Default ist False
+    (Motor bleibt in AUTO an, StealthChop haelt ihn leise — kein
+    Enable-Snap)."""
+    _, feeder = make_auto_feeder(print_state='standby',
+                                 values={'idle_motor_disable': True})
     monkeypatch.setattr(feeder, "_bang_bang_tick", lambda et: None)
     anchors = spy_anchor(monkeypatch, feeder)
     disables = spy_disable(monkeypatch, feeder)
@@ -114,16 +116,42 @@ def test_auto_no_print_disables_after_anchor(monkeypatch):
 
     assert len(anchors) == 1, "Anchor muss in AUTO/standby feuern"
     assert len(disables) == 1, (
-        "STATE_AUTO ohne Druck MUSS den Stepper-Disable schedulen "
-        "(Motor-Strom/Fiepen-Vermeidung). Got %d." % len(disables))
+        "STATE_AUTO ohne Druck mit idle_motor_disable=True MUSS den "
+        "Stepper-Disable schedulen. Got %d." % len(disables))
+
+
+def test_auto_default_flag_off_keeps_motor_enabled(monkeypatch):
+    """Default idle_motor_disable=False: in STATE_AUTO feuert der Anchor
+    (Cursor-Pflege), aber der Stepper wird NICHT disabled — der Motor
+    bleibt an, StealthChop haelt ihn leise, kein Enable-Snap-Tick.
+    Das ist das Default-Verhalten (Weg 1)."""
+    _, feeder = make_auto_feeder(print_state='standby')  # kein Flag -> False
+    assert feeder.idle_motor_disable is False
+    monkeypatch.setattr(feeder, "_bang_bang_tick", lambda et: None)
+    anchors = spy_anchor(monkeypatch, feeder)
+    disables = spy_disable(monkeypatch, feeder)
+
+    feeder.reactor.now = 20.0
+    feeder._last_move_end_time = 0.0
+    feeder._last_idle_anchor_time = 0.0
+    feeder._last_mcu_flush_time = 0.0
+
+    feeder._main_tick(eventtime=20.0)
+
+    assert len(anchors) == 1, "Anchor feuert weiterhin (Cursor frisch)"
+    assert disables == [], (
+        "Default (idle_motor_disable=False) darf in AUTO NICHT disablen "
+        "-- Motor bleibt an. Got %d." % len(disables))
 
 
 def test_auto_print_override_does_not_disable(monkeypatch):
     """STATE_AUTO + print=printing + stale flush (_p778_override aktiv):
     Anchor feuert zur Cursor-Pflege, aber der Stepper-Disable wird
     NICHT scheduled — echter Druck laeuft, ein Disable wuerde mit dem
-    zurueckkehrenden bang-bang racen."""
-    _, feeder = make_auto_feeder(print_state='printing')
+    zurueckkehrenden bang-bang racen. Flag True, damit der Override
+    (nicht der Default) der einzige Blocker ist."""
+    _, feeder = make_auto_feeder(print_state='printing',
+                                 values={'idle_motor_disable': True})
     monkeypatch.setattr(feeder, "_bang_bang_tick", lambda et: None)
     anchors = spy_anchor(monkeypatch, feeder)
     disables = spy_disable(monkeypatch, feeder)
@@ -191,7 +219,8 @@ def test_auto_no_disable_when_print_stats_missing(monkeypatch):
     KEIN Disable. Konservativ, damit ein Disable nicht mid-print
     durchrutscht wenn print_stats (transient) nicht verfuegbar ist.
     Der Motor bleibt dann bestromt wie vor dem Patch."""
-    printer, feeder = make_auto_feeder(print_state='standby')
+    printer, feeder = make_auto_feeder(
+        print_state='standby', values={'idle_motor_disable': True})
     # print_stats entfernen -> lookup_object('print_stats', None) wirft
     # KeyError -> except-Pfad -> _print_state_known bleibt False.
     del printer.objects['print_stats']
@@ -219,7 +248,8 @@ def test_auto_no_disable_when_print_stats_raises(monkeypatch):
     echtem Druck: der except-Pfad setzt _print_active=False, aber
     _print_state_known bleibt False -> KEIN Disable. Das ist der von
     Codex-Verify gefundene Mid-Print-Disable-Schutz."""
-    printer, feeder = make_auto_feeder(print_state='printing')
+    printer, feeder = make_auto_feeder(
+        print_state='printing', values={'idle_motor_disable': True})
 
     class _RaisingPrintStats:
         def get_status(self, eventtime):

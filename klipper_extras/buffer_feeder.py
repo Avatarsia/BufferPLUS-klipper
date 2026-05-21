@@ -1529,10 +1529,21 @@ class BufferFeeder:
                         # stats (Exception/fehlend) bleibt der Motor lieber
                         # bestromt als mid-print abzuschalten. IDLE ist
                         # davon unabhaengig (tritt nie waehrend Druck auf).
+                        #
+                        # AUTO-Disable ist per `idle_motor_disable` (Default
+                        # False) abschaltbar: bei aktivem StealthChop ist
+                        # das Halten ohnehin nahezu lautlos, und das
+                        # Disable/Re-Enable-Cycling erzeugt einen hoerbaren
+                        # Enable-Snap (Rotor rastet beim Einschalten ein) im
+                        # ~10s-Takt. Default-False laesst den Motor in AUTO
+                        # an (leiser StealthChop-Stand, kein Snap). True
+                        # stellt das energiesparende Abschalten wieder her
+                        # (sinnvoll ohne StealthChop). IDLE schaltet immer ab.
                         if self._state == STATE_IDLE or (
                                 self._state == STATE_AUTO
                                 and not _p778_override
-                                and _print_state_known):
+                                and _print_state_known
+                                and self.idle_motor_disable):
                             self._schedule_stepper_disable()
                         logging.info(
                             "buffer_feeder: %s anchor fired "

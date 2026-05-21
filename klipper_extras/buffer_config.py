@@ -42,6 +42,7 @@ class BufferConfigValues:
     high_flow_mm3s_threshold: float
     feed_hysteresis_stop_factor: float
     idle_anchor_gap: float
+    idle_motor_disable: bool
     jam_detection_enabled: bool
     jam_clog_dwell_time: float
     jam_clog_extrude_min: float
@@ -135,6 +136,8 @@ class BufferConfigValues:
             feed_hysteresis_stop_factor=config.getfloat(
                 'feed_hysteresis_stop_factor', 0.7, minval=0.1, maxval=1.0),
             idle_anchor_gap=config.getfloat('idle_anchor_gap', 10.0, above=0.),
+            idle_motor_disable=config.getboolean(
+                'idle_motor_disable', False),
             jam_detection_enabled=config.getboolean(
                 'jam_detection_enabled', True),
             jam_clog_dwell_time=config.getfloat(
