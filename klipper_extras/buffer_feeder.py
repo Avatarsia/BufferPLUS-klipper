@@ -3768,7 +3768,14 @@ class BufferFeeder:
         tip_final_retract = gcmd.get_float('TIP_FINAL_RETRACT', 50.0, above=0.)
         tip_final_speed = gcmd.get_float('TIP_FINAL_SPEED', 50.0, above=0.)
         use_cooling_move = gcmd.get_int('USE_COOLING_MOVE', 1, minval=0, maxval=1)
-        cool_temp = gcmd.get_float('COOL_TEMP', 150.0, above=0.)
+        # COOL_TEMP-Default 170 (nicht 150): die post_cool_moves sind
+        # zwingend extruder-getriebene `G1 E`-Retracts, die Klipper unter
+        # min_extrude_temp (Mainline-Default 170 C) sperrt. Ein cool_temp
+        # < min_extrude_temp lies den Cooling-Move zwar laufen, blockierte
+        # danach aber den Retract -> UNLOAD bricht stumm ab (Issue #48).
+        # Bei eigenem min_extrude_temp > 170 muss COOL_TEMP entsprechend
+        # hochgesetzt werden.
+        cool_temp = gcmd.get_float('COOL_TEMP', 170.0, above=0.)
         cool_temp_max = gcmd.get_float('COOL_TEMP_MAX', cool_temp + 10.0, above=cool_temp)
         sync_dist = gcmd.get_float('SYNC_DIST', self.unload_sync_distance, above=0.)
         fast_spd = gcmd.get_float('FAST_SPD', self.unload_fast_speed, above=0.)

@@ -57,9 +57,9 @@ def test_buffer_unload_filament_smoke():
     ])
     # Cooling-Move: M118 + M104 + TEMPERATURE_WAIT.
     assert scripts[4][1] == "\n".join([
-        "M118 UNLOAD Cooling-Move: heize runter auf 150 C",
-        "M104 S150",
-        "TEMPERATURE_WAIT SENSOR=extruder MAXIMUM=160",
+        "M118 UNLOAD Cooling-Move: heize runter auf 170 C",
+        "M104 S170",
+        "TEMPERATURE_WAIT SENSOR=extruder MAXIMUM=180",
     ])
     # Post-cool: tip_final_retract default = 50 (P7-64), sync_dist=250
     # (Test-override), M400.
@@ -212,7 +212,7 @@ def test_buffer_unload_filament_uses_custom_extruder_name():
     # Cooling-Move TEMPERATURE_WAIT verwendet den custom extruder name,
     # NICHT mehr hardcoded "extruder".
     cooling_script = scripts[4][1]
-    assert "TEMPERATURE_WAIT SENSOR=extruder1 MAXIMUM=160" in cooling_script
+    assert "TEMPERATURE_WAIT SENSOR=extruder1 MAXIMUM=180" in cooling_script
     assert "SENSOR=extruder " not in cooling_script
     assert "SENSOR=extruder\n" not in cooling_script
 
@@ -240,9 +240,9 @@ def test_buffer_unload_filament_skips_pre_cool_when_tip_cycles_zero():
     assert scripts[2][1] == "BUFFER_SYNC_TO_EXTRUDER BUFFER=mellow EXTRUDER=extruder"
     # Direkt nach Sync kommt der Cooling-Move (kein leerer pre_cool).
     assert scripts[3][1] == "\n".join([
-        "M118 UNLOAD Cooling-Move: heize runter auf 150 C",
-        "M104 S150",
-        "TEMPERATURE_WAIT SENSOR=extruder MAXIMUM=160",
+        "M118 UNLOAD Cooling-Move: heize runter auf 170 C",
+        "M104 S170",
+        "TEMPERATURE_WAIT SENSOR=extruder MAXIMUM=180",
     ])
     # Post-cool unveraendert.
     assert scripts[4][1] == "\n".join([
