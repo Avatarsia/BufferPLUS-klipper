@@ -64,6 +64,9 @@ class BufferRuntimeState:
     _measure_load_distance: float = 0.0
     _measure_feeding: bool = False
     _print_running: bool = False
+    _pause_msg_shown: bool = False  # Dedupe-Latch Pause-Meldung (siehe _maintain_msg_latches)
+    _print_end_msg_shown: bool = False  # Dedupe-Latch Print-ended-Meldung (siehe _maintain_msg_latches)
+    _last_msg_latch_maint: float = 0.0  # Throttle-Watermark Latch-Wartung in _main_tick (~1x/s)
     _benchmark_mode_until: float = 0.0
     _benchmark_mode_reason: str = ""
     _print_phase: str = "inactive"
