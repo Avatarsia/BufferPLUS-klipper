@@ -748,6 +748,12 @@ class BufferFeeder:
         # error / standby). Clear the stale lock so next entrance-
         # insert / AUTO_ON_IF_READY proceeds.
         self._bang_bang_suspended = False
+        # Pause-Meldungs-Latch mitraeumen (PR-#49-Review): der
+        # PAUSE->CANCEL-Pfad sieht kein weiteres ready-Event und je
+        # nach Anchor-Gating (hall_full, standby via SDCARD_RESET_FILE)
+        # auch keinen nicht-paused _refresh_print_phase-Tick mehr —
+        # sonst bliebe die erste Pause des naechsten Drucks stumm.
+        self._pause_msg_shown = False
         self._respond("Stale bang-bang-suspend cleared "
                       "(print state=%s)" % ps_state)
         return True
@@ -825,6 +831,46 @@ class BufferFeeder:
             min_interval=0.0)
         return phase
 
+    def _maintain_msg_latches(self, ps_state):
+        """Reset der Meldungs-Dedupe-Latches (PR-#49-Review, Runde 2).
+
+        Der Reset darf NICHT in den idle_timeout-Handlern sitzen:
+        Resume und Anchor-Flap sind im Event-Moment nicht
+        unterscheidbar (beide lesen print_stats.state=='paused', weil
+        note_start deferred im work_handler laeuft), und waehrend des
+        Drucks feuert kein idle_timeout:ready (lookahead busy /
+        gcode-Mutex blocken die Printing->Ready-Transition) — der
+        else-Zweig in _on_idle_ready ist fuer Pause #2+ unerreichbar.
+
+        Aufruf-Stellen (drei Beine, vom Haeufigsten zum Garantierten):
+        1. _refresh_print_phase via Flush-Callback — ABER nur in
+           STATE_AUTO mit Feed-Demand (_flush_submit_streaming_chunk
+           returnt bei target_speed<=0 VOR dem Permission-Check; nach
+           einer Pause ist der Buffer typisch voll -> kein Demand).
+        2. _refresh_print_phase via get_status — Moonraker-Poll,
+           out-of-process (headless/ohne Client-Subscription: nie).
+        3. _main_tick, throttled auf ~1x/s — der in-process
+           GARANTIERTE Anker (Reactor-Timer laeuft immer; er feuert
+           ja auch den Idle-Anchor waehrend der Pause).
+
+        Bekanntes, irreduzibles Fenster: RESUME -> erneute PAUSE
+        innerhalb < 1s ohne dazwischenliegenden Tick laesst den Latch
+        stehen (Meldung der Folge-Pause unterdrueckt, selbstheilend
+        beim naechsten nicht-paused Tick). Event-basiert nicht
+        schliessbar, da Resume im Event-Moment nicht erkennbar ist.
+
+        Siehe test_pause_message_dedupe.py::
+        test_second_pause_announces_via_main_tick_only."""
+        if ps_state != 'paused':
+            self._pause_msg_shown = False
+        if ps_state in ('printing', 'paused'):
+            # Laufender/pausierter Druck: Print-ended-Latch freigeben,
+            # damit das Ende DIESES Drucks wieder gemeldet wird.
+            # 'complete'/'standby' resetten bewusst NICHT — die Post-
+            # Print-Flaps lesen genau diese States und wuerden den
+            # Print-ended-Spam reaktivieren.
+            self._print_end_msg_shown = False
+
     def _refresh_print_phase(self, eventtime=None):
         if eventtime is None:
             eventtime = self.reactor.monotonic()
@@ -834,6 +880,11 @@ class BufferFeeder:
 
         if ps_state == 'printing' and active_extrusion:
             self._print_extrusion_seen = True
+
+        # Meldungs-Latch-Wartung am Phase-Refresh (Flush-Pfad mit
+        # Feed-Demand + get_status-Poll) — Haupt-Garantie liegt im
+        # _main_tick, siehe _maintain_msg_latches-Docstring.
+        self._maintain_msg_latches(ps_state)
 
         if ps_state == 'paused':
             return self._set_print_phase(
@@ -901,8 +952,34 @@ class BufferFeeder:
                 if self._continuous_feed:
                     self._continuous_feed = False
                     self._halt_motion()
-                self._respond("Print paused — bang-bang suspended until RESUME")
+                # Meldung nur EINMAL pro Pause (Spam-Fix 2026-06-10,
+                # Hardware klippy.log: 564x dieselbe Zeile in einer
+                # Pause). Waehrend der Pause feuert idle_timeout:ready
+                # alle ~10s erneut, weil der Buffer-eigene Idle-Anchor-
+                # Move (idle_anchor_gap, noetig gegen stepcompress-Clock-
+                # Drift) ueber toolhead:sync_print_time Klippers
+                # idle_timeout printing->ready kippt. Der Anchor laesst
+                # sich nicht abstellen, und _on_idle_printing gegen
+                # 'paused' zu guarden waere unsicher (echtes RESUME
+                # feuert idle_timeout:printing ebenfalls bei print_stats
+                # =='paused', weil note_start deferred im work_handler
+                # laeuft → wuerde den Resume-Trigger mit-unterdruecken).
+                # Daher Dedupe nur auf Meldungs-Ebene; die Suspend-Logik
+                # oben bleibt idempotent pro Zyklus. Latch-RESET sitzt
+                # in _refresh_print_phase (ps_state != 'paused' am
+                # Flush-/Statuspoll-Tick) — NICHT im else-Zweig unten,
+                # der waehrend eines laufenden Drucks nie erreicht wird
+                # (PR-#49-Review Must-fix 1) — plus PAUSE->CANCEL-
+                # Heilung in _clear_stale_suspend_if_print_inactive.
+                if not self._pause_msg_shown:
+                    self._respond(
+                        "Print paused — bang-bang suspended until RESUME")
+                    self._pause_msg_shown = True
             else:
+                # Nicht-paused ready (Druckende complete/standby oder
+                # Anchor-Flap nach Druckende): Pause-Latch defensiv
+                # zuruecksetzen (Haupt-Reset siehe _refresh_print_phase).
+                self._pause_msg_shown = False
                 self._set_benchmark_mode(False, reason='print_ready', notify=False)
                 self._print_extrusion_seen = False
                 self._critical_action_guard_until = 0.0
@@ -919,8 +996,20 @@ class BufferFeeder:
                 # auto-grip. _bang_bang_suspended stays whatever it
                 # was (operator may have set it explicitly via
                 # BUFFER_AUTO_OFF; we don't override).
-                self._respond("Print ended — buffer ready for next "
-                              "filament change or print")
+                #
+                # Meldung gelatcht (PR-#49-Review Should-fix): bei
+                # state='complete'/'cancelled' greift der nur-'standby'-
+                # Fruehausstieg in _on_idle_printing nicht — derselbe
+                # Anchor-Flap wie im Pause-Fall wuerde die Zeile sonst
+                # alle ~10s wiederholen, solange der Drucker so steht
+                # (z.B. wenn park_full_on_print_end nicht greift).
+                # Latch-Reset in _refresh_print_phase bei printing/paused.
+                if not self._print_end_msg_shown:
+                    self._respond("Print ended — buffer ready for next "
+                                  "filament change or print")
+                    self._print_end_msg_shown = True
+                # Park-Hook bleibt ausserhalb des Meldungs-Latches —
+                # er hat sein eigenes Once-Gate (_park_full_attempted).
                 self._maybe_park_full_on_print_end(now, ps_state)
         self._print_running = False
 
@@ -1287,6 +1376,16 @@ class BufferFeeder:
             # learn the real hardware picture.
             if not self._startup_grace_done:
                 return eventtime + MAIN_TICK_INTERVAL
+
+            # Meldungs-Latch-Wartung, throttled auf ~1x/s (Tick laeuft
+            # 50Hz; ein print_stats.get_status pro Sekunde ist billig).
+            # In-process garantierter Reset-Anker — Flush-Pfad und
+            # get_status-Poll sind beide konditional, siehe
+            # _maintain_msg_latches-Docstring.
+            if eventtime >= self._last_msg_latch_maint + 1.0:
+                self._last_msg_latch_maint = eventtime
+                self._maintain_msg_latches(
+                    self._get_print_stats_state(eventtime))
 
             # C-cont T6: HALL1-Persist-Check. In STATE_AUTO loest HALL1-
             # Edge nicht mehr direkt _enter_overflow aus (siehe T5). Erst
@@ -4481,6 +4580,13 @@ class BufferFeeder:
 
     def cmd_ENABLE_RUNOUT_SENSOR(self, gcmd):
         self._print_running = True
+        # Bench-Re-Arm (Review Runde 2): auf einem Rig das nie via
+        # virtual_sdcard druckt, erreicht print_stats nie
+        # 'printing'/'paused' — der Print-ended-Latch wuerde nach der
+        # ersten Bench-Session fuer immer haengen. Manuelles Armen von
+        # _print_running ist der Session-Start-Marker, also hier mit
+        # freigeben.
+        self._print_end_msg_shown = False
         self._respond("print_running=1 (runout PAUSE will fire)")
 
     def cmd_DISABLE_RUNOUT_SENSOR(self, gcmd):
