@@ -627,14 +627,23 @@ class BufferFeeder:
         # Klipper fires idle_timeout:printing during MCU init even without
         # an active print (print_stats state = 'standby'). Guard against
         # this boot artifact so _print_running is only armed for real prints.
+        ps_state = ''
         try:
             ps = self.printer.lookup_object('print_stats', None)
             if ps is not None:
-                if ps.get_status(self.reactor.monotonic()).get(
-                        'state', '') == 'standby':
-                    return
+                ps_state = ps.get_status(self.reactor.monotonic()).get(
+                    'state', '')
         except Exception:
             pass
+        if ps_state == 'standby':
+            return
+        # Re-arm the one-shot park-to-full trigger on real print
+        # activity (new print start / RESUME). Deliberately NOT reset
+        # in the non-paused :ready branch — that edge never fires
+        # between a RESUME and the next print end, so a reset there
+        # would never run during an active print (PR #49 lesson).
+        if ps_state in ('printing', 'paused'):
+            self._park_full_attempted = False
         self._print_running = True
         now = self.reactor.monotonic()
         self._print_extrusion_seen = False
@@ -912,7 +921,82 @@ class BufferFeeder:
                 # BUFFER_AUTO_OFF; we don't override).
                 self._respond("Print ended — buffer ready for next "
                               "filament change or print")
+                self._maybe_park_full_on_print_end(now, ps_state)
         self._print_running = False
+
+    def _maybe_park_full_on_print_end(self, eventtime, ps_state):
+        """Park the buffer at HALL2 (full) once after a print ends.
+
+        Between prints the buffer often sits in the HALL hysteresis
+        dead-zone. There the watchdog fires a 0.05mm anchor move every
+        idle_anchor_gap seconds (audible as a periodic tick). With
+        hall_full active the watchdog anchor is hard-gated (see the
+        AUTO sub-gates in _main_tick), so a one-shot fill up to HALL2
+        right after print end keeps the feeder silent and lets the
+        AUTO-idle-disable power the motor down.
+
+        Stop edge: _tick_pending_chunk aborts the forward stream in
+        STATE_AUTO on hall_full between sub-chunks (P7-66b). The
+        streamer queues the next chunk when the current one has half
+        its duration left, so the worst-case unabortable overshoot is
+        ~1.5 x interrupt_chunk_mm (current remainder + one lookahead
+        chunk; Codex-Verify 2026-06-11) — which also parks the arm
+        solidly inside the full zone instead of on the sensor edge.
+        HALL1 stays as the hard safety behind it (_submit_move
+        forward-reject + persist escalation to OVERFLOW).
+
+        The stream runs with _park_full_active=True so the AUTO demand
+        modulator in _tick_pending_chunk (which reports 0 after print
+        end) does not kill it after the first sub-chunk; the flag is
+        cleared on every path that ends the pending stream.
+
+        One-shot per print end via _park_full_attempted, latched
+        BEFORE the submit — without the latch a fill that exhausts
+        park_full_max_mm short of HALL2 would re-trigger on every
+        subsequent anchor flap and creep toward overflow. Re-armed in
+        _on_idle_printing when print_stats reports printing/paused."""
+        if not self.park_full_on_print_end:
+            return
+        if ps_state not in ('complete', 'cancelled'):
+            return
+        if self._park_full_attempted:
+            return
+        if (self._state not in (STATE_IDLE, STATE_AUTO)
+                or self._stepper_synced_to is not None
+                or self._move_in_flight()
+                or self._pending_remaining_mm > 0.0
+                or not self.entrance_detected
+                or self.hall_full
+                or self.hall_overflow
+                or self._jam_active
+                or self._auto_off_by_user
+                or self._halt_requested):
+            return
+        # PAUSE → CANCEL leaves a stale _bang_bang_suspended (no
+        # healing :ready event). This is a designated lazy-heal
+        # decision point — but heal only when the park is otherwise
+        # ready to run, so a suspend on a non-park-able feeder stays
+        # untouched (contract pinned by test_idle_ready_preserves_
+        # prior_suspended_flag_on_print_end). Operator-set suspends
+        # are already excluded via _auto_off_by_user above.
+        if self._bang_bang_suspended:
+            self._clear_stale_suspend_if_print_inactive(eventtime)
+        if self._bang_bang_suspended:
+            return
+        self._park_full_attempted = True
+        self._respond("Print end — parking buffer at full (HALL2), "
+                      "idle anchor stays quiet")
+        if self._state == STATE_IDLE:
+            self._enable_stepper()
+            self._set_state(STATE_AUTO)
+        self._submit_move(
+            self.park_full_max_mm, self.feed_speed,
+            submit_chunk_cap=self._effective_interrupt_chunk_mm(eventtime))
+        # AFTER _submit_move — its session reset clears the flag. Only
+        # arm it when a pending continuation actually exists; a park
+        # distance <= chunk cap queues a single trapezoid and would
+        # otherwise leak the flag past the move's end (Codex-Verify R2).
+        self._park_full_active = self._pending_remaining_mm > 0.0
 
     # -----------------------------------------------------------------------
     # Sensor: raw pin change + debounce
@@ -1802,6 +1886,7 @@ class BufferFeeder:
             # target_speed<=0-Branch macht beides; dieser Pfad muss es auch.
             self._pending_remaining_mm = 0.0
             self._pending_submit_chunk_cap = None
+            self._park_full_active = False
             return
         # HALL2 (buffer full) MUST abort a forward streaming
         # sequence. _abort_signalled covers HALL1 (overflow) but not
@@ -1817,6 +1902,7 @@ class BufferFeeder:
                 and self.hall_full):
             self._pending_remaining_mm = 0.0
             self._continuous_feed = False
+            self._park_full_active = False
             return
         if (self._pending_direction < 0
                 and self._state == STATE_MANUAL_RETRACT
@@ -1833,8 +1919,15 @@ class BufferFeeder:
         # zone). Legacy-Paths (LOAD/UNLOAD/MANUAL/Retract) behalten den
         # frozen _pending_speed.
         sub_chunk_speed = self._pending_speed
+        # Park-Fill (park_full_on_print_end): fixed-speed stream. The
+        # demand modulator below would return 0 after print end (no
+        # extruder velocity, dead-zone HALL state) and kill the stream
+        # after the first sub-chunk (Codex-Verify 2026-06-11 finding,
+        # repro: pending 141.0 -> 0.0 on first tick). HALL2/HALL1
+        # aborts above remain fully active for park streams.
         if (self._state == STATE_AUTO
-                and self._pending_direction > 0):
+                and self._pending_direction > 0
+                and not self._park_full_active):
             modulated = self._compute_target_feed_speed()
             if modulated <= 0.0:
                 # HALL1 active mid-chunk — beende Pending-Stream.
@@ -1881,6 +1974,7 @@ class BufferFeeder:
                 # Drop the cap so a subsequent unrelated _submit_move
                 # call does not inherit it.
                 self._pending_submit_chunk_cap = None
+                self._park_full_active = False
 
     def _bang_bang_tick(self, eventtime):
         """HALL-based bang-bang with hysteresis. Reactor-tick driven —
@@ -2674,6 +2768,7 @@ class BufferFeeder:
 
         # Cancel any previously-streaming sequence before starting new.
         self._pending_remaining_mm = 0.0
+        self._park_full_active = False
 
         # Ensure the first chunk starts no earlier than the last enable/disable
         # toggle scheduled on the MCU. Without this guard, a move submitted
@@ -3050,6 +3145,7 @@ class BufferFeeder:
         # LOAD/UNLOAD/MANUAL pending-stream uses its own (max_move_-
         # chunk_mm) sizing without inheriting a stale AUTO cap.
         self._pending_submit_chunk_cap = None
+        self._park_full_active = False
         self._feed_deadline_time = None
         # clamp
         # `_last_move_end_time` to mcu_now when it sits in the

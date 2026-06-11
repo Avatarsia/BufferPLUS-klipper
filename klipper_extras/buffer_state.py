@@ -76,6 +76,8 @@ class BufferRuntimeState:
     _runout_filament_ref: Optional[float] = None
     _runout_follow_active: bool = False
     _runout_recovery_pending: bool = False
+    _park_full_attempted: bool = False
+    _park_full_active: bool = False
     _cooldown_deadline: Optional[float] = None
     _auto_off_by_user: bool = False
     _retract_burst_done: bool = False
