@@ -2954,6 +2954,23 @@ class BufferFeeder:
         was_primed = self._stepcompress_primed
         need_reprime = self._reprime_stepcompress_if_needed(forced_t0, gap)
 
+        # Diagnose-Build Issue #50 (Regel #11a, NICHT Production).
+        # Voller Anchor-Input-State am Submit + Queue-Ende. min_interval=
+        # 0.0 damit im OVERFLOW↔LOAD-Sturm keine Events verloren gehen.
+        cur_end = (self._current_move.get('end_time')
+                   if self._current_move is not None else None)
+        self._debug_event(
+            'diag_submit',
+            "state=%s dist=%.3f speed=%.3f forced_t0=%s streaming=%s "
+            "mcu_now=%.6f lme=%.6f en=%.6f gap=%+.6f was_primed=%s "
+            "need_reprime=%s cur_end=%s",
+            self._state, signed_distance, speed,
+            ("%.6f" % forced_t0) if forced_t0 is not None else "None",
+            streaming, mcu_now, self._last_move_end_time,
+            self._last_enable_schedule_time, gap, was_primed, need_reprime,
+            ("%.6f" % cur_end) if cur_end is not None else "None",
+            min_interval=0.0)
+
         # Skip motor-enable in streaming lookahead — previous chunk
         # already enabled the motor and pushed _last_enable_schedule_-
         # time forward. skip_enable additionally suppresses enable for
@@ -3096,6 +3113,16 @@ class BufferFeeder:
         toolhead = self.printer.lookup_object('toolhead')
         th_time = toolhead.get_last_move_time()
         t0 = max(th_time + self.lead_time, self._last_move_end_time, en)
+        # Diagnose-Build Issue #50 (Regel #11a, NICHT Production). th_time
+        # ist die Anchor-Quelle im Recovery-Pfad. Wenn sie unter Tight-
+        # Cycling hinter dem buffer-eigenen Queue-Ende lagged, landet t0
+        # hinter der Queue -> i=0-Crash. min_interval=0.0 (Sturm).
+        self._debug_event(
+            'diag_anchor',
+            "firstchunk th_time=%.6f lead=%.6f lme=%.6f en=%.6f "
+            "mcu_now=%.6f t0=%.6f t0-th=%+.6f",
+            th_time, self.lead_time, self._last_move_end_time, en, mcu_now,
+            t0, t0 - th_time, min_interval=0.0)
         if t0 > mcu_now + MAX_T0_LOOKAHEAD_S:
             # th_time is far ahead (active print with filled toolhead
             # queue). Clamping to mcu_now would land BEFORE
@@ -3147,6 +3174,25 @@ class BufferFeeder:
 
     def _append_trapezoid_and_record(self, t0, signed_distance, speed):
         """Compute the trapezoid profile, append to trapq, update state."""
+        # Diagnose-Build Issue #50 (Regel #11a, NICHT Production). Direkt
+        # vor trapq_append: finaler t0 gegen lme und cur_end (= noch
+        # gequeuete Steps des von halt_motion getrunkten Vorgänger-
+        # Chunks). t0-curend < 0 ist der direkte Beleg "Submit landet
+        # hinter der Queue" -> i=0 c=N stepcompress-Crash.
+        _cur_end = (self._current_move.get('end_time')
+                    if self._current_move is not None else None)
+        _mcu = self.stepper.get_mcu()
+        _mcu_now = _mcu.estimated_print_time(self.reactor.monotonic())
+        self._debug_event(
+            'diag_append',
+            "t0=%.6f lme_in=%.6f cur_end=%s mcu_now=%.6f t0-lme=%+.6f "
+            "t0-curend=%s commanded_pos=%.3f",
+            t0, self._last_move_end_time,
+            ("%.6f" % _cur_end) if _cur_end is not None else "None",
+            _mcu_now, t0 - self._last_move_end_time,
+            ("%+.6f" % (t0 - _cur_end)) if _cur_end is not None else "None",
+            self._commanded_pos, min_interval=0.0)
+
         distance = abs(signed_distance)
         direction = 1.0 if signed_distance > 0 else -1.0
 
