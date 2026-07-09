@@ -1979,14 +1979,19 @@ class BufferFeeder:
         if self._pending_remaining_mm <= 0:
             return
         if self._abort_signalled():
-            # Codex-Verify Q6b: HALL1-Early-Exit muss auch den Sub-Chunk-Cap
-            # zuruecksetzen — sonst leakt der cap (e.g. interrupt_chunk_mm=9)
-            # auf den naechsten unrelated _submit_move-Call. T8's
-            # target_speed<=0-Branch macht beides; dieser Pfad muss es auch.
-            self._pending_remaining_mm = 0.0
-            self._pending_submit_chunk_cap = None
-            self._park_full_active = False
-            return
+            # Retract-Streams (Retract-Burst/UNLOAD-Spillover) sind die
+            # OVERFLOW-/JAM-Recovery-Bewegung — nur HALT nullt sie
+            # (analog _wait_for_move_done direction=-1). Forward-Streams
+            # brechen weiterhin auf jedes Abort-Signal ab.
+            if self._pending_direction > 0 or self._halt_requested:
+                # Codex-Verify Q6b: HALL1-Early-Exit muss auch den Sub-Chunk-Cap
+                # zuruecksetzen — sonst leakt der cap (e.g. interrupt_chunk_mm=9)
+                # auf den naechsten unrelated _submit_move-Call. T8's
+                # target_speed<=0-Branch macht beides; dieser Pfad muss es auch.
+                self._pending_remaining_mm = 0.0
+                self._pending_submit_chunk_cap = None
+                self._park_full_active = False
+                return
         # HALL2 (buffer full) MUST abort a forward streaming
         # sequence. _abort_signalled covers HALL1 (overflow) but not
         # the bang-bang stop-on-full case. Without this clamp the
@@ -3609,7 +3614,15 @@ class BufferFeeder:
         die Stable-Logik je laufen kann. JAM bleibt absolut.
         """
         while self._move_in_flight() or self._pending_remaining_mm > 0:
-            if self._abort_signalled():
+            if direction < 0:
+                # Retract ist Recovery: OVERFLOW/JAM beenden den Wait
+                # nicht (Docstring-Kontrakt oben) — nur HALT bricht ab.
+                # Sonst wird jede per-Chunk-Wait in UNLOAD_PHASE3 bei
+                # aktivem HALL1/JAM zum No-op und die Schleife queued
+                # die volle MAX_DISTANCE ungebremst in den Trapq.
+                if self._halt_requested:
+                    break
+            elif self._abort_signalled():
                 break
             self.reactor.pause(self.reactor.monotonic() + 0.05)
         if gcmd is not None:
