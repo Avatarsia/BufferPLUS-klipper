@@ -167,16 +167,27 @@ class HallSensorMonitor:
         if not owner._startup_grace_done:
             return
         if name == 'hall_overflow':
-            if owner._is_hall1_active(Hall1Context.SENSOR_CALLBACK):
-                # In STATE_AUTO defer immediate _enter_overflow to
-                # _main_tick (which checks for hall1_persist_timeout).
-                # In other states (LOAD, MANUAL, UNLOAD) keep the immediate
-                # trigger — those paths have their own safety semantics and
-                # need synchronous overflow-handling.
-                if owner._state == STATE_AUTO:
-                    owner._mark_hall1_active()
-                else:
-                    owner._enter_overflow()
+            if owner.hall_overflow:
+                # Physischer Rising-Edge: Persist-Timestamp IMMER
+                # setzen (idempotent) — auch in Bypass-Kontexten
+                # (synced/UNLOAD/MANUAL_RETRACT/phase3_ok). Vorher lief
+                # die Edge dort in den Cleared-Zweig, _hall1_active_-
+                # since blieb None und die Persist-Eskalation nach
+                # UNSYNC feuerte nie (Review 2026-07-09). Bewusst NICHT
+                # via _mark_hall1_active — dessen HALL2-Instant-Enter
+                # gehoert nur in den AUTO-Dispatch unten.
+                if owner._hall1_active_since is None:
+                    owner._hall1_active_since = owner.reactor.monotonic()
+                if owner._is_hall1_active(Hall1Context.SENSOR_CALLBACK):
+                    # In STATE_AUTO defer immediate _enter_overflow to
+                    # _main_tick (which checks for hall1_persist_timeout).
+                    # In other states (LOAD, MANUAL, UNLOAD) keep the
+                    # immediate trigger — those paths have their own
+                    # safety semantics and need synchronous handling.
+                    if owner._state == STATE_AUTO:
+                        owner._mark_hall1_active()
+                    else:
+                        owner._enter_overflow()
             else:
                 # Clear post-LOAD grace on HALL1-fall. Buffer-Arm has
                 # dropped, normal sensor regime resumes.

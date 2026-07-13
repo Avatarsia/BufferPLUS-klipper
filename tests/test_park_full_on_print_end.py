@@ -93,6 +93,9 @@ def test_park_one_shot_across_anchor_flaps():
     printer, feeder = make_feeder()
     printer.objects['print_stats'] = FakePrintStats(state='complete')
 
+    # _print_running wurde waehrend des echten Drucks armiert; Flaps
+    # re-armen seit dem Fix 2026-07-09 nicht mehr (Fruehausstieg).
+    feeder._print_running = True
     for _ in range(4):
         feeder._on_idle_printing()
         feeder._on_idle_ready()

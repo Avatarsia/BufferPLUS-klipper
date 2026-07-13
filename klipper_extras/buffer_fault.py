@@ -164,6 +164,14 @@ class FaultManager:
             return
 
         owner._overflow_resume_mm = 0.0
+        # JAM-Latch ueberlebt einen OVERFLOW-Zwischenfall (Review
+        # 2026-07-09): HALL1-Blip waehrend JAM ueberschreibt STATE_JAM
+        # mit OVERFLOW; der Resume darf danach NICHT zu AUTO promoten —
+        # _jam_tick waere via _jam_active-Early-Return dauerhaft aus
+        # und das geforderte explizite BUFFER_CLEAR_JAM entfiele.
+        if owner._jam_active:
+            owner._set_state(STATE_JAM)
+            return
         if (owner.entrance_detected
                 and not owner._auto_off_by_user
                 and not owner._bang_bang_suspended

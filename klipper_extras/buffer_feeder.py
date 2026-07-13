@@ -635,7 +635,12 @@ class BufferFeeder:
                     'state', '')
         except Exception:
             pass
-        if ps_state == 'standby':
+        if ps_state in ('standby', 'complete', 'cancelled', 'error'):
+            # Post-Print-Flaps (Review 2026-07-09): der buffereigene
+            # Idle-Anchor kippt idle_timeout regelmaessig — nach
+            # 'complete'/'cancelled' wuerde jeder Flap _print_running
+            # re-armen (Runout-PAUSE auf fertigem Druck, Spontan-Grip
+            # nach CANCEL via _runout_recovery_pending).
             return
         # Re-arm the one-shot park-to-full trigger on real print
         # activity (new print start / RESUME). Deliberately NOT reset
@@ -1208,7 +1213,11 @@ class BufferFeeder:
                        else 0.0)
         self._last_move_end_time = max(current_end, mcu_now)
         self._stepcompress_primed = False
-        self._arm_critical_action_guard('jam_exit', eventtime=mcu_now)
+        # KEIN eventtime=mcu_now: _critical_action_guard_until wird
+        # ueberall gegen reactor.monotonic() verglichen — ein Arm in
+        # der print_time-Domaene liefe sofort ab (Review 2026-07-09,
+        # Zeitdomaenen-Bug im BUFFER_CLEAR_JAM-Pfad).
+        self._arm_critical_action_guard('jam_exit')
 
     def _resume_after_overflow(self):
         """Restore the pre-overflow workflow if it is still resumable."""
@@ -1879,6 +1888,14 @@ class BufferFeeder:
         """Hard-safety aborts route through _trigger_jam: phase
         commands raise via WAIT_IDLE, recovery requires explicit
         BUFFER_CLEAR_JAM / BUFFER_AUTO_OFF / STOP_BUFFER_FILL."""
+        if self._feed_deadline_time is not None and not self._continuous_feed:
+            # Stale Deadline einer beendeten Session (Review 2026-07-09):
+            # Kommando-Einstiege (PHASE1/UNLOAD_PHASE3/BUFFER_FEED
+            # DISTANCE/PREP_BASELINE) setzen nur _continuous_feed=False —
+            # die alte max_feed_time-Deadline wuerde sonst mitten im
+            # neuen, legitimen Workflow einen falschen SAFETY_TIMEOUT-
+            # JAM feuern.
+            self._feed_deadline_time = None
         if (self._feed_deadline_time is not None
                 and eventtime >= self._feed_deadline_time):
             self._feed_deadline_time = None
@@ -2238,7 +2255,12 @@ class BufferFeeder:
             self._arm_high_flow_carry(eventtime, 'hall3_demand')
             if extruder_vel < floor - floor_epsilon:
                 self._modulator_feeding = True
-                return floor
+                # feed_speed-Clamp wie in allen Nachbar-Pfaden (Review
+                # 2026-07-09): min_feed_floor > feed_speed ist per
+                # Config moeglich (kein Cross-Check, BUFFER_SET
+                # ungeprueft) — der Floor darf den globalen Speed-Cap
+                # nicht ueberfahren.
+                return min(floor, self.feed_speed)
             self._modulator_feeding = True
             return min(max(extruder_vel * self.hall3_demand_gain, floor),
                        self.feed_speed)
@@ -3920,7 +3942,12 @@ class BufferFeeder:
             self._wait_for_move_done_resume_on_overflow(gcmd)
         except Exception:
             # Release the phase state on error so it doesn't stay sticky.
-            self._set_state(STATE_IDLE)
+            # Nur den EIGENEN Phase-State loesen — JAM/OVERFLOW, die ein
+            # Trigger mid-wait gesetzt hat, nicht mit IDLE stampfen
+            # (Review 2026-07-09: state=IDLE + _jam_active=True sperrte
+            # BUFFER_CLEAR_JAM aus).
+            if self._state == STATE_LOADING_PULL:
+                self._set_state(STATE_IDLE)
             raise
         self._set_state(STATE_IDLE)
 
@@ -4003,6 +4030,13 @@ class BufferFeeder:
             self._overflow_resume_dir = 0
             self._overflow_resume_spd = 0.0
             self._overflow_interrupted_follow = False
+            # Stale Overlay-Flag mit raeumen (Review 2026-07-09): ein
+            # aus AUTO geerbtes _fault_overflow=True liesse die
+            # while-Schleife unten nach 0 Iterationen mit Silent-
+            # Success terminieren, waehrend der Tick asynchron im
+            # Hintergrund weiterarbeitet. OVERFLOW_OK=1 toleriert
+            # HALL1 explizit — der Stable-Exit uebernimmt.
+            self._fault_overflow = False
         logging.info("buffer_feeder: P3 start threshold=%.1fs overflow_ok=%s "
                      "chunk=%.1f hall1=%s hall2=%s state=%s",
                      stable_timeout, overflow_ok, chunk_distance,
@@ -4018,8 +4052,24 @@ class BufferFeeder:
         while (self._state == STATE_LOADING_PUSH
                and not (self.use_overflow_overlay and self._fault_overflow)):
             self.reactor.pause(self.reactor.monotonic() + 0.1)
-        # Postcheck: JAM bleibt absolut. Bei overflow_ok haben wir den
-        # HALL1-Stable-Exit selbst gemacht — sonst alte Lockout-Logik.
+        # Overlay-Abort: der Loop terminierte via _fault_overflow bei
+        # unveraendertem _state=LOAD_PHASE_3. Vor dem Raise in den
+        # Legacy-Lockout-State konvertieren — sonst bleibt der Tick-
+        # getriebene Phase-State ohne Kommando-Owner zurueck und
+        # _load_phase3_tick fuettert nach HALL1-Fall autonom weiter
+        # (Zombie-Feed, Review 2026-07-09).
+        if (self.use_overflow_overlay and self._fault_overflow
+                and self._state == STATE_LOADING_PUSH):
+            self._set_state(STATE_OVERFLOW)
+        # Postcheck: HALT und JAM bleiben absolut — auch bei
+        # overflow_ok (Review 2026-07-09: BUFFER_HALT wurde im
+        # OVERFLOW_OK=1-Pfad verschluckt, das LOAD-Macro lief weiter).
+        # Bei overflow_ok haben wir den HALL1-Stable-Exit selbst
+        # gemacht — sonst alte Lockout-Logik.
+        if self._halt_requested:
+            self._halt_requested = False
+            raise self._cmd_error(
+                "BufferFeeder: HALT requested — aborting workflow")
         self._raise_if_jam()
         if not overflow_ok:
             self._raise_if_locked_out(gcmd)
@@ -4031,6 +4081,18 @@ class BufferFeeder:
 
     cmd_BUFFER_UNLOAD_FILAMENT_help = "UNLOAD_FILAMENT als Python-Workflow mit garantiertem Cleanup"
     def cmd_BUFFER_UNLOAD_FILAMENT(self, gcmd):
+        # Entry-Guard (Review 2026-07-09): vorher ohne jeden State-
+        # Check — ein UNLOAD waehrend INITIAL_GRIP/LOAD swappte den
+        # Trapq mitten im Grip und das nested BUFFER_UNLOAD_PHASE3
+        # raiste erst NACH Tip-Forming + Final-Retract (Filamentende
+        # undefiniert im Bowden). OVERFLOW/JAM bleiben erlaubt —
+        # UNLOAD ist deren Recovery-Pfad.
+        # STATE_INIT erlaubt: Boot-Grace-Fenster (~2s) ist kein
+        # Busy-State — der Guard zielt auf GRIP/LOAD/MANUAL.
+        self._check_phase_entry('UNLOAD_FILAMENT', {
+            STATE_INIT, STATE_IDLE, STATE_AUTO, STATE_RUNOUT,
+            STATE_UNLOADING, STATE_OVERFLOW, STATE_JAM,
+        })
         tip_cycles = gcmd.get_int('TIP_CYCLES', 6, minval=0)
         tip_push = gcmd.get_float('TIP_PUSH', 8.0, above=0.)
         tip_pull = gcmd.get_float('TIP_PULL', 14.0, above=0.)
@@ -4172,14 +4234,19 @@ class BufferFeeder:
         else:
             overshoot = True
         self._disable_stepper()
-        self._set_state(STATE_IDLE)
         if overshoot:
             # Explicit failure — do not let UNLOAD_FILAMENT print
             # "UNLOAD abgeschlossen" after an unsuccessful retract.
+            # JAM/OVERFLOW aus einem Mid-Loop-Trigger nicht mit IDLE
+            # stampfen (Review 2026-07-09) — nur den eigenen
+            # Phase-State loesen.
+            if self._state == STATE_UNLOADING:
+                self._set_state(STATE_IDLE)
             raise self._cmd_error(
                 "UNLOAD Phase 3: MAX_DISTANCE %dmm reached without "
                 "entrance clear — check buffer / filament path"
                 % int(max_distance))
+        self._set_state(STATE_IDLE)
         # UNLOAD ist semantisch der JAM-/OVERFLOW-Recovery-Pfad —
         # bei erfolgreichem Exit auch sticky Lockout-Flags clearen.
         # Sonst raised der naechste LOAD_FILAMENT mit "JAM active" weil
