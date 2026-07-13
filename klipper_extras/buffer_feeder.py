@@ -4087,8 +4087,15 @@ class BufferFeeder:
         # raiste erst NACH Tip-Forming + Final-Retract (Filamentende
         # undefiniert im Bowden). OVERFLOW/JAM bleiben erlaubt —
         # UNLOAD ist deren Recovery-Pfad.
-        # STATE_INIT erlaubt: Boot-Grace-Fenster (~2s) ist kein
-        # Busy-State — der Guard zielt auf GRIP/LOAD/MANUAL.
+        # Codex-Review 2026-07-13: waehrend der Boot-Grace ist das
+        # Sensorbild nicht settled und die Safety-Logik suspendiert —
+        # keine Sync-/Extruder-/Buffer-Moves starten.
+        if not self._startup_grace_done:
+            raise self._cmd_error(
+                "BufferFeeder: startup grace not finished — sensors "
+                "settling, retry in a moment")
+        # STATE_INIT (nach Grace nur transient) ist kein Busy-State —
+        # der Guard zielt auf GRIP/LOAD/MANUAL.
         self._check_phase_entry('UNLOAD_FILAMENT', {
             STATE_INIT, STATE_IDLE, STATE_AUTO, STATE_RUNOUT,
             STATE_UNLOADING, STATE_OVERFLOW, STATE_JAM,

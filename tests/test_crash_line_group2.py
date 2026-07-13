@@ -174,11 +174,19 @@ def test_sync_failure_rolls_back_position_and_prime(monkeypatch):
     printer.objects['extruder'].last_position = 180.0
     feeder._stepcompress_primed = True
 
-    def _boom():
-        raise RuntimeError("scan window recompute failed")
+    # Nur der ERSTE scan-window-Call (Haupt-Pfad) raist — der Rollback
+    # laeuft durch. Der Double-Failure-Fall (Rollback raist auch) ist
+    # in test_codex_round1_fixes.py::test_sync_rollback_failure_arms_
+    # latch gepinnt (Latch bleibt dann bewusst armiert).
+    calls = {'n': 0}
+
+    def _boom_once():
+        calls['n'] += 1
+        if calls['n'] == 1:
+            raise RuntimeError("scan window recompute failed")
     monkeypatch.setattr(
         printer.objects['motion_queuing'],
-        "check_step_generation_scan_windows", _boom)
+        "check_step_generation_scan_windows", _boom_once)
 
     with pytest.raises(RuntimeError):
         feeder._sync_to_extruder('extruder')

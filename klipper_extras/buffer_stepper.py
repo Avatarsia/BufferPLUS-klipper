@@ -5,6 +5,8 @@
 # trapq (for explicit SYNC_TO_EXTRUDER macros). Sub-module of
 # buffer_feeder; kein Klipper-load_config-Eintrypoint.
 
+import logging
+
 from ._buffer_common import (
     ANCHOR_NUDGE_MM, MAX_T0_LOOKAHEAD_S, REPRIME_GAP_S, STATE_OVERFLOW,
 )
@@ -156,15 +158,26 @@ class SyncCoordinator:
             # bei _commanded_pos startet → Step-Burst/Invalid sequence.
             # primed=False erzwingt den Reprime-Pfad beim naechsten
             # Submit (heilt den Cursor).
+            rolled_back = False
             try:
                 owner.stepper.set_trapq(self.trapq)
                 owner.stepper.set_position((0., 0., 0.))
                 self.motion_queuing.check_step_generation_scan_windows()
+                rolled_back = True
             except Exception:
-                pass
+                logging.exception(
+                    "buffer_feeder: sync rollback failed — arming sync "
+                    "latch, own-trapq submits stay blocked")
             owner._commanded_pos = 0.0
             owner._stepcompress_primed = False
-            self.owner._stepper_synced_to = None
+            if rolled_back:
+                self.owner._stepper_synced_to = None
+            else:
+                # Codex-Review 2026-07-13: Rollback fehlgeschlagen —
+                # der Stepper haengt evtl. noch auf der Extruder-Trapq.
+                # Latch armen, damit _submit_move/Bang-Bang blocken;
+                # Recovery via BUFFER_UNSYNC-Retry.
+                self.owner._stepper_synced_to = extruder_name
             raise
         owner._arm_critical_action_guard('sync_to_extruder')
         self.owner._stepper_synced_to = extruder_name
@@ -191,15 +204,28 @@ class SyncCoordinator:
             # _exit_overflow haengt fuer immer. Forced completion:
             # own-trapq erzwingen, primed=False (Reprime beim naechsten
             # Submit heilt den Cursor), Latch loesen, dann re-raisen.
+            #
+            # Codex-Review 2026-07-13: Latch NUR bei erfolgreichem
+            # Recovery loesen. Schlaegt auch das Recovery-set_trapq
+            # fehl, haengt der Stepper evtl. weiter auf der Extruder-
+            # Trapq — geloester Latch wuerde Own-Submits auf der
+            # falschen Queue erlauben. Latch behalten = harter
+            # Lockout, Retry via erneutem BUFFER_UNSYNC.
+            recovered = False
             try:
                 owner.stepper.set_trapq(self.trapq)
                 owner.stepper.set_position((0., 0., 0.))
                 self.motion_queuing.check_step_generation_scan_windows()
+                recovered = True
             except Exception:
-                pass
-            owner._commanded_pos = 0.0
-            owner._stepcompress_primed = False
-            self.owner._stepper_synced_to = None
+                logging.exception(
+                    "buffer_feeder: unsync recovery failed — sync "
+                    "latch kept, submits stay blocked (retry "
+                    "BUFFER_UNSYNC)")
+            if recovered:
+                owner._commanded_pos = 0.0
+                owner._stepcompress_primed = False
+                self.owner._stepper_synced_to = None
             raise
         owner._arm_critical_action_guard('unsync')
         self.owner._stepper_synced_to = None
