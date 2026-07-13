@@ -4147,14 +4147,27 @@ class BufferFeeder:
         fast_spd = gcmd.get_float('FAST_SPD', self.unload_fast_speed, above=0.)
         max_distance = gcmd.get_float('MAX_DISTANCE', self.unload_fast_max, above=0.)
         heat_to = gcmd.get_float('AUTO_HEAT_TARGET', 250.0, above=0.)
+        temp_window = gcmd.get_float('TEMP_WINDOW', 5.0, minval=0.)
         extruder_name = gcmd.get('EXTRUDER', 'extruder')
 
         temp = self._hotend_temp()
         if temp < self.min_temp:
+            # M104 + TEMPERATURE_WAIT MINIMUM statt M109 (User-Request
+            # 2026-07-13): M109 wartet bis exakt eingeregelt (inkl.
+            # Runter-Warten bei Overshoot) — hier reicht "warm genug".
+            # Weiterlauf sobald Ziel - TEMP_WINDOW erreicht ist; Clamp
+            # auf min_temp, damit die G1-E-Moves nicht unter der
+            # Extrude-Schwelle starten. Der Heater regelt waehrenddessen
+            # weiter auf das volle Ziel.
+            wait_min = max(self.min_temp, heat_to - temp_window)
             self._gcode_run_script_checked(
-                "M118 Hotend zu kalt (%d/%d C) - heize automatisch auf %d C\n"
-                "M109 S%d"
-                % (int(temp), int(self.min_temp), int(heat_to), int(heat_to)),
+                "M118 Hotend zu kalt (%d/%d C) - heize automatisch auf %d C "
+                "(weiter ab %d C)\n"
+                "M104 S%d\n"
+                "TEMPERATURE_WAIT SENSOR=%s MINIMUM=%d"
+                % (int(temp), int(self.min_temp), int(heat_to),
+                   int(wait_min), int(heat_to), extruder_name,
+                   int(wait_min)),
                 from_command=True)
 
         state_saved = False
