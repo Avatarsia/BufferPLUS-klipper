@@ -6,7 +6,7 @@
 # buffer_feeder; kein Klipper-load_config-Eintrypoint.
 
 from ._buffer_common import (
-    ANCHOR_NUDGE_MM, REPRIME_GAP_S, STATE_OVERFLOW,
+    ANCHOR_NUDGE_MM, MAX_T0_LOOKAHEAD_S, REPRIME_GAP_S, STATE_OVERFLOW,
 )
 
 
@@ -80,6 +80,20 @@ class SyncCoordinator:
 
     def sync_to_extruder(self, extruder_name):
         owner = self.owner
+        # Already-Synced-Guard (Review 2026-07-09 F2): bei gesetztem
+        # Latch returnt _submit_move still — der Gap-Anchor unten
+        # waere ein Silent-No-Op und der erneute Swap liefe mit stale
+        # Cursor. Idempotent fuer denselben Extruder, harter Fehler
+        # fuer einen anderen.
+        if owner._stepper_synced_to is not None:
+            if owner._stepper_synced_to == extruder_name:
+                owner._respond("Buffer-Feeder already synced to '%s' "
+                               "— no-op" % extruder_name)
+                return
+            raise owner._cmd_error(
+                "Buffer-Feeder already synced to '%s' — call "
+                "BUFFER_UNSYNC before syncing to '%s'"
+                % (owner._stepper_synced_to, extruder_name))
         extruder = owner.printer.lookup_object(extruder_name)
         if not hasattr(extruder, 'get_trapq'):
             raise owner._cmd_error(
@@ -98,7 +112,16 @@ class SyncCoordinator:
         mcu_now = mcu.estimated_print_time(owner.reactor.monotonic())
         gap = mcu_now - owner._last_move_end_time
         if gap > REPRIME_GAP_S:
-            anchor_dir = self._submit_anchor_move()
+            # forced_t0 statt None (Review 2026-07-09 F2): mid-print
+            # steht die Toolhead-Queue > MAX_T0_LOOKAHEAD_S voraus —
+            # der forced_t0=None-Pfad wuerde den Anchor via B-Skip
+            # SILENT verwerfen und der Swap liefe mit stale
+            # last_step_clock (exakt der Crash, den dieser Anchor
+            # verhindern soll). mcu_now+lead ist hier sicher: der
+            # Feeder war > REPRIME_GAP_S idle, der letzte Step liegt
+            # also garantiert davor.
+            anchor_t0 = mcu_now + min(owner.lead_time, MAX_T0_LOOKAHEAD_S)
+            anchor_dir = self._submit_anchor_move(forced_t0=anchor_t0)
             owner._respond("Sync prep: own-trapq cursor refreshed "
                           "(idle %.1fs, anchor %s 0.05mm)"
                           % (gap, "retract" if anchor_dir < 0 else "feed"))
@@ -125,11 +148,22 @@ class SyncCoordinator:
             # flag last so a recursive failure inside the rollback still
             # leaves the cleanup guard disarmed (unsync_if_synced returns
             # False), avoiding double-rollback attempts.
+            #
+            # Review 2026-07-09 F6: Position/_commanded_pos/primed
+            # gehoeren zum Rollback. set_position(_ext_pos) lief ggf.
+            # schon durch — ohne Restore rechnet itersolve beim
+            # naechsten Own-Submit ab _ext_pos waehrend das Trapezoid
+            # bei _commanded_pos startet → Step-Burst/Invalid sequence.
+            # primed=False erzwingt den Reprime-Pfad beim naechsten
+            # Submit (heilt den Cursor).
             try:
                 owner.stepper.set_trapq(self.trapq)
+                owner.stepper.set_position((0., 0., 0.))
                 self.motion_queuing.check_step_generation_scan_windows()
             except Exception:
                 pass
+            owner._commanded_pos = 0.0
+            owner._stepcompress_primed = False
             self.owner._stepper_synced_to = None
             raise
         owner._arm_critical_action_guard('sync_to_extruder')
@@ -143,11 +177,30 @@ class SyncCoordinator:
         if self.owner._stepper_synced_to is None:
             return False
         owner = self.owner
-        toolhead = owner.printer.lookup_object('toolhead')
-        toolhead.flush_step_generation()
-        owner.stepper.set_position((0., 0., 0.))
-        owner.stepper.set_trapq(self.trapq)
-        self.motion_queuing.check_step_generation_scan_windows()
+        try:
+            toolhead = owner.printer.lookup_object('toolhead')
+            toolhead.flush_step_generation()
+            owner.stepper.set_position((0., 0., 0.))
+            owner.stepper.set_trapq(self.trapq)
+            self.motion_queuing.check_step_generation_scan_windows()
+        except Exception:
+            # Review 2026-07-09 F7 (NOT-TO-DO-Muster "Guard-Flag vor
+            # Mutation"): eine Exception mitten im Swap darf den
+            # Sync-Latch nicht gesetzt lassen — sonst blocken ALLE
+            # _submit_move/Bang-Bang-Pfade dauerhaft und ein deferred
+            # _exit_overflow haengt fuer immer. Forced completion:
+            # own-trapq erzwingen, primed=False (Reprime beim naechsten
+            # Submit heilt den Cursor), Latch loesen, dann re-raisen.
+            try:
+                owner.stepper.set_trapq(self.trapq)
+                owner.stepper.set_position((0., 0., 0.))
+                self.motion_queuing.check_step_generation_scan_windows()
+            except Exception:
+                pass
+            owner._commanded_pos = 0.0
+            owner._stepcompress_primed = False
+            self.owner._stepper_synced_to = None
+            raise
         owner._arm_critical_action_guard('unsync')
         self.owner._stepper_synced_to = None
         owner._commanded_pos = 0.0

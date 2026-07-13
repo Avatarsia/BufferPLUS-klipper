@@ -1367,6 +1367,12 @@ class BufferFeeder:
             # Observer ueber extruder.get_status — kein flush, kein
             # SYNC, kein Side-Effect auf den Druckkopf.
             self.velocity_tracker.tick(eventtime)
+            # Stempel der juengsten Extruder-Bewegung (Monotonic) —
+            # sekundaere Print-Detektion fuer den Watchdog-Hard-Block
+            # (Serial-/OctoPrint-Drucke, Review 2026-07-09 F5).
+            _trk_ready, _trk_vel = self._get_tracker_velocity()
+            if _trk_ready and _trk_vel > 1e-3:
+                self._last_extruder_motion_time = eventtime
 
             self._check_debounce(eventtime)
 
@@ -1515,8 +1521,6 @@ class BufferFeeder:
                         _blocking.append("hall_empty")
                     if self.hall_full:
                         _blocking.append("hall_full")
-                    if self._needs_overflow_prime:
-                        _blocking.append("_needs_overflow_prime")
                     # separate watermark for log-rate (not
                     # _last_idle_anchor_time — that is only updated when
                     # an anchor actually fires; in the blocked path no
@@ -1591,6 +1595,19 @@ class BufferFeeder:
                 _print_active = False
                 _print_state_known = False
 
+            # Sekundaere Print-Detektion (Review 2026-07-09 F5):
+            # Serial-/OctoPrint-Drucke melden print_stats.state=
+            # 'standby' — der Hard-Block wuerde nicht greifen und der
+            # Watchdog feuerte forced_t0=None-Anchors mid-print
+            # (P7-77-A-Klasse). Juengste Extruder-Bewegung (Stempel aus
+            # diesem Tick, Monotonic-Domaene) zaehlt daher ebenfalls
+            # als aktiver Druck. Buffer-eigene Moves bewegen den
+            # Extruder nicht — kein Selbst-Block.
+            if (not _print_active
+                    and (eventtime - self._last_extruder_motion_time)
+                        < self.idle_anchor_gap):
+                _print_active = True
+
             # Print-Block-Stale-Override: nur evaluieren wenn
             # ueberhaupt geblockt waere und mindestens ein Flush
             # bereits gesehen wurde (Boot-Schutz). Strict > damit
@@ -1631,8 +1648,13 @@ class BufferFeeder:
                     and not self._continuous_feed
                     and not hall_empty_block
                     and not self.hall_full
-                    and not self._needs_overflow_prime
                     and not _print_active):  # P7-77 A + P7-78 Override
+                # _needs_overflow_prime blockt den Watchdog NICHT mehr
+                # (Review 2026-07-09 F3): das Flag leakte in IDLE (kein
+                # Clear-Pfad ausserhalb AUTO) und sperrte den Anchor
+                # dauerhaft aus — Issue-#31-Pathologie. Der Anchor IST
+                # der Cursor-Refresh, den die Prime leisten sollte; er
+                # konsumiert das Flag unten bei erfolgreichem Queue.
                 mcu = self.stepper.get_mcu()
                 mcu_now = mcu.estimated_print_time(
                     self.reactor.monotonic())
@@ -1657,6 +1679,7 @@ class BufferFeeder:
                             "ex-P7-76 D, scope reduced)",
                             self._last_move_end_time - mcu_now)
                         self._last_move_end_time = mcu_now
+                    _lme_before_anchor = self._last_move_end_time
                     try:
                         if _p778_override:
                             # P7-78v2: aktiver Print hat typisch weit-
@@ -1693,6 +1716,15 @@ class BufferFeeder:
                             # Anchor enabled normal.
                             self.sync._submit_anchor_move()
                         self._last_idle_anchor_time = mcu_now
+                        if (self._needs_overflow_prime
+                                and self._last_move_end_time
+                                    != _lme_before_anchor):
+                            # Anchor real gequeued (lme bewegt) — die
+                            # pendende Overflow-Prime ist damit
+                            # erledigt; Flag konsumieren, sonst bleibt
+                            # der Flush-Pfad in AUTO auf dem Prime-
+                            # Handler haengen (F3, Review 2026-07-09).
+                            self._needs_overflow_prime = False
                         # Motor stromlos schalten sobald der Anchor-Move
                         # gedrained ist (IDLE-Semantik: stopped AND
                         # disabled). In IDLE immer.
@@ -2037,8 +2069,12 @@ class BufferFeeder:
                 # HALL1 active mid-chunk — beende Pending-Stream.
                 # (_abort_signalled greift bereits weiter oben, aber
                 # diese Branch deckt jeden anderen target=0-Pfad ab.)
+                # Session-Latch mit raeumen — analog zum HALL2-Branch
+                # oben (Review 2026-07-09 F4: stale _continuous_feed
+                # → falscher SUPPLY-JAM + Watchdog-Block).
                 self._pending_remaining_mm = 0.0
                 self._pending_submit_chunk_cap = None
+                self._continuous_feed = False
                 return
             sub_chunk_speed = modulated
             self._continuous_feed_speed = sub_chunk_speed
@@ -2421,6 +2457,17 @@ class BufferFeeder:
                     "(hall1=%s ready=%s)",
                     self.hall_overflow,
                     self.velocity_tracker.is_ready())
+            if self._continuous_feed:
+                # Demand-0 beendet die Feed-Session (Review 2026-07-09
+                # F4). Das stale Flag liess (a) _jam_tick einen
+                # stehenden Feeder als "running" werten → falscher
+                # SUPPLY-JAM bei M109/Heat-Soak, und (b) blockte das
+                # Watchdog-Anchor-Gate dauerhaft nach der ersten
+                # Session (Issue-#29-Fenster wieder offen). Der
+                # naechste Demand>0-Flush re-armt Session-Counter und
+                # Flag regulaer.
+                self._continuous_feed = False
+                self._continuous_feed_direction = 0
             return
 
         if eventtime is None:
@@ -3073,6 +3120,19 @@ class BufferFeeder:
                 drop_enable_floor = True
         en = 0.0 if drop_enable_floor else self._last_enable_schedule_time
 
+        # Floor auf das Ende des noch spielenden Chunks. _halt_motion
+        # rollt _last_move_end_time einseitig auf mcu_now zurueck,
+        # laesst _current_move aber intakt — die Steps bis end_time
+        # sind bereits generiert (last_step_clock steht dort). Ein
+        # Submit, der frueher anchort, springt hinter last_step_clock
+        # → negativer Interval → "Invalid sequence" MCU-Shutdown
+        # (HALL1-Bounce-Szenario, Logikfehler-Review 2026-07-09 F1).
+        current_end_floor = 0.0
+        if self._current_move is not None:
+            _ce = self._current_move.get('end_time', 0.0)
+            if _ce > mcu_now:
+                current_end_floor = _ce
+
         if forced_t0 is not None:
             # Clamp far-future forced_t0. motion_queuing.flush_all_steps
             # can hand a step_gen_time = need_step_gen_time (toolhead
@@ -3086,7 +3146,8 @@ class BufferFeeder:
                     forced_t0 - mcu_now)
                 forced_t0 = mcu_now + self.lead_time
             return AnchorPlan(
-                t0=max(forced_t0, self._last_move_end_time, en, mcu_now),
+                t0=max(forced_t0, self._last_move_end_time, en, mcu_now,
+                       current_end_floor),
                 enable_floor=en,
             )
 
@@ -3100,7 +3161,8 @@ class BufferFeeder:
         # First chunk / gap recovery: anchor on toolhead print_time.
         toolhead = self.printer.lookup_object('toolhead')
         th_time = toolhead.get_last_move_time()
-        t0 = max(th_time + self.lead_time, self._last_move_end_time, en)
+        t0 = max(th_time + self.lead_time, self._last_move_end_time, en,
+                 current_end_floor)
         if t0 > mcu_now + MAX_T0_LOOKAHEAD_S:
             # th_time is far ahead (active print with filled toolhead
             # queue). Clamping to mcu_now would land BEFORE

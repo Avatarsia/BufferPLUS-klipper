@@ -50,6 +50,11 @@ class BufferRuntimeState:
     _pending_disable: bool = False
     _last_idle_anchor_time: float = 0.0
     _last_mcu_flush_time: float = 0.0
+    # Monotonic-Stempel der juengsten Extruder-Bewegung. Sekundaere
+    # Print-Detektion fuer den Watchdog-Hard-Block: Serial-/OctoPrint-
+    # Drucke melden print_stats.state='standby' — ohne diesen Stempel
+    # feuerte der Watchdog forced_t0=None-Anchors mid-print (P7-77-A).
+    _last_extruder_motion_time: float = -1e9
     _hall1_active_since: Optional[float] = None
     _last_metrics_log_time: float = 0.0
     _modulator_feeding: bool = False
