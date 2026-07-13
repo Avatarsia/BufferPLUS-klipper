@@ -132,8 +132,13 @@ class BaselineLogfile:
             if parent and not os.path.isdir(parent):
                 os.makedirs(parent, exist_ok=True)
             from datetime import datetime
-            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.") \
-                + ("%03d" % (datetime.now().microsecond // 1000))
+            # Ein einzelner now()-Aufruf: zwei getrennte Aufrufe konnten
+            # ueber eine Sekundengrenze fallen (Sekunden vom ersten,
+            # Millisekunden vom zweiten Aufruf -> Timestamp bis zu 1s
+            # daneben, out-of-order Marker im Analyzer).
+            now = datetime.now()
+            stamp = now.strftime("%Y-%m-%d %H:%M:%S.") \
+                + ("%03d" % (now.microsecond // 1000))
             with open(self.path, "a", encoding="utf-8") as fh:
                 fh.write("%s %s\n" % (stamp, message))
         except (OSError, IOError, ValueError):

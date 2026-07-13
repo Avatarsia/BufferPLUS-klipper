@@ -4840,6 +4840,11 @@ class BufferFeeder:
             'benchmark_mode_active':    self._benchmark_mode_active(eventtime),
             'benchmark_mode_left_s':    self._benchmark_mode_remaining(eventtime),
             'jam_active':               self._jam_active,
+            # Snapshot-faehige Tuning-Werte fuer Macros (Review
+            # 2026-07-09): BUFFER_BASELINE_RUN restauriert jam_action/
+            # hall3_demand_gain nach dem Run auf die Vorher-Werte.
+            'jam_action':               self.jam_action,
+            'hall3_demand_gain':        self.hall3_demand_gain,
             'fault_overflow':           self._fault_overflow,
             'overflow_overlay_enabled': self.use_overflow_overlay,
             'post_load_overflow_grace': self._post_load_overflow_grace,
