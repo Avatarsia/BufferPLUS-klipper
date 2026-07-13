@@ -25,6 +25,7 @@ def test_buffer_unload_filament_smoke():
         values={"unload_sync_distance": 250},
     )
     feeder = buffer_feeder.BufferFeeder(fake_config)
+    feeder._startup_grace_done = True  # UNLOAD-Grace-Guard (Codex-Review 2026-07-13)
     gcode = fake_printer.lookup_object("gcode")
     fake_printer.lookup_object("extruder").heater.temperature = 220.0
 
@@ -84,6 +85,7 @@ def test_buffer_unload_filament_unsyncs_on_error(monkeypatch):
         values={"unload_sync_distance": 250},
     )
     feeder = buffer_feeder.BufferFeeder(fake_config)
+    feeder._startup_grace_done = True  # UNLOAD-Grace-Guard (Codex-Review 2026-07-13)
     gcode = fake_printer.lookup_object("gcode")
     fake_printer.lookup_object("extruder").heater.temperature = 220.0
     events = []
@@ -139,6 +141,7 @@ def test_buffer_unload_filament_skips_cooling_when_disabled():
         values={"unload_sync_distance": 250},
     )
     feeder = buffer_feeder.BufferFeeder(fake_config)
+    feeder._startup_grace_done = True  # UNLOAD-Grace-Guard (Codex-Review 2026-07-13)
     gcode = fake_printer.lookup_object("gcode")
     fake_printer.lookup_object("extruder").heater.temperature = 220.0
 
@@ -176,6 +179,7 @@ def test_buffer_unload_filament_uses_custom_cool_temp():
         values={"unload_sync_distance": 250},
     )
     feeder = buffer_feeder.BufferFeeder(fake_config)
+    feeder._startup_grace_done = True  # UNLOAD-Grace-Guard (Codex-Review 2026-07-13)
     gcode = fake_printer.lookup_object("gcode")
     fake_printer.lookup_object("extruder").heater.temperature = 220.0
 
@@ -201,6 +205,7 @@ def test_buffer_unload_filament_uses_custom_extruder_name():
         values={"unload_sync_distance": 250},
     )
     feeder = buffer_feeder.BufferFeeder(fake_config)
+    feeder._startup_grace_done = True  # UNLOAD-Grace-Guard (Codex-Review 2026-07-13)
     gcode = fake_printer.lookup_object("gcode")
     fake_printer.lookup_object("extruder").heater.temperature = 220.0
 
@@ -226,6 +231,7 @@ def test_buffer_unload_filament_skips_pre_cool_when_tip_cycles_zero():
         values={"unload_sync_distance": 250},
     )
     feeder = buffer_feeder.BufferFeeder(fake_config)
+    feeder._startup_grace_done = True  # UNLOAD-Grace-Guard (Codex-Review 2026-07-13)
     gcode = fake_printer.lookup_object("gcode")
     fake_printer.lookup_object("extruder").heater.temperature = 220.0
 

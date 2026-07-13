@@ -502,7 +502,7 @@ done
 say ""
 say "${C_BOLD}Offene To-Dos (manuell zu prüfen):${C_RESET}"
 say "  - [pause_resume] in printer.cfg vorhanden? (manchmal in includierter macros.cfg)"
-say "  - [extruder] max_extrude_only_distance >= 200 ?"
+say "  - [extruder] max_extrude_only_distance >= 400 ? (UNLOAD-Sync-Retract ist EIN G1 E-{unload_sync_distance}, Default 400)"
 say "  - Nach Klipper-Boot: 'BUFFER_STATE_DUMP' in der Konsole — die Extension"
 say "    sollte 'state = IDLE' und die Sensor-States ausgeben."
 say ""

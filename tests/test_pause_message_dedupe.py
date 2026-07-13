@@ -239,8 +239,13 @@ def test_print_end_message_emitted_once_across_flaps():
     printer, feeder = make_feeder()
     printer.objects['print_stats'] = FakePrintStats(state='complete')
 
+    # Reale Event-Reihenfolge: _print_running wurde WAEHREND des Drucks
+    # (ps='printing') armiert. Post-Print-Flaps re-armen seit dem Fix
+    # 2026-07-09 nicht mehr ('complete'/'cancelled' → Fruehausstieg in
+    # _on_idle_printing) — Einmaligkeit haelt via kein-Re-Arm + Latch.
+    feeder._print_running = True
     for _ in range(5):
-        feeder._on_idle_printing()  # 'complete' != 'standby' -> kein Fruehausstieg
+        feeder._on_idle_printing()  # Flap: Fruehausstieg bei 'complete'
         feeder._on_idle_ready()
         _flush_tick(feeder)
 

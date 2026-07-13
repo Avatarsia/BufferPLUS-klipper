@@ -53,8 +53,6 @@ collect_ext_sub_modules() {
     done
 }
 
-collect_ext_sub_modules
-
 moonraker_rollover_klippy_log() {
     local response
     if [ "${ROLLOVER_KLIPPY_LOG}" != "1" ]; then
@@ -134,6 +132,12 @@ git fetch --quiet origin
 git pull --ff-only origin "${BRANCH}"
 
 # ---------- 2) Extension-Symlinks ----------
+# Sub-Modul-Liste NACH dem git pull einsammeln (Review 2026-07-09):
+# ein per Pull neu hinzugekommenes Sidecar-Modul bekaeme sonst keinen
+# Symlink -> ImportError beim Klipper-Restart, Drucker offline bis zum
+# zweiten update.sh-Lauf.
+collect_ext_sub_modules
+
 echo "[update] Extension-Symlink: ${EXT_TARGET} -> ${EXT_SOURCE}"
 ln -sfn "${EXT_SOURCE}" "${EXT_TARGET}"
 for sub in "${EXT_SUB_MODULES[@]}"; do

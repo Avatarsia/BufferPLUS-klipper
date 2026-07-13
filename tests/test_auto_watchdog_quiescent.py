@@ -212,10 +212,17 @@ def test_4_continuous_feed_blocks_watchdog(monkeypatch):
         "P7-75: Watchdog must NOT fire while _continuous_feed=True.")
 
 
-def test_5_needs_overflow_prime_blocks_watchdog(monkeypatch):
-    """A pending OVERFLOW-prime move owns the next stepcompress
-    refresh (via _on_mcu_flush or _main_tick prime path). The
-    watchdog must defer so we don't double-prime."""
+def test_5_needs_overflow_prime_watchdog_fires_and_consumes(monkeypatch):
+    """Kontrakt-Update (Logikfehler-Review 2026-07-09 F3, ersetzt den
+    P7-75-Block): _needs_overflow_prime blockt den Watchdog NICHT mehr.
+
+    Der alte Block deadlockte: in IDLE (und quiescentem Flush-AUTO ohne
+    Druck) existiert KEIN Clear-Pfad fuer das Flag — Prime braucht
+    Flush, Flush braucht Steps, Steps brauchen den Watchdog, der vom
+    Flag geblockt war. Cursor alterte > CLOCK_DIFF_MAX (Issue-#31-
+    Pathologie). Double-Prime entsteht nicht: der Watchdog-Anchor IST
+    der Cursor-Refresh und KONSUMIERT das Flag bei erfolgreichem
+    Queue."""
     _, feeder = make_auto_feeder()
     feeder._needs_overflow_prime = True
     neutralize_bang_bang(monkeypatch, feeder)
@@ -226,9 +233,13 @@ def test_5_needs_overflow_prime_blocks_watchdog(monkeypatch):
 
     feeder._main_tick(eventtime=30.0)
 
-    assert calls == [], (
-        "P7-75: Watchdog must NOT fire while _needs_overflow_prime "
-        "is set — the prime path owns the next anchor.")
+    assert len(calls) == 1, (
+        "watchdog must fire despite _needs_overflow_prime — the old "
+        "block had no clear-path outside AUTO-with-print and starved "
+        "the cursor (Issue #31 class)")
+    assert feeder._needs_overflow_prime is False, (
+        "the anchor performs the prime's cursor refresh — flag must "
+        "be consumed so the flush prime path does not double-prime")
 
 
 def test_6_eifel_reproduction_seven_second_gap_refreshes_clock(monkeypatch):

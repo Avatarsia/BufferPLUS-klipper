@@ -28,6 +28,7 @@ def set_sensor_active(feeder, sensor_name, active):
 def test_python_unload_nested_calls_include_buffer_mux_key(fake_printer, feeder):
     gcode = fake_printer.lookup_object("gcode")
     fake_printer.lookup_object("extruder").heater.temperature = 220.0
+    feeder._startup_grace_done = True  # UNLOAD-Grace-Guard (Codex-Review 2026-07-13)
 
     class FakeGCmdLocal:
         def get(self, key, default=None):

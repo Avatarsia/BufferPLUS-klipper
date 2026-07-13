@@ -635,7 +635,12 @@ class BufferFeeder:
                     'state', '')
         except Exception:
             pass
-        if ps_state == 'standby':
+        if ps_state in ('standby', 'complete', 'cancelled', 'error'):
+            # Post-Print-Flaps (Review 2026-07-09): der buffereigene
+            # Idle-Anchor kippt idle_timeout regelmaessig — nach
+            # 'complete'/'cancelled' wuerde jeder Flap _print_running
+            # re-armen (Runout-PAUSE auf fertigem Druck, Spontan-Grip
+            # nach CANCEL via _runout_recovery_pending).
             return
         # Re-arm the one-shot park-to-full trigger on real print
         # activity (new print start / RESUME). Deliberately NOT reset
@@ -1208,7 +1213,11 @@ class BufferFeeder:
                        else 0.0)
         self._last_move_end_time = max(current_end, mcu_now)
         self._stepcompress_primed = False
-        self._arm_critical_action_guard('jam_exit', eventtime=mcu_now)
+        # KEIN eventtime=mcu_now: _critical_action_guard_until wird
+        # ueberall gegen reactor.monotonic() verglichen — ein Arm in
+        # der print_time-Domaene liefe sofort ab (Review 2026-07-09,
+        # Zeitdomaenen-Bug im BUFFER_CLEAR_JAM-Pfad).
+        self._arm_critical_action_guard('jam_exit')
 
     def _resume_after_overflow(self):
         """Restore the pre-overflow workflow if it is still resumable."""
@@ -1367,6 +1376,12 @@ class BufferFeeder:
             # Observer ueber extruder.get_status — kein flush, kein
             # SYNC, kein Side-Effect auf den Druckkopf.
             self.velocity_tracker.tick(eventtime)
+            # Stempel der juengsten Extruder-Bewegung (Monotonic) —
+            # sekundaere Print-Detektion fuer den Watchdog-Hard-Block
+            # (Serial-/OctoPrint-Drucke, Review 2026-07-09 F5).
+            _trk_ready, _trk_vel = self._get_tracker_velocity()
+            if _trk_ready and _trk_vel > 1e-3:
+                self._last_extruder_motion_time = eventtime
 
             self._check_debounce(eventtime)
 
@@ -1515,8 +1530,6 @@ class BufferFeeder:
                         _blocking.append("hall_empty")
                     if self.hall_full:
                         _blocking.append("hall_full")
-                    if self._needs_overflow_prime:
-                        _blocking.append("_needs_overflow_prime")
                     # separate watermark for log-rate (not
                     # _last_idle_anchor_time — that is only updated when
                     # an anchor actually fires; in the blocked path no
@@ -1591,6 +1604,19 @@ class BufferFeeder:
                 _print_active = False
                 _print_state_known = False
 
+            # Sekundaere Print-Detektion (Review 2026-07-09 F5):
+            # Serial-/OctoPrint-Drucke melden print_stats.state=
+            # 'standby' — der Hard-Block wuerde nicht greifen und der
+            # Watchdog feuerte forced_t0=None-Anchors mid-print
+            # (P7-77-A-Klasse). Juengste Extruder-Bewegung (Stempel aus
+            # diesem Tick, Monotonic-Domaene) zaehlt daher ebenfalls
+            # als aktiver Druck. Buffer-eigene Moves bewegen den
+            # Extruder nicht — kein Selbst-Block.
+            if (not _print_active
+                    and (eventtime - self._last_extruder_motion_time)
+                        < self.idle_anchor_gap):
+                _print_active = True
+
             # Print-Block-Stale-Override: nur evaluieren wenn
             # ueberhaupt geblockt waere und mindestens ein Flush
             # bereits gesehen wurde (Boot-Schutz). Strict > damit
@@ -1631,8 +1657,13 @@ class BufferFeeder:
                     and not self._continuous_feed
                     and not hall_empty_block
                     and not self.hall_full
-                    and not self._needs_overflow_prime
                     and not _print_active):  # P7-77 A + P7-78 Override
+                # _needs_overflow_prime blockt den Watchdog NICHT mehr
+                # (Review 2026-07-09 F3): das Flag leakte in IDLE (kein
+                # Clear-Pfad ausserhalb AUTO) und sperrte den Anchor
+                # dauerhaft aus — Issue-#31-Pathologie. Der Anchor IST
+                # der Cursor-Refresh, den die Prime leisten sollte; er
+                # konsumiert das Flag unten bei erfolgreichem Queue.
                 mcu = self.stepper.get_mcu()
                 mcu_now = mcu.estimated_print_time(
                     self.reactor.monotonic())
@@ -1657,6 +1688,7 @@ class BufferFeeder:
                             "ex-P7-76 D, scope reduced)",
                             self._last_move_end_time - mcu_now)
                         self._last_move_end_time = mcu_now
+                    _lme_before_anchor = self._last_move_end_time
                     try:
                         if _p778_override:
                             # P7-78v2: aktiver Print hat typisch weit-
@@ -1693,6 +1725,15 @@ class BufferFeeder:
                             # Anchor enabled normal.
                             self.sync._submit_anchor_move()
                         self._last_idle_anchor_time = mcu_now
+                        if (self._needs_overflow_prime
+                                and self._last_move_end_time
+                                    != _lme_before_anchor):
+                            # Anchor real gequeued (lme bewegt) — die
+                            # pendende Overflow-Prime ist damit
+                            # erledigt; Flag konsumieren, sonst bleibt
+                            # der Flush-Pfad in AUTO auf dem Prime-
+                            # Handler haengen (F3, Review 2026-07-09).
+                            self._needs_overflow_prime = False
                         # Motor stromlos schalten sobald der Anchor-Move
                         # gedrained ist (IDLE-Semantik: stopped AND
                         # disabled). In IDLE immer.
@@ -1847,6 +1888,14 @@ class BufferFeeder:
         """Hard-safety aborts route through _trigger_jam: phase
         commands raise via WAIT_IDLE, recovery requires explicit
         BUFFER_CLEAR_JAM / BUFFER_AUTO_OFF / STOP_BUFFER_FILL."""
+        if self._feed_deadline_time is not None and not self._continuous_feed:
+            # Stale Deadline einer beendeten Session (Review 2026-07-09):
+            # Kommando-Einstiege (PHASE1/UNLOAD_PHASE3/BUFFER_FEED
+            # DISTANCE/PREP_BASELINE) setzen nur _continuous_feed=False —
+            # die alte max_feed_time-Deadline wuerde sonst mitten im
+            # neuen, legitimen Workflow einen falschen SAFETY_TIMEOUT-
+            # JAM feuern.
+            self._feed_deadline_time = None
         if (self._feed_deadline_time is not None
                 and eventtime >= self._feed_deadline_time):
             self._feed_deadline_time = None
@@ -1979,14 +2028,19 @@ class BufferFeeder:
         if self._pending_remaining_mm <= 0:
             return
         if self._abort_signalled():
-            # Codex-Verify Q6b: HALL1-Early-Exit muss auch den Sub-Chunk-Cap
-            # zuruecksetzen — sonst leakt der cap (e.g. interrupt_chunk_mm=9)
-            # auf den naechsten unrelated _submit_move-Call. T8's
-            # target_speed<=0-Branch macht beides; dieser Pfad muss es auch.
-            self._pending_remaining_mm = 0.0
-            self._pending_submit_chunk_cap = None
-            self._park_full_active = False
-            return
+            # Retract-Streams (Retract-Burst/UNLOAD-Spillover) sind die
+            # OVERFLOW-/JAM-Recovery-Bewegung — nur HALT nullt sie
+            # (analog _wait_for_move_done direction=-1). Forward-Streams
+            # brechen weiterhin auf jedes Abort-Signal ab.
+            if self._pending_direction > 0 or self._halt_requested:
+                # Codex-Verify Q6b: HALL1-Early-Exit muss auch den Sub-Chunk-Cap
+                # zuruecksetzen — sonst leakt der cap (e.g. interrupt_chunk_mm=9)
+                # auf den naechsten unrelated _submit_move-Call. T8's
+                # target_speed<=0-Branch macht beides; dieser Pfad muss es auch.
+                self._pending_remaining_mm = 0.0
+                self._pending_submit_chunk_cap = None
+                self._park_full_active = False
+                return
         # HALL2 (buffer full) MUST abort a forward streaming
         # sequence. _abort_signalled covers HALL1 (overflow) but not
         # the bang-bang stop-on-full case. Without this clamp the
@@ -2032,8 +2086,12 @@ class BufferFeeder:
                 # HALL1 active mid-chunk — beende Pending-Stream.
                 # (_abort_signalled greift bereits weiter oben, aber
                 # diese Branch deckt jeden anderen target=0-Pfad ab.)
+                # Session-Latch mit raeumen — analog zum HALL2-Branch
+                # oben (Review 2026-07-09 F4: stale _continuous_feed
+                # → falscher SUPPLY-JAM + Watchdog-Block).
                 self._pending_remaining_mm = 0.0
                 self._pending_submit_chunk_cap = None
+                self._continuous_feed = False
                 return
             sub_chunk_speed = modulated
             self._continuous_feed_speed = sub_chunk_speed
@@ -2197,7 +2255,12 @@ class BufferFeeder:
             self._arm_high_flow_carry(eventtime, 'hall3_demand')
             if extruder_vel < floor - floor_epsilon:
                 self._modulator_feeding = True
-                return floor
+                # feed_speed-Clamp wie in allen Nachbar-Pfaden (Review
+                # 2026-07-09): min_feed_floor > feed_speed ist per
+                # Config moeglich (kein Cross-Check, BUFFER_SET
+                # ungeprueft) — der Floor darf den globalen Speed-Cap
+                # nicht ueberfahren.
+                return min(floor, self.feed_speed)
             self._modulator_feeding = True
             return min(max(extruder_vel * self.hall3_demand_gain, floor),
                        self.feed_speed)
@@ -2416,6 +2479,17 @@ class BufferFeeder:
                     "(hall1=%s ready=%s)",
                     self.hall_overflow,
                     self.velocity_tracker.is_ready())
+            if self._continuous_feed:
+                # Demand-0 beendet die Feed-Session (Review 2026-07-09
+                # F4). Das stale Flag liess (a) _jam_tick einen
+                # stehenden Feeder als "running" werten → falscher
+                # SUPPLY-JAM bei M109/Heat-Soak, und (b) blockte das
+                # Watchdog-Anchor-Gate dauerhaft nach der ersten
+                # Session (Issue-#29-Fenster wieder offen). Der
+                # naechste Demand>0-Flush re-armt Session-Counter und
+                # Flag regulaer.
+                self._continuous_feed = False
+                self._continuous_feed_direction = 0
             return
 
         if eventtime is None:
@@ -3068,6 +3142,19 @@ class BufferFeeder:
                 drop_enable_floor = True
         en = 0.0 if drop_enable_floor else self._last_enable_schedule_time
 
+        # Floor auf das Ende des noch spielenden Chunks. _halt_motion
+        # rollt _last_move_end_time einseitig auf mcu_now zurueck,
+        # laesst _current_move aber intakt — die Steps bis end_time
+        # sind bereits generiert (last_step_clock steht dort). Ein
+        # Submit, der frueher anchort, springt hinter last_step_clock
+        # → negativer Interval → "Invalid sequence" MCU-Shutdown
+        # (HALL1-Bounce-Szenario, Logikfehler-Review 2026-07-09 F1).
+        current_end_floor = 0.0
+        if self._current_move is not None:
+            _ce = self._current_move.get('end_time', 0.0)
+            if _ce > mcu_now:
+                current_end_floor = _ce
+
         if forced_t0 is not None:
             # Clamp far-future forced_t0. motion_queuing.flush_all_steps
             # can hand a step_gen_time = need_step_gen_time (toolhead
@@ -3081,7 +3168,8 @@ class BufferFeeder:
                     forced_t0 - mcu_now)
                 forced_t0 = mcu_now + self.lead_time
             return AnchorPlan(
-                t0=max(forced_t0, self._last_move_end_time, en, mcu_now),
+                t0=max(forced_t0, self._last_move_end_time, en, mcu_now,
+                       current_end_floor),
                 enable_floor=en,
             )
 
@@ -3095,7 +3183,8 @@ class BufferFeeder:
         # First chunk / gap recovery: anchor on toolhead print_time.
         toolhead = self.printer.lookup_object('toolhead')
         th_time = toolhead.get_last_move_time()
-        t0 = max(th_time + self.lead_time, self._last_move_end_time, en)
+        t0 = max(th_time + self.lead_time, self._last_move_end_time, en,
+                 current_end_floor)
         if t0 > mcu_now + MAX_T0_LOOKAHEAD_S:
             # th_time is far ahead (active print with filled toolhead
             # queue). Clamping to mcu_now would land BEFORE
@@ -3609,7 +3698,15 @@ class BufferFeeder:
         die Stable-Logik je laufen kann. JAM bleibt absolut.
         """
         while self._move_in_flight() or self._pending_remaining_mm > 0:
-            if self._abort_signalled():
+            if direction < 0:
+                # Retract ist Recovery: OVERFLOW/JAM beenden den Wait
+                # nicht (Docstring-Kontrakt oben) — nur HALT bricht ab.
+                # Sonst wird jede per-Chunk-Wait in UNLOAD_PHASE3 bei
+                # aktivem HALL1/JAM zum No-op und die Schleife queued
+                # die volle MAX_DISTANCE ungebremst in den Trapq.
+                if self._halt_requested:
+                    break
+            elif self._abort_signalled():
                 break
             self.reactor.pause(self.reactor.monotonic() + 0.05)
         if gcmd is not None:
@@ -3845,7 +3942,12 @@ class BufferFeeder:
             self._wait_for_move_done_resume_on_overflow(gcmd)
         except Exception:
             # Release the phase state on error so it doesn't stay sticky.
-            self._set_state(STATE_IDLE)
+            # Nur den EIGENEN Phase-State loesen — JAM/OVERFLOW, die ein
+            # Trigger mid-wait gesetzt hat, nicht mit IDLE stampfen
+            # (Review 2026-07-09: state=IDLE + _jam_active=True sperrte
+            # BUFFER_CLEAR_JAM aus).
+            if self._state == STATE_LOADING_PULL:
+                self._set_state(STATE_IDLE)
             raise
         self._set_state(STATE_IDLE)
 
@@ -3928,6 +4030,13 @@ class BufferFeeder:
             self._overflow_resume_dir = 0
             self._overflow_resume_spd = 0.0
             self._overflow_interrupted_follow = False
+            # Stale Overlay-Flag mit raeumen (Review 2026-07-09): ein
+            # aus AUTO geerbtes _fault_overflow=True liesse die
+            # while-Schleife unten nach 0 Iterationen mit Silent-
+            # Success terminieren, waehrend der Tick asynchron im
+            # Hintergrund weiterarbeitet. OVERFLOW_OK=1 toleriert
+            # HALL1 explizit — der Stable-Exit uebernimmt.
+            self._fault_overflow = False
         logging.info("buffer_feeder: P3 start threshold=%.1fs overflow_ok=%s "
                      "chunk=%.1f hall1=%s hall2=%s state=%s",
                      stable_timeout, overflow_ok, chunk_distance,
@@ -3943,8 +4052,24 @@ class BufferFeeder:
         while (self._state == STATE_LOADING_PUSH
                and not (self.use_overflow_overlay and self._fault_overflow)):
             self.reactor.pause(self.reactor.monotonic() + 0.1)
-        # Postcheck: JAM bleibt absolut. Bei overflow_ok haben wir den
-        # HALL1-Stable-Exit selbst gemacht — sonst alte Lockout-Logik.
+        # Overlay-Abort: der Loop terminierte via _fault_overflow bei
+        # unveraendertem _state=LOAD_PHASE_3. Vor dem Raise in den
+        # Legacy-Lockout-State konvertieren — sonst bleibt der Tick-
+        # getriebene Phase-State ohne Kommando-Owner zurueck und
+        # _load_phase3_tick fuettert nach HALL1-Fall autonom weiter
+        # (Zombie-Feed, Review 2026-07-09).
+        if (self.use_overflow_overlay and self._fault_overflow
+                and self._state == STATE_LOADING_PUSH):
+            self._set_state(STATE_OVERFLOW)
+        # Postcheck: HALT und JAM bleiben absolut — auch bei
+        # overflow_ok (Review 2026-07-09: BUFFER_HALT wurde im
+        # OVERFLOW_OK=1-Pfad verschluckt, das LOAD-Macro lief weiter).
+        # Bei overflow_ok haben wir den HALL1-Stable-Exit selbst
+        # gemacht — sonst alte Lockout-Logik.
+        if self._halt_requested:
+            self._halt_requested = False
+            raise self._cmd_error(
+                "BufferFeeder: HALT requested — aborting workflow")
         self._raise_if_jam()
         if not overflow_ok:
             self._raise_if_locked_out(gcmd)
@@ -3956,6 +4081,25 @@ class BufferFeeder:
 
     cmd_BUFFER_UNLOAD_FILAMENT_help = "UNLOAD_FILAMENT als Python-Workflow mit garantiertem Cleanup"
     def cmd_BUFFER_UNLOAD_FILAMENT(self, gcmd):
+        # Entry-Guard (Review 2026-07-09): vorher ohne jeden State-
+        # Check — ein UNLOAD waehrend INITIAL_GRIP/LOAD swappte den
+        # Trapq mitten im Grip und das nested BUFFER_UNLOAD_PHASE3
+        # raiste erst NACH Tip-Forming + Final-Retract (Filamentende
+        # undefiniert im Bowden). OVERFLOW/JAM bleiben erlaubt —
+        # UNLOAD ist deren Recovery-Pfad.
+        # Codex-Review 2026-07-13: waehrend der Boot-Grace ist das
+        # Sensorbild nicht settled und die Safety-Logik suspendiert —
+        # keine Sync-/Extruder-/Buffer-Moves starten.
+        if not self._startup_grace_done:
+            raise self._cmd_error(
+                "BufferFeeder: startup grace not finished — sensors "
+                "settling, retry in a moment")
+        # STATE_INIT (nach Grace nur transient) ist kein Busy-State —
+        # der Guard zielt auf GRIP/LOAD/MANUAL.
+        self._check_phase_entry('UNLOAD_FILAMENT', {
+            STATE_INIT, STATE_IDLE, STATE_AUTO, STATE_RUNOUT,
+            STATE_UNLOADING, STATE_OVERFLOW, STATE_JAM,
+        })
         tip_cycles = gcmd.get_int('TIP_CYCLES', 6, minval=0)
         tip_push = gcmd.get_float('TIP_PUSH', 8.0, above=0.)
         tip_pull = gcmd.get_float('TIP_PULL', 14.0, above=0.)
@@ -4097,14 +4241,19 @@ class BufferFeeder:
         else:
             overshoot = True
         self._disable_stepper()
-        self._set_state(STATE_IDLE)
         if overshoot:
             # Explicit failure — do not let UNLOAD_FILAMENT print
             # "UNLOAD abgeschlossen" after an unsuccessful retract.
+            # JAM/OVERFLOW aus einem Mid-Loop-Trigger nicht mit IDLE
+            # stampfen (Review 2026-07-09) — nur den eigenen
+            # Phase-State loesen.
+            if self._state == STATE_UNLOADING:
+                self._set_state(STATE_IDLE)
             raise self._cmd_error(
                 "UNLOAD Phase 3: MAX_DISTANCE %dmm reached without "
                 "entrance clear — check buffer / filament path"
                 % int(max_distance))
+        self._set_state(STATE_IDLE)
         # UNLOAD ist semantisch der JAM-/OVERFLOW-Recovery-Pfad —
         # bei erfolgreichem Exit auch sticky Lockout-Flags clearen.
         # Sonst raised der naechste LOAD_FILAMENT mit "JAM active" weil
@@ -4698,6 +4847,11 @@ class BufferFeeder:
             'benchmark_mode_active':    self._benchmark_mode_active(eventtime),
             'benchmark_mode_left_s':    self._benchmark_mode_remaining(eventtime),
             'jam_active':               self._jam_active,
+            # Snapshot-faehige Tuning-Werte fuer Macros (Review
+            # 2026-07-09): BUFFER_BASELINE_RUN restauriert jam_action/
+            # hall3_demand_gain nach dem Run auf die Vorher-Werte.
+            'jam_action':               self.jam_action,
+            'hall3_demand_gain':        self.hall3_demand_gain,
             'fault_overflow':           self._fault_overflow,
             'overflow_overlay_enabled': self.use_overflow_overlay,
             'post_load_overflow_grace': self._post_load_overflow_grace,

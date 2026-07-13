@@ -32,8 +32,13 @@ BUSY_PHASE_STATES = {STATE_INITIAL_GRIP,
 # to run. In any other state, a stale _continuous_feed must NOT
 # cause new chunks to be submitted — otherwise a previously-active
 # bang-bang or manual dauerfeed leaks into subsequent phases.
+# STATE_LOADING_PUSH ist bewusst NICHT enthalten: _load_phase3_tick
+# besitzt die Chunk-Submission dort exklusiv (inkl. HALL1-Hold und
+# MAX_DISTANCE-Buchhaltung). Die generische Pump wuerde den HALL1-
+# Hold umgehen (Hall1Context.SUBMIT_MOVE-Bypass bei OVERFLOW_OK=1)
+# und ihre Chunks zaehlten nicht in _load_phase3_distance.
 CONTINUOUS_FEED_STATES = {STATE_AUTO, STATE_MANUAL_FEED,
-                          STATE_MANUAL_RETRACT, STATE_LOADING_PUSH,
+                          STATE_MANUAL_RETRACT,
                           STATE_INITIAL_GRIP}
 
 # States where jam-detection watches for HALL dwell anomalies.

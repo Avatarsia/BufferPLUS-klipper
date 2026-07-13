@@ -51,7 +51,12 @@ class CleanupCoordinator:
 
     def clear_jam(self):
         owner = self.owner
-        if owner._state != STATE_JAM:
+        # Auch latched _jam_active ohne STATE_JAM akzeptieren (Review
+        # 2026-07-09): Abbruch-Pfade (PHASE1-except, UNLOAD-Overshoot,
+        # OVERFLOW-Overwrite) koennen state=IDLE bei gesetztem Latch
+        # hinterlassen — der dokumentierte Recovery-Befehl muss den
+        # Latch trotzdem loesen koennen.
+        if owner._state != STATE_JAM and not owner._jam_active:
             raise owner._cmd_error("Not in JAM state (state=%s)" % owner._state)
         owner._clear_recovery_flags()
         owner._prepare_post_jam_recovery()
