@@ -1414,7 +1414,21 @@ class BufferFeeder:
                     and self._hall1_active_since is not None):
                 persist_duration = (
                     self.reactor.monotonic() - self._hall1_active_since)
-                if persist_duration >= self.hall1_persist_timeout:
+                # Kontext-Matrix als ZUSAETZLICHE Eskalations-Bedingung
+                # (Hardware-Crash 2026-07-13, Codex-verifiziert): seit
+                # f7059e0 wird der Timestamp auch in Bypass-Kontexten
+                # armiert (Physik-Tracking). Die Eskalation selbst muss
+                # synced/_post_load_overflow_grace/Overlay respektieren
+                # — _enter_overflow waehrend SYNC schedult ein motor_-
+                # disable in fremde in-flight Extruder-Steps ("Timer
+                # too close", queue_digital_out -0.785s im MCU-Dump).
+                # Timestamp bleibt armiert: nach UNSYNC (ohne Grace)
+                # eskaliert derselbe Persist sofort — dann ist der
+                # Stepper zurueck auf der eigenen Trapq, Disable safe.
+                # Kein Early-Return im Suppress-Fall: Safety-Timeouts
+                # und Deferred-Disable-Wartung des Ticks laufen weiter.
+                if (persist_duration >= self.hall1_persist_timeout
+                        and self._is_hall1_active(Hall1Context.MAIN_TICK)):
                     if self.buffer_debug_metrics:
                         logging.info(
                             "buffer_feeder: HALL1-Persist %.2fs >= "
@@ -1449,8 +1463,13 @@ class BufferFeeder:
             # Deferred disable: motor_disable must not be called while
             # steps are unprocessed in the trapq (step-gen fires
             # motor_enable with a past time via add_active_callback →
-            # Timer too close).
-            if self._pending_disable and not self._move_in_flight():
+            # Timer too close). Waehrend Sync grundsaetzlich deferren —
+            # _move_in_flight() sieht nur own-trapq-Moves, nicht die
+            # in-flight Extruder-Steps (Defense-in-depth, Codex
+            # 2026-07-13); nach dem Unsync feuert das Pending regulaer.
+            if (self._pending_disable
+                    and self._stepper_synced_to is None
+                    and not self._move_in_flight()):
                 self._pending_disable = False
                 self._disable_stepper()
 
@@ -2848,6 +2867,14 @@ class BufferFeeder:
         raise 'Timer too close'.  Deferring until flight=False lets the
         step-generator finish before motor_disable touches the callbacks.
         """
+        if self._stepper_synced_to is not None:
+            # Defense-in-depth (Codex 2026-07-13): der Stepper haengt
+            # an der Extruder-Trapq — der Deferral-Guard unten sieht
+            # nur own-trapq-Moves (_current_move) und wuerde ein
+            # motor_disable mitten in fremde in-flight Steps feuern
+            # ("Timer too close"). Kein Disable waehrend Sync; die
+            # Unsync-/Cleanup-Pfade disablen danach regulaer.
+            return
         if self._move_in_flight():
             self._pending_disable = True
         else:
