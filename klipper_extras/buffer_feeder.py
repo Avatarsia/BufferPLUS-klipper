@@ -1547,7 +1547,10 @@ class BufferFeeder:
                         _blocking.append("_continuous_feed")
                     if self.hall_empty:
                         _blocking.append("hall_empty")
-                    if self.hall_full:
+                    if self.hall_full and not self.idle_motor_disable:
+                        # Bei Weg 2 blockt hall_full nicht mehr (siehe
+                        # hall_full_block unten) — nicht als Blocker
+                        # loggen.
                         _blocking.append("hall_full")
                     # separate watermark for log-rate (not
                     # _last_idle_anchor_time — that is only updated when
@@ -1668,6 +1671,21 @@ class BufferFeeder:
 
             hall_empty_block = (self.hall_empty
                                 and not self.use_flush_callback_bang_bang)
+            # hall_full blockt nur noch Weg-1-Anchors (enabled: ~18mm/h
+            # Drift Richtung HALL1, Codex-Verify) und den P7-78-Print-
+            # Override (submittet ebenfalls enabled). Bei Weg 2
+            # (idle_motor_disable) laeuft der Anchor enable-los — der
+            # Treiber ignoriert die Pulse, kein Drift — und NUR ueber
+            # diesen Anchor erreicht AUTO den Idle-Disable. Vorher
+            # blieb der Stepper nach LOAD (Buffer voll -> hall_full)
+            # dauerhaft bestromt (User-Report 2026-07-13: Motor
+            # kochend heiss im Standby). Der allererste Weg-2-Anchor
+            # kann den noch enabled Motor einmalig 0.05mm bewegen —
+            # danach ist er disabled und alle Folge-Anchors sind
+            # bewegungslos.
+            hall_full_block = (self.hall_full
+                               and (not self.idle_motor_disable
+                                    or _p778_override))
             if (self._state in (STATE_IDLE, STATE_AUTO)
                     and not self._stepper_synced_to
                     and not self._pending_disable
@@ -1675,7 +1693,7 @@ class BufferFeeder:
                     and self._pending_remaining_mm == 0.0
                     and not self._continuous_feed
                     and not hall_empty_block
-                    and not self.hall_full
+                    and not hall_full_block
                     and not _print_active):  # P7-77 A + P7-78 Override
                 # _needs_overflow_prime blockt den Watchdog NICHT mehr
                 # (Review 2026-07-09 F3): das Flag leakte in IDLE (kein
