@@ -1706,7 +1706,32 @@ class BufferFeeder:
                     self.reactor.monotonic())
                 gap_moves = mcu_now - self._last_move_end_time
                 gap_anchors = mcu_now - self._last_idle_anchor_time
-                if (gap_moves > self.idle_anchor_gap
+                # Silent-Modus (Option 4, Quellcode-Recherche + Codex
+                # 2026-07-14): KEINE Watchdog-Anchor-Moves — auch nicht
+                # der P7-78-Override. Ein idle Stepper mit leerer
+                # stepcompress-Queue kann beim Background-Flush nicht
+                # fehlschlagen, und der erste Step nach beliebig langer
+                # Stille laeuft in Mainline automatisch durch den
+                # Far-Path (queue_append_far, seit 2017). Erhalten
+                # bleibt nur der Idle-Motor-Disable als One-shot
+                # (Latch, re-armed in _enable_stepper — sonst wuerde
+                # jeder Tick _last_enable_schedule_time fortschieben).
+                if (self.idle_anchor_mode == 'silent'
+                        and gap_moves > self.idle_anchor_gap
+                        and not self._silent_idle_disabled
+                        and (self._state == STATE_IDLE
+                             or (self._state == STATE_AUTO
+                                 and not _p778_override
+                                 and _print_state_known
+                                 and self.idle_motor_disable))):
+                    self._silent_idle_disabled = True
+                    self._schedule_stepper_disable()
+                    logging.info(
+                        "buffer_feeder: silent idle-disable "
+                        "(state=%s gap=%.1fs, no anchor move)",
+                        self._state.lower(), gap_moves)
+                if (self.idle_anchor_mode != 'silent'
+                        and gap_moves > self.idle_anchor_gap
                         and gap_anchors > self.idle_anchor_gap):
                     # lme-clamp NUR direkt vor dem Anchor-
                     # Submit, nicht bei jedem Tick. D rollte lme
@@ -2910,6 +2935,10 @@ class BufferFeeder:
         if self._stepper_enable is None:
             return
         self._pending_disable = False   # cancel any deferred disable
+        # Neue Aktivitaet: Silent-Idle-Disable-Latch re-armen, damit
+        # die naechste Ruhephase wieder genau einmal disabled
+        # (idle_anchor_mode='silent').
+        self._silent_idle_disabled = False
         try:
             pt = self._schedule_time_for_enable_toggle()
             self._stepper_enable.motor_enable(pt)
@@ -3088,6 +3117,12 @@ class BufferFeeder:
         if not streaming and not skip_enable:
             self._enable_stepper()
 
+        # mcu_now FRISCH lesen (Codex 2026-07-14): der Reprime kann via
+        # toolhead.flush_step_generation() bei Host-Last 100ms+
+        # blockieren — ein vor dem Flush gelesenes mcu_now waere als
+        # t0-Floor bereits abgelaufen (Timer too close).
+        mcu_now = mcu.estimated_print_time(self.reactor.monotonic())
+
         t0 = self._compute_t0_anchor(
             forced_t0, mcu_now, was_primed, need_reprime, streaming)
         if t0 is None:
@@ -3238,6 +3273,14 @@ class BufferFeeder:
         th_time = toolhead.get_last_move_time()
         t0 = max(th_time + self.lead_time, self._last_move_end_time, en,
                  current_end_floor)
+        if self.idle_anchor_mode == 'silent':
+            # Defense-in-depth im Silent-Modus (Codex 2026-07-14): ohne
+            # periodische Anchors koennen th_time/lme nach langer
+            # Stille beliebig stale sein; mcu_now ist frisch (nach
+            # Reprime/Enable neu gelesen). Ein past-t0 waere die
+            # "Invalid sequence"-Klasse (Step vor last_step_clock).
+            # Der P7-77-B-Far-Future-Skip unten bleibt unveraendert.
+            t0 = max(t0, mcu_now + self.lead_time)
         if t0 > mcu_now + MAX_T0_LOOKAHEAD_S:
             # th_time is far ahead (active print with filled toolhead
             # queue). Clamping to mcu_now would land BEFORE

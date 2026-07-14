@@ -1,6 +1,23 @@
 from dataclasses import dataclass
 
 
+def _validated_idle_anchor_mode(config):
+    """'move' (Default): periodischer 0.05mm-Watchdog-Anchor
+    (historisch, hardware-erprobt). 'silent': KEINE Watchdog-Anchor-
+    Moves — Mainline-Recherche 2026-07-14: ein idle Stepper mit leerer
+    stepcompress-Queue kann beim Background-Flush nicht crashen, und
+    der erste Step nach beliebig langer Stille laeuft automatisch
+    durch den Far-Path (queue_append_far, Klipper seit 2017). Der
+    Idle-Motor-Disable bleibt im Silent-Modus als One-shot erhalten."""
+    mode = config.get('idle_anchor_mode', 'move')
+    mode = str(mode).strip().lower()
+    if mode not in ('move', 'silent'):
+        raise config.error(
+            "buffer_feeder: idle_anchor_mode must be 'move' or "
+            "'silent' (got %r)" % (mode,))
+    return mode
+
+
 @dataclass
 class BufferConfigValues:
     feed_speed: float
@@ -43,6 +60,8 @@ class BufferConfigValues:
     feed_hysteresis_stop_factor: float
     idle_anchor_gap: float
     idle_anchor_speed: float
+    # 'move' | 'silent' — siehe _validated_idle_anchor_mode.
+    idle_anchor_mode: str
     idle_motor_disable: bool
     park_full_on_print_end: bool
     park_full_max_mm: float
@@ -144,6 +163,14 @@ class BufferConfigValues:
             # bleiben bei 10 mm/s (User-Request 2026-07-14).
             idle_anchor_speed=config.getfloat(
                 'idle_anchor_speed', 2.0, above=0.),
+            # 'move' (Default): periodischer 0.05mm-Anchor (historisch,
+            # hardware-erprobt). 'silent': KEINE Watchdog-Anchor-Moves —
+            # Mainline-Recherche 2026-07-14: idle Stepper mit leerer
+            # Queue kann beim Flush nicht crashen, und der erste Step
+            # nach Stille laeuft automatisch durch den Far-Path
+            # (queue_append_far, seit 2017). Idle-Disable bleibt als
+            # One-shot erhalten.
+            idle_anchor_mode=_validated_idle_anchor_mode(config),
             idle_motor_disable=config.getboolean(
                 'idle_motor_disable', False),
             park_full_on_print_end=config.getboolean(

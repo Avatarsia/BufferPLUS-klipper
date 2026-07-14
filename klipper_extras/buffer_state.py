@@ -55,6 +55,11 @@ class BufferRuntimeState:
     # Drucke melden print_stats.state='standby' — ohne diesen Stempel
     # feuerte der Watchdog forced_t0=None-Anchors mid-print (P7-77-A).
     _last_extruder_motion_time: float = -1e9
+    # One-shot-Latch fuer den Idle-Disable im Silent-Modus
+    # (idle_anchor_mode='silent'): ohne Latch wuerde jeder Main-Tick
+    # _disable_stepper erneut rufen und _last_enable_schedule_time
+    # fortschieben. Re-armed in _enable_stepper.
+    _silent_idle_disabled: bool = False
     _hall1_active_since: Optional[float] = None
     _last_metrics_log_time: float = 0.0
     _modulator_feeding: bool = False
