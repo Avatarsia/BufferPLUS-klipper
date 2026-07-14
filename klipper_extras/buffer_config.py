@@ -42,6 +42,7 @@ class BufferConfigValues:
     high_flow_mm3s_threshold: float
     feed_hysteresis_stop_factor: float
     idle_anchor_gap: float
+    idle_anchor_speed: float
     idle_motor_disable: bool
     park_full_on_print_end: bool
     park_full_max_mm: float
@@ -138,6 +139,11 @@ class BufferConfigValues:
             feed_hysteresis_stop_factor=config.getfloat(
                 'feed_hysteresis_stop_factor', 0.7, minval=0.1, maxval=1.0),
             idle_anchor_gap=config.getfloat('idle_anchor_gap', 10.0, above=0.),
+            # Speed NUR fuer die Idle-Watchdog-Anchors (IDLE/quiescent
+            # AUTO) — leiser Mikro-Move; Boot-/Sync-/P7-78-Anchors
+            # bleiben bei 10 mm/s (User-Request 2026-07-14).
+            idle_anchor_speed=config.getfloat(
+                'idle_anchor_speed', 2.0, above=0.),
             idle_motor_disable=config.getboolean(
                 'idle_motor_disable', False),
             park_full_on_print_end=config.getboolean(

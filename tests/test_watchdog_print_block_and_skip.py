@@ -95,7 +95,7 @@ def count_anchor_calls(monkeypatch, feeder):
     calls = []
     original = feeder.sync._submit_anchor_move
 
-    def _spy():
+    def _spy(**kw):  # kwargs-tolerant (idle_anchor_speed, skip_enable, forced_t0)
         mcu_now = feeder.stepper.get_mcu().estimated_print_time(
             feeder.reactor.monotonic())
         calls.append({
