@@ -1752,15 +1752,23 @@ class BufferFeeder:
                                 forced_t0=_p778_forced_t0)
                         elif self.idle_motor_disable:
                             # Weg 2: enable-loser Idle-Anchor — Motor
-                            # bleibt stromlos/lautlos, last_step_clock
-                            # wird trotzdem aufgefrischt (Schritte werden
-                            # gequeued, der deaktivierte Treiber ignoriert
-                            # die Pulse).
-                            self.sync._submit_anchor_move(skip_enable=True)
+                            # bleibt stromlos, last_step_clock wird
+                            # trotzdem aufgefrischt. Hardware-Realitaet
+                            # (User 2026-07-14): die gequeueten Steps
+                            # re-enablen den Motor via add_active_-
+                            # callback kurz (Enable-Klack + Mikro-Move,
+                            # dann wieder Disable). idle_anchor_speed
+                            # (Default 2 mm/s) macht den Move-Anteil
+                            # leise; nur die Idle-Watchdog-Anchors —
+                            # Boot/Sync/P7-78 bleiben bei 10 mm/s.
+                            self.sync._submit_anchor_move(
+                                skip_enable=True,
+                                speed=self.idle_anchor_speed)
                         else:
                             # Weg 1 (Default): Motor bleibt in AUTO an,
                             # Anchor enabled normal.
-                            self.sync._submit_anchor_move()
+                            self.sync._submit_anchor_move(
+                                speed=self.idle_anchor_speed)
                         self._last_idle_anchor_time = mcu_now
                         if (self._needs_overflow_prime
                                 and self._last_move_end_time

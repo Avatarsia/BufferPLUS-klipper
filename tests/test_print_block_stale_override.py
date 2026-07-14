@@ -484,10 +484,14 @@ def test_p778v2_non_override_path_unchanged_no_forced_t0(monkeypatch):
     assert len(captured_kwargs) == 1, (
         "P7-78v2 regression: standby-Pfad muss Anchor genau einmal "
         "rufen. Got %d." % len(captured_kwargs))
-    assert captured_kwargs[0] == {}, (
+    # Kontrakt-Kern: KEIN forced_t0 auf dem Default-Pfad. Seit
+    # idle_anchor_speed (2026-07-14) uebergeben die Idle-Watchdog-
+    # Anchors zusaetzlich speed= — das ist gewollt und kein
+    # forced_t0-Leak.
+    assert 'forced_t0' not in captured_kwargs[0], (
         "P7-78v2 regression: standby-Pfad darf KEIN forced_t0 kwarg "
-        "uebergeben (kein API-Breaking-Change). Got %r."
-        % captured_kwargs[0])
+        "uebergeben. Got %r." % captured_kwargs[0])
+    assert captured_kwargs[0].get('speed') == feeder.idle_anchor_speed
 
 
 def test_p778v2_override_path_passes_forced_t0_kwarg(monkeypatch):

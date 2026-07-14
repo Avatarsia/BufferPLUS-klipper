@@ -45,7 +45,8 @@ class SyncCoordinator:
         self.trapq = self.motion_queuing.allocate_trapq()
         self.trapq_append = self.motion_queuing.lookup_trapq_append()
 
-    def _submit_anchor_move(self, *, forced_t0=None, skip_enable=False):
+    def _submit_anchor_move(self, *, forced_t0=None, skip_enable=False,
+                            speed=10.0):
         """Submit a small anchor-step in the safe direction. Returns
         the direction sign so the caller can format its respond message
         (boot anchor vs. pre-sync REPRIME use different wording but the
@@ -70,7 +71,7 @@ class SyncCoordinator:
         if not skip_enable:
             owner._enable_stepper()
         anchor_dir = -1.0 if owner.hall_overflow else 1.0
-        owner._submit_move(anchor_dir * ANCHOR_NUDGE_MM, 10.0,
+        owner._submit_move(anchor_dir * ANCHOR_NUDGE_MM, speed,
                            forced_t0=forced_t0, skip_enable=skip_enable)
         owner._wait_for_move_done(direction=int(anchor_dir))
         return anchor_dir
