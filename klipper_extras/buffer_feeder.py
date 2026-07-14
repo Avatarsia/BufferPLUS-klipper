@@ -896,6 +896,24 @@ class BufferFeeder:
                 'paused', eventtime, reason='print_stats_paused')
 
         if ps_state != 'printing':
+            # Phase 'manual' (Review/User-Request 2026-07-14): aktive
+            # Extruder-Vorwaertsbewegung ausserhalb eines Drucks
+            # (Mainsail-Extrude, ps='standby'/'complete') erlaubt das
+            # Flush-Feeding — sonst laeuft der Buffer leer und der
+            # Extruder blockiert nach ~30mm Arm-Weg. Retracts triggern
+            # nicht (velocity_tracker clampt sie). Aktiver Critical-
+            # Action-Guard (SYNC/UNSYNC/JAM-Exit-Fenster) blockt; der
+            # Guard-Reset unten laeuft in diesem Fall bewusst NICHT.
+            if (self.feed_on_manual_extrusion
+                    and active_extrusion
+                    and not self._bang_bang_suspended):
+                if self._critical_action_guard_until > eventtime:
+                    return self._set_print_phase(
+                        'guarded', eventtime,
+                        reason=self._critical_action_guard_reason
+                        or 'critical_action')
+                return self._set_print_phase(
+                    'manual', eventtime, reason='manual_extrusion')
             self._print_extrusion_seen = False
             self._critical_action_guard_until = 0.0
             self._critical_action_guard_reason = ""
@@ -920,7 +938,7 @@ class BufferFeeder:
 
     def _auto_submit_permission(self, eventtime=None):
         phase = self._refresh_print_phase(eventtime)
-        return phase == 'active', phase
+        return phase in ('active', 'manual'), phase
 
     def _on_idle_ready(self, *args):
         # idle_timeout:ready fires for BOTH a manual PAUSE during a

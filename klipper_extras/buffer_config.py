@@ -63,6 +63,7 @@ class BufferConfigValues:
     # 'move' | 'silent' — siehe _validated_idle_anchor_mode.
     idle_anchor_mode: str
     idle_motor_disable: bool
+    feed_on_manual_extrusion: bool
     park_full_on_print_end: bool
     park_full_max_mm: float
     jam_detection_enabled: bool
@@ -173,6 +174,12 @@ class BufferConfigValues:
             idle_anchor_mode=_validated_idle_anchor_mode(config),
             idle_motor_disable=config.getboolean(
                 'idle_motor_disable', False),
+            # AUTO-Feed auch bei manueller Extrusion ausserhalb eines
+            # Drucks (Mainsail-Extrude-Button, state='standby') — sonst
+            # laeuft der Buffer leer und blockiert alle ~30mm
+            # (User-Request 2026-07-14).
+            feed_on_manual_extrusion=config.getboolean(
+                'feed_on_manual_extrusion', True),
             park_full_on_print_end=config.getboolean(
                 'park_full_on_print_end', True),
             park_full_max_mm=config.getfloat(
