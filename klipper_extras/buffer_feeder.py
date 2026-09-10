@@ -1679,13 +1679,60 @@ class BufferFeeder:
                 _flush_silence = (
                     _mcu_now_p778 - self._last_mcu_flush_time)
                 if _flush_silence > self.idle_anchor_gap:
-                    logging.info(
-                        "buffer_feeder: print-block stale override "
-                        "(flush silent for %.1fs > %.1fs threshold, "
-                        "P7-78)",
-                        _flush_silence, self.idle_anchor_gap)
+                    # P7-78-Logflut (Issue #59, 2026-09-10): Die Zeile
+                    # stand hier ungedrosselt und feuerte mit der
+                    # Tick-Rate (MAIN_TICK_INTERVAL 0.02 = 50 Hz).
+                    # Im Testdruck 2026-09-09: 124678 von 223677
+                    # Logzeilen. Wurzel: der Zustand laesst sich nur
+                    # durch einen echten Flush-Callback aufloesen
+                    # (_on_mcu_flush ist der einzige Schreiber von
+                    # _last_mcu_flush_time), im Silent-Modus ist
+                    # darunter aber keine Aktion erreichbar, die einen
+                    # Flush ausloest — die Bedingung bleibt also
+                    # beliebig lange stehen.
+                    # Jetzt flankengetriggert: Eintritt, Lebenszeichen
+                    # pro idle_anchor_gap-Fenster, Austritt mit
+                    # Gesamtdauer und Tickzahl. Die beiden letzten
+                    # Groessen gab es vorher gar nicht.
+                    # NICHT auf _debug_event umstellen: die Meldung
+                    # waere ohne buffer_debug_events unsichtbar, also
+                    # genau dann, wenn ein Crash-Log ausgewertet wird.
+                    # siehe tests/test_p778_log_throttle.py
+                    if not self._p778_since:
+                        self._p778_since = _mcu_now_p778
+                        self._p778_ticks = 0
+                        self._p778_last_log_time = _mcu_now_p778
+                        logging.info(
+                            "buffer_feeder: print-block stale override "
+                            "armed (flush silent for %.1fs > %.1fs "
+                            "threshold, P7-78)",
+                            _flush_silence, self.idle_anchor_gap)
+                    elif (_mcu_now_p778 - self._p778_last_log_time
+                            > self.idle_anchor_gap):
+                        self._p778_last_log_time = _mcu_now_p778
+                        logging.info(
+                            "buffer_feeder: print-block stale override "
+                            "still active (flush silent for %.1fs, "
+                            "P7-78)",
+                            _flush_silence)
+                    self._p778_ticks += 1
                     _print_active = False
                     _p778_override = True
+
+            # Austrittsflanke: der Zustand war aktiv und ist es nicht
+            # mehr. Steht bewusst ausserhalb der _print_active-Pruefung
+            # oben — der Override endet auch dadurch, dass der Druck
+            # endet, nicht nur durch einen Flush.
+            if self._p778_since and not _p778_override:
+                _mcu_exit = self.stepper.get_mcu().estimated_print_time(
+                    self.reactor.monotonic())
+                logging.info(
+                    "buffer_feeder: print-block stale override cleared "
+                    "(duration=%.1fs ticks=%d, P7-78)",
+                    _mcu_exit - self._p778_since, self._p778_ticks)
+                self._p778_since = 0.0
+                self._p778_ticks = 0
+                self._p778_last_log_time = 0.0
 
             hall_empty_block = (self.hall_empty
                                 and not self.use_flush_callback_bang_bang)

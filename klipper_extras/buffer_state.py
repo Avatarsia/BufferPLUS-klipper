@@ -60,6 +60,15 @@ class BufferRuntimeState:
     # _disable_stepper erneut rufen und _last_enable_schedule_time
     # fortschieben. Re-armed in _enable_stepper.
     _silent_idle_disabled: bool = False
+    # P7-78-Logflut (Issue #59, 2026-09-10): Flankentriggerung statt
+    # Tick-Spam. _p778_since = 0.0 heisst "Override nicht aktiv"; sonst
+    # der mcu-Zeitstempel des Eintritts. _p778_ticks zaehlt die Ticks im
+    # Zustand, _p778_last_log_time drosselt das Lebenszeichen auf ein
+    # idle_anchor_gap-Fenster. Siehe docs/superpowers/specs/
+    # 2026-09-10-p778-logflut-design.md.
+    _p778_since: float = 0.0
+    _p778_ticks: int = 0
+    _p778_last_log_time: float = 0.0
     _hall1_active_since: Optional[float] = None
     _last_metrics_log_time: float = 0.0
     _modulator_feeding: bool = False
