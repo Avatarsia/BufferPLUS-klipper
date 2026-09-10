@@ -1671,6 +1671,13 @@ class BufferFeeder:
             # forced_t0==None else-Branch -> th_time = aktive
             # Toolhead-Queue (far-future) -> B SKIP ->
             # silent return ohne realen Submit -> Bug wirkungslos.
+            # Echten Druckzustand sichern, BEVOR der Override ihn
+            # ueberschreibt. Der Silent-Idle-Disable unten muss den
+            # unverfaelschten Wert sehen: im Zustand AUTO darf waehrend
+            # eines Drucks nicht abgeschaltet werden (Upstream-Kontrakt,
+            # tests/test_idle_anchor_silent.py::
+            # test_silent_auto_no_disable_during_print).
+            _print_active_raw = _print_active
             _p778_override = False
             if _print_active and self._last_mcu_flush_time > 0.0:
                 _mcu_p778 = self.stepper.get_mcu()
@@ -1751,6 +1758,60 @@ class BufferFeeder:
             hall_full_block = (self.hall_full
                                and (not self.idle_motor_disable
                                     or _p778_override))
+            # Silent-Idle-Disable, eigenstaendig (2026-09-10).
+            # Vorher hing er im Anchor-Gate unten und war damit auf
+            # `not _print_active` angewiesen. Waehrend eines laufenden
+            # Drucks ist das nur erfuellbar, wenn der P7-78-Override
+            # _print_active zurueckgesetzt hat — der Override war also
+            # der einzige Tueroeffner fuer eine Aktion, die mit
+            # Anchor-Bewegung nichts zu tun hat. Folge: blieb der
+            # Flush-Callback nicht aus (Override greift nicht), blieb
+            # der Motor waehrend des ganzen Drucks bestromt, obwohl der
+            # Buffer still stand — genau das, wogegen
+            # idle_motor_disable eingefuehrt wurde (User-Report
+            # 2026-07-13: Motor kochend heiss im Standby).
+            #
+            # Der Disable braucht die Sicherheitsbedingungen des Gates,
+            # die eine Bewegung betreffen (kein in-flight-Move, keine
+            # Extruder-Kopplung, kein anstehender Disable, keine
+            # pending-Chunks, kein Continuous-Feed), aber NICHT
+            # `not _print_active`: er soll gerade dann greifen, wenn
+            # gedruckt wird und der Buffer ruht. Er erzeugt keine
+            # Steps, kann also auch keine Sequenz stoeren.
+            #
+            # Im Zustand AUTO bleibt der Druck-Ausschluss erhalten:
+            # dort ist der Buffer aktiv am Foerdern, ein Disable
+            # mitten im Druck waere riskant. Nur STATE_IDLE schaltet
+            # unbedingt ab (Spec: stopped AND disabled) — und genau
+            # dieser Pfad war vorher auf den Override angewiesen.
+            #
+            # hall_full_block/hall_empty_block bewusst NICHT geprueft:
+            # beide gaten Anchor-BEWEGUNGEN. Ein voller Buffer ist
+            # sogar der Normalfall, in dem abgeschaltet werden soll.
+            # siehe tests/test_silent_idle_disable_gate.py
+            if (self.idle_anchor_mode == 'silent'
+                    and not self._silent_idle_disabled
+                    and self._state in (STATE_IDLE, STATE_AUTO)
+                    and not self._stepper_synced_to
+                    and not self._pending_disable
+                    and not self._move_in_flight()
+                    and self._pending_remaining_mm == 0.0
+                    and not self._continuous_feed
+                    and (self._state == STATE_IDLE
+                         or (not _print_active_raw
+                             and _print_state_known
+                             and self.idle_motor_disable))):
+                _mcu_sd = self.stepper.get_mcu().estimated_print_time(
+                    self.reactor.monotonic())
+                _gap_sd = _mcu_sd - self._last_move_end_time
+                if _gap_sd > self.idle_anchor_gap:
+                    self._silent_idle_disabled = True
+                    self._schedule_stepper_disable()
+                    logging.info(
+                        "buffer_feeder: silent idle-disable "
+                        "(state=%s gap=%.1fs, no anchor move)",
+                        self._state.lower(), _gap_sd)
+
             if (self._state in (STATE_IDLE, STATE_AUTO)
                     and not self._stepper_synced_to
                     and not self._pending_disable
@@ -1781,20 +1842,6 @@ class BufferFeeder:
                 # bleibt nur der Idle-Motor-Disable als One-shot
                 # (Latch, re-armed in _enable_stepper — sonst wuerde
                 # jeder Tick _last_enable_schedule_time fortschieben).
-                if (self.idle_anchor_mode == 'silent'
-                        and gap_moves > self.idle_anchor_gap
-                        and not self._silent_idle_disabled
-                        and (self._state == STATE_IDLE
-                             or (self._state == STATE_AUTO
-                                 and not _p778_override
-                                 and _print_state_known
-                                 and self.idle_motor_disable))):
-                    self._silent_idle_disabled = True
-                    self._schedule_stepper_disable()
-                    logging.info(
-                        "buffer_feeder: silent idle-disable "
-                        "(state=%s gap=%.1fs, no anchor move)",
-                        self._state.lower(), gap_moves)
                 if (self.idle_anchor_mode != 'silent'
                         and gap_moves > self.idle_anchor_gap
                         and gap_anchors > self.idle_anchor_gap):
