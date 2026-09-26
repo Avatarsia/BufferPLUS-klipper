@@ -122,6 +122,7 @@ class FakeButtons:
 
 class FakeMotionQueuing:
     def __init__(self):
+        self.last_step_gen_time = 0.0
         self.trapqs = []
         self.append_calls = []
         self.scan_window_checks = 0
@@ -158,6 +159,9 @@ class FakeMotionQueuing:
         Klipper reactor."""
         for callback, _can_add_trapq in self.flush_callbacks:
             callback(flush_time, step_gen_time)
+        # Klipper publishes the completed cursor AFTER callbacks and C
+        # generation. Tests can hold it back to model a delayed flush.
+        self.last_step_gen_time = max(self.last_step_gen_time, step_gen_time)
 
 
 class FakeMCU:

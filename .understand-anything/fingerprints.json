@@ -1,0 +1,1469 @@
+{
+  "version": "1.0.0",
+  "gitCommitHash": "7141b783a5655c16cd367c31d0eabc9d059d280a",
+  "generatedAt": "2026-05-23T19:44:42.259Z",
+  "files": {
+    "NOT-TO-DO.md": {
+      "filePath": "NOT-TO-DO.md",
+      "contentHash": "1161af90faf789dfc99371b957d2d9fcadf46d1ab5b72bf9c2a2d32e6f228b1e",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 23,
+      "hasStructuralAnalysis": true
+    },
+    "README.md": {
+      "filePath": "README.md",
+      "contentHash": "da03ab67bdec3527601be2fe5a9125b4549e73c56920432c95fbf196d9cbddb4",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 751,
+      "hasStructuralAnalysis": true
+    },
+    "install.sh": {
+      "filePath": "install.sh",
+      "contentHash": "98a7714e9920f0c464eb773b8f3fa427db1d85c1869530e161957c360e3ba19c",
+      "functions": [
+        {
+          "name": "collect_ext_sub_modules",
+          "params": [],
+          "exported": false,
+          "lineCount": 17
+        },
+        {
+          "name": "say",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "ok",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "miss",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "warn",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "hr",
+          "params": [],
+          "exported": false,
+          "lineCount": 1
+        },
+        {
+          "name": "ask_yn",
+          "params": [],
+          "exported": false,
+          "lineCount": 15
+        },
+        {
+          "name": "status_extension",
+          "params": [],
+          "exported": false,
+          "lineCount": 38
+        },
+        {
+          "name": "status_cfg",
+          "params": [],
+          "exported": false,
+          "lineCount": 27
+        },
+        {
+          "name": "status_printer_cfg_include",
+          "params": [],
+          "exported": false,
+          "lineCount": 8
+        },
+        {
+          "name": "status_printer_cfg_pauseresume",
+          "params": [],
+          "exported": false,
+          "lineCount": 8
+        },
+        {
+          "name": "status_moonraker",
+          "params": [],
+          "exported": false,
+          "lineCount": 8
+        },
+        {
+          "name": "want",
+          "params": [],
+          "exported": false,
+          "lineCount": 14
+        }
+      ],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 529,
+      "hasStructuralAnalysis": true
+    },
+    "klipper_extras/__init__.py": {
+      "filePath": "klipper_extras/__init__.py",
+      "contentHash": "a93663d63b5d3b82be818ed4b4ccfd966e0ca112b3f13622e2b0024601c6272b",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 2,
+      "hasStructuralAnalysis": true
+    },
+    "klipper_extras/_buffer_common.py": {
+      "filePath": "klipper_extras/_buffer_common.py",
+      "contentHash": "ff9138443757cf06982bc76a74d9efce66b7be0ea1e1c8c34bf31d3571f31ec1",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 84,
+      "hasStructuralAnalysis": true
+    },
+    "klipper_extras/buffer_baseline_log.py": {
+      "filePath": "klipper_extras/buffer_baseline_log.py",
+      "contentHash": "5d38bdb3825266881df4ac55fbaaf5f72fee997388839a91058f21bdff45d409",
+      "functions": [],
+      "classes": [
+        {
+          "name": "_PrefixFilter",
+          "methods": [
+            "filter"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 13
+        },
+        {
+          "name": "BaselineLogfile",
+          "methods": [
+            "__init__",
+            "attach",
+            "detach",
+            "is_attached",
+            "write_one"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 100
+        }
+      ],
+      "imports": [
+        {
+          "source": "logging",
+          "specifiers": [
+            "logging"
+          ]
+        },
+        {
+          "source": "os",
+          "specifiers": [
+            "os"
+          ]
+        }
+      ],
+      "exports": [
+        "_PrefixFilter",
+        "BaselineLogfile"
+      ],
+      "totalLines": 141,
+      "hasStructuralAnalysis": true
+    },
+    "klipper_extras/buffer_cleanup.py": {
+      "filePath": "klipper_extras/buffer_cleanup.py",
+      "contentHash": "07e69a4d150a255ccbd9ad78e2a48e29f8134c73c3cefd195d5f4c23384c1d50",
+      "functions": [],
+      "classes": [
+        {
+          "name": "CleanupCoordinator",
+          "methods": [
+            "__init__",
+            "try_restore_gcode_state",
+            "full_reset_to_idle",
+            "clear_jam"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 63
+        }
+      ],
+      "imports": [
+        {
+          "source": "logging",
+          "specifiers": [
+            "logging"
+          ]
+        },
+        {
+          "source": "._buffer_common",
+          "specifiers": [
+            "STATE_AUTO",
+            "STATE_IDLE",
+            "STATE_JAM",
+            "STATE_OVERFLOW"
+          ]
+        }
+      ],
+      "exports": [
+        "CleanupCoordinator"
+      ],
+      "totalLines": 69,
+      "hasStructuralAnalysis": true
+    },
+    "klipper_extras/buffer_config.py": {
+      "filePath": "klipper_extras/buffer_config.py",
+      "contentHash": "d0926a3d6d29a653bd657a07521bde29466caffc09390e7a6de99c68d12cad9e",
+      "functions": [],
+      "classes": [
+        {
+          "name": "BufferConfigValues",
+          "methods": [
+            "from_config",
+            "apply"
+          ],
+          "properties": [
+            "feed_speed",
+            "manual_speed",
+            "burst_speed",
+            "load_fast_speed",
+            "load_slow_speed",
+            "unload_fast_speed",
+            "unload_phase3_speed",
+            "grip_speed",
+            "accel",
+            "manual_chunk_distance",
+            "burst_distance",
+            "grip_duration",
+            "grip_follow_distance",
+            "grip_follow_speed",
+            "load_fast_distance",
+            "load_slow_distance",
+            "load_buffer_max",
+            "unload_sync_distance",
+            "unload_fast_max",
+            "max_feed_time",
+            "max_feed_distance",
+            "hall_debounce_ms",
+            "lead_time",
+            "max_move_chunk_mm",
+            "flush_callback_chunk_mm",
+            "interrupt_chunk_mm",
+            "max_feed_speed",
+            "hall1_persist_timeout",
+            "buffer_debug_events",
+            "buffer_debug_metrics",
+            "strict_print_start_guard",
+            "critical_action_guard_s",
+            "buffer_conservative_mode",
+            "min_feed_floor",
+            "feed_speed_gain",
+            "hall3_demand_gain",
+            "high_flow_mm3s_threshold",
+            "feed_hysteresis_stop_factor",
+            "idle_anchor_gap",
+            "idle_motor_disable",
+            "jam_detection_enabled",
+            "jam_clog_dwell_time",
+            "jam_clog_extrude_min",
+            "jam_supply_dwell_time",
+            "jam_action",
+            "runout_pause",
+            "runout_follow_mm",
+            "triple_click_window",
+            "feed_burst_enabled",
+            "reenable_cooldown",
+            "reenable_cooldown_fast",
+            "auto_load_after_follow",
+            "auto_engage_on_print_start",
+            "auto_engage_on_boot",
+            "min_temp",
+            "use_overflow_overlay",
+            "use_flush_callback_bang_bang",
+            "filament_diameter"
+          ],
+          "exported": true,
+          "lineCount": 172
+        }
+      ],
+      "imports": [
+        {
+          "source": "dataclasses",
+          "specifiers": [
+            "dataclass"
+          ]
+        }
+      ],
+      "exports": [
+        "BufferConfigValues"
+      ],
+      "totalLines": 177,
+      "hasStructuralAnalysis": true
+    },
+    "klipper_extras/buffer_fault.py": {
+      "filePath": "klipper_extras/buffer_fault.py",
+      "contentHash": "8ff1bf14140251a56fbf0f8531173035a26ff76342f02bda7825d366548f0843",
+      "functions": [],
+      "classes": [
+        {
+          "name": "FaultManager",
+          "methods": [
+            "__init__",
+            "is_hall1_active",
+            "clear_recovery_flags",
+            "resume_after_overflow",
+            "check_auto_ready"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 195
+        }
+      ],
+      "imports": [
+        {
+          "source": "logging",
+          "specifiers": [
+            "logging"
+          ]
+        },
+        {
+          "source": "._buffer_common",
+          "specifiers": [
+            "BUSY_PHASE_STATES",
+            "STATE_AUTO",
+            "STATE_INITIAL_GRIP",
+            "STATE_JAM",
+            "STATE_LOADING_PULL",
+            "STATE_LOADING_PUSH",
+            "STATE_MANUAL_RETRACT",
+            "STATE_OVERFLOW",
+            "STATE_UNLOADING"
+          ]
+        },
+        {
+          "source": ".buffer_types",
+          "specifiers": [
+            "Hall1Context"
+          ]
+        }
+      ],
+      "exports": [
+        "FaultManager"
+      ],
+      "totalLines": 213,
+      "hasStructuralAnalysis": true
+    },
+    "klipper_extras/buffer_feeder.py": {
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "contentHash": "d44bc51b2125093eb7687f3aed75f4fa0e39e95f8b46a7e1c74f90489c7336ee",
+      "functions": [
+        {
+          "name": "load_config_prefix",
+          "params": [
+            "config"
+          ],
+          "exported": true,
+          "lineCount": 2
+        }
+      ],
+      "classes": [
+        {
+          "name": "BufferFeeder",
+          "methods": [
+            "__init__",
+            "use_fault_overlay",
+            "use_fault_overlay",
+            "_supports_flush_callback_can_add_trapq",
+            "_is_missing_can_add_trapq_typeerror",
+            "_debug_event",
+            "_arm_high_flow_carry",
+            "_disarm_high_flow_carry",
+            "_is_high_flow_carry_armed",
+            "_is_high_flow_active",
+            "_arm_post_full_bias_clamp",
+            "_clear_post_full_bias_clamp",
+            "_post_full_recovery_active",
+            "_effective_interrupt_chunk_mm",
+            "_benchmark_mode_remaining",
+            "_benchmark_mode_active",
+            "_set_benchmark_mode",
+            "_register_flush_callback_if_supported",
+            "_register_gcode_commands",
+            "_register_default_mux_if_only_instance",
+            "_handle_connect",
+            "_handle_ready",
+            "_end_startup_grace",
+            "_handle_shutdown",
+            "_on_idle_printing",
+            "_clear_stale_suspend_if_print_inactive",
+            "_is_active_print_state",
+            "_get_print_stats_state",
+            "_get_tracker_velocity",
+            "_arm_critical_action_guard",
+            "_critical_action_guard_remaining",
+            "_set_print_phase",
+            "_refresh_print_phase",
+            "_auto_submit_permission",
+            "_on_idle_ready",
+            "_check_debounce",
+            "hall_empty",
+            "hall_full",
+            "hall_overflow",
+            "entrance_detected",
+            "feed_button_pressed",
+            "retract_button_pressed",
+            "_is_hall1_active",
+            "_on_stable_sensor_change",
+            "_mark_hall1_active",
+            "_mark_hall1_cleared",
+            "_enter_overflow",
+            "_clear_recovery_flags",
+            "_prepare_post_jam_recovery",
+            "_resume_after_overflow",
+            "_exit_overflow",
+            "_on_entrance_insert",
+            "_on_entrance_runout",
+            "_on_button_change",
+            "_ensure_click_settle_timer",
+            "_set_pending_click_msg",
+            "_click_settle_fire",
+            "_on_button_press",
+            "_on_button_release",
+            "_action_manual_start",
+            "_action_manual_pulse",
+            "_action_burst",
+            "_estimate_sequence_duration",
+            "_start_initial_grip",
+            "_main_tick",
+            "_tick_safety_timeouts",
+            "_tick_cooldown_end",
+            "_tick_grip_completion",
+            "_tick_runout_follow",
+            "_tick_pending_chunk",
+            "_bang_bang_tick",
+            "_compute_target_feed_speed",
+            "_on_mcu_flush",
+            "_flush_should_defer_pending_itersolve",
+            "_flush_move_in_flight",
+            "_handle_overflow_prime_via_flush",
+            "_flush_submit_streaming_chunk",
+            "_exit_phase3_stable",
+            "_load_phase3_tick",
+            "_jam_tick",
+            "_trigger_jam",
+            "_read_extruder_position",
+            "_schedule_time_for_enable_toggle",
+            "_schedule_stepper_disable",
+            "_enable_stepper",
+            "_disable_stepper",
+            "_submit_move",
+            "_submit_single_trapezoid",
+            "_sanitize_forced_t0_floors",
+            "_reprime_stepcompress_if_needed",
+            "_plan_t0_anchor",
+            "_compute_t0_anchor",
+            "_append_trapezoid_and_record",
+            "_move_in_flight",
+            "_halt_motion",
+            "_start_continuous_motion",
+            "_schedule_return_to_auto_after_move",
+            "_start_cooldown",
+            "_set_state",
+            "_schedule_gcode_script",
+            "_gcode_run_script",
+            "_gcode_run_script_checked",
+            "_respond",
+            "_hotend_temp",
+            "_hotend_warm",
+            "_maybe_auto_load",
+            "_full_reset_to_idle",
+            "_measure_report",
+            "cmd_BUFFER_FEED",
+            "cmd_BUFFER_RETRACT",
+            "_cmd_feed_common",
+            "cmd_BUFFER_HALT",
+            "_check_auto_ready",
+            "cmd_BUFFER_AUTO_ON",
+            "cmd_BUFFER_AUTO_ON_IF_READY",
+            "cmd_BUFFER_AUTO_OFF",
+            "_abort_signalled",
+            "_wait_for_move_done",
+            "_wait_for_move_done_resume_on_overflow",
+            "cmd_BUFFER_WAIT_IDLE",
+            "_wait_for_move_drain_allowing_lockout",
+            "_baseline_prep_direction",
+            "cmd_BUFFER_PREP_BASELINE",
+            "cmd_BUFFER_BENCHMARK_MARK",
+            "cmd_BUFFER_BENCH_MODE",
+            "_check_phase_entry",
+            "cmd_BUFFER_LOAD_PHASE1",
+            "cmd_BUFFER_LOAD_PHASE3",
+            "cmd_BUFFER_UNLOAD_FILAMENT",
+            "cmd_BUFFER_UNLOAD_PHASE3",
+            "_setup_trapq",
+            "_anchor_step",
+            "_sync_to_extruder",
+            "cmd_BUFFER_SYNC_TO_EXTRUDER",
+            "_unsync_if_synced",
+            "cmd_BUFFER_UNSYNC",
+            "cmd_FORCE_BUFFER_FILL",
+            "cmd_STOP_BUFFER_FILL",
+            "cmd_BUFFER_STATE_DUMP",
+            "cmd_BUFFER_SET",
+            "cmd_CALIBRATE_FEEDER_SYNC",
+            "cmd_MEASURE_LOAD_START",
+            "cmd_MEASURE_LOAD_STOP",
+            "cmd_ENABLE_RUNOUT_SENSOR",
+            "cmd_DISABLE_RUNOUT_SENSOR",
+            "_try_restore_gcode_state",
+            "cmd_BUFFER_RESTORE_STATE",
+            "cmd_BUFFER_SAVE_MACRO_STATE",
+            "cmd_BUFFER_RESTORE_MACRO_STATE",
+            "cmd_BUFFER_CLEAR_JAM",
+            "_cmd_error",
+            "_raise_if_jam",
+            "_raise_if_locked_out",
+            "get_status"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 4471
+        }
+      ],
+      "imports": [
+        {
+          "source": "collections",
+          "specifiers": [
+            "collections"
+          ]
+        },
+        {
+          "source": "inspect",
+          "specifiers": [
+            "inspect"
+          ]
+        },
+        {
+          "source": "logging",
+          "specifiers": [
+            "logging"
+          ]
+        },
+        {
+          "source": "math",
+          "specifiers": [
+            "math"
+          ]
+        },
+        {
+          "source": "stepper",
+          "specifiers": [
+            "stepper"
+          ]
+        },
+        {
+          "source": ".",
+          "specifiers": [
+            "_buffer_common"
+          ]
+        },
+        {
+          "source": "._buffer_common",
+          "specifiers": [
+            "ANCHOR_NUDGE_MM",
+            "BUSY_PHASE_STATES",
+            "BUTTON_FEED",
+            "BUTTON_RETRACT",
+            "CLICK_DOUBLE",
+            "CLICK_SINGLE",
+            "CLICK_TRIPLE",
+            "CONTINUOUS_FEED_STATES",
+            "JAM_TICK_INTERVAL",
+            "JAM_WATCH_STATES",
+            "MAIN_TICK_INTERVAL",
+            "MAX_T0_LOOKAHEAD_S",
+            "REPRIME_GAP_S",
+            "STABLE_DROP_GRACE",
+            "STATE_AUTO",
+            "STATE_IDLE",
+            "STATE_INIT",
+            "STATE_INITIAL_GRIP",
+            "STATE_JAM",
+            "STATE_LOADING_PULL",
+            "STATE_LOADING_PUSH",
+            "STATE_MANUAL_FEED",
+            "STATE_MANUAL_RETRACT",
+            "STATE_OVERFLOW",
+            "STATE_RUNOUT",
+            "STATE_UNLOADING"
+          ]
+        },
+        {
+          "source": ".buffer_baseline_log",
+          "specifiers": [
+            "BaselineLogfile"
+          ]
+        },
+        {
+          "source": ".buffer_fault",
+          "specifiers": [
+            "FaultManager"
+          ]
+        },
+        {
+          "source": ".buffer_cleanup",
+          "specifiers": [
+            "CleanupCoordinator"
+          ]
+        },
+        {
+          "source": ".buffer_config",
+          "specifiers": [
+            "BufferConfigValues"
+          ]
+        },
+        {
+          "source": ".buffer_modulator",
+          "specifiers": [
+            "ExtruderVelocityTracker"
+          ]
+        },
+        {
+          "source": ".buffer_sensors",
+          "specifiers": [
+            "HallSensorMonitor"
+          ]
+        },
+        {
+          "source": ".buffer_state",
+          "specifiers": [
+            "BufferRuntimeState"
+          ]
+        },
+        {
+          "source": ".buffer_stepper",
+          "specifiers": [
+            "SyncCoordinator"
+          ]
+        },
+        {
+          "source": ".buffer_types",
+          "specifiers": [
+            "AnchorPlan",
+            "CleanupOptions",
+            "Hall1Context"
+          ]
+        }
+      ],
+      "exports": [
+        "BufferFeeder",
+        "load_config_prefix"
+      ],
+      "totalLines": 4547,
+      "hasStructuralAnalysis": true
+    },
+    "klipper_extras/buffer_modulator.py": {
+      "filePath": "klipper_extras/buffer_modulator.py",
+      "contentHash": "aa2486089c6e287188354a9a1ed065faf582005f862090433bc7bd2770a4001b",
+      "functions": [],
+      "classes": [
+        {
+          "name": "ExtruderVelocityTracker",
+          "methods": [
+            "__init__",
+            "_get_extruder",
+            "_get_mcu",
+            "_read_position",
+            "tick",
+            "get_velocity",
+            "get_volumetric_flow",
+            "set_filament_diameter",
+            "is_ready",
+            "reset"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 111
+        }
+      ],
+      "imports": [
+        {
+          "source": "collections",
+          "specifiers": [
+            "collections"
+          ]
+        },
+        {
+          "source": "math",
+          "specifiers": [
+            "math"
+          ]
+        }
+      ],
+      "exports": [
+        "ExtruderVelocityTracker"
+      ],
+      "totalLines": 120,
+      "hasStructuralAnalysis": true
+    },
+    "klipper_extras/buffer_sensors.py": {
+      "filePath": "klipper_extras/buffer_sensors.py",
+      "contentHash": "80a1b4b7534fd7cf61d1544870c9a3ad9182107db94ac200b81a490fa905e585",
+      "functions": [],
+      "classes": [
+        {
+          "name": "HallSensorMonitor",
+          "methods": [
+            "__init__",
+            "register_pin",
+            "on_pin_raw_change",
+            "check_debounce",
+            "semantic_state",
+            "hall_empty",
+            "hall_full",
+            "hall_overflow",
+            "entrance_detected",
+            "feed_button_pressed",
+            "retract_button_pressed",
+            "on_stable_sensor_change",
+            "on_entrance_insert",
+            "on_entrance_runout",
+            "on_button_change",
+            "ensure_click_settle_timer",
+            "set_pending_click_msg",
+            "click_settle_fire",
+            "on_button_press",
+            "on_button_release"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 390
+        }
+      ],
+      "imports": [
+        {
+          "source": "._buffer_common",
+          "specifiers": [
+            "BUTTON_FEED",
+            "BUTTON_RETRACT",
+            "CLICK_DOUBLE",
+            "CLICK_SINGLE",
+            "CLICK_TRIPLE",
+            "STATE_AUTO",
+            "STATE_IDLE",
+            "STATE_INITIAL_GRIP",
+            "STATE_JAM",
+            "STATE_LOADING_PULL",
+            "STATE_LOADING_PUSH",
+            "STATE_MANUAL_FEED",
+            "STATE_MANUAL_RETRACT",
+            "STATE_OVERFLOW",
+            "STATE_RUNOUT",
+            "STATE_UNLOADING"
+          ]
+        },
+        {
+          "source": ".buffer_types",
+          "specifiers": [
+            "Hall1Context"
+          ]
+        }
+      ],
+      "exports": [
+        "HallSensorMonitor"
+      ],
+      "totalLines": 406,
+      "hasStructuralAnalysis": true
+    },
+    "klipper_extras/buffer_state.py": {
+      "filePath": "klipper_extras/buffer_state.py",
+      "contentHash": "8bb4bb85a6f5a94d67b294a7f0fcaf77ec328735e02c24543999c9cc5e5f3ead",
+      "functions": [],
+      "classes": [
+        {
+          "name": "BufferRuntimeState",
+          "methods": [
+            "apply"
+          ],
+          "properties": [
+            "_stepper_synced_to",
+            "_jam_active",
+            "_hall2_start_time",
+            "_hall2_start_extruder_pos",
+            "_hall3_start_time",
+            "_hall3_drop_since",
+            "_overflow_interrupted_follow",
+            "_overflow_resume_mm",
+            "_overflow_resume_dir",
+            "_overflow_resume_spd",
+            "_overflow_interrupted_state",
+            "_commanded_pos",
+            "_last_move_end_time",
+            "_current_move",
+            "_feed_distance_accumulator",
+            "_accumulated_feed_distance",
+            "_stepcompress_primed",
+            "_last_enable_schedule_time",
+            "_stepper_enable",
+            "_state",
+            "_bang_bang_suspended",
+            "_initial_grip_end_time",
+            "_grip_follow_active",
+            "_load_phase3_distance",
+            "_load_phase3_max_distance",
+            "_load_phase3_speed",
+            "_load_phase3_stable_timeout",
+            "_load_phase3_overflow_ok",
+            "_load_phase3_chunk_distance",
+            "_load_phase3_hall_full_since",
+            "_load_phase3_hall_overflow_since",
+            "_load_phase3_hall_full_drop_since",
+            "_load_phase3_hall_overflow_drop_since",
+            "_pending_remaining_mm",
+            "_pending_direction",
+            "_pending_speed",
+            "_pending_submit_chunk_cap",
+            "_continuous_feed",
+            "_continuous_feed_direction",
+            "_continuous_feed_speed",
+            "_auto_between_since",
+            "_pending_disable",
+            "_last_idle_anchor_time",
+            "_last_mcu_flush_time",
+            "_hall1_active_since",
+            "_last_metrics_log_time",
+            "_modulator_feeding",
+            "_high_flow_active_latched",
+            "_high_flow_carry_armed_until",
+            "_post_full_bias_clamp",
+            "_post_full_h3_since",
+            "_post_full_recovery_until",
+            "_needs_overflow_prime",
+            "_feed_deadline_time",
+            "_measure_load_active",
+            "_measure_load_distance",
+            "_measure_feeding",
+            "_print_running",
+            "_benchmark_mode_until",
+            "_benchmark_mode_reason",
+            "_print_phase",
+            "_print_phase_since",
+            "_print_extrusion_seen",
+            "_critical_action_guard_until",
+            "_critical_action_guard_reason",
+            "_fault_overflow",
+            "_post_load_overflow_grace",
+            "_runout_filament_ref",
+            "_runout_follow_active",
+            "_runout_recovery_pending",
+            "_cooldown_deadline",
+            "_auto_off_by_user",
+            "_retract_burst_done",
+            "_startup_grace_seconds",
+            "_startup_grace_done",
+            "_entrance_was_empty",
+            "_macro_state_saved",
+            "_halt_requested",
+            "_main_timer",
+            "_jam_timer"
+          ],
+          "exported": true,
+          "lineCount": 85
+        }
+      ],
+      "imports": [
+        {
+          "source": "dataclasses",
+          "specifiers": [
+            "dataclass"
+          ]
+        },
+        {
+          "source": "typing",
+          "specifiers": [
+            "Any",
+            "Dict",
+            "Optional"
+          ]
+        },
+        {
+          "source": "._buffer_common",
+          "specifiers": [
+            "STATE_INIT"
+          ]
+        }
+      ],
+      "exports": [
+        "BufferRuntimeState"
+      ],
+      "totalLines": 93,
+      "hasStructuralAnalysis": true
+    },
+    "klipper_extras/buffer_stepper.py": {
+      "filePath": "klipper_extras/buffer_stepper.py",
+      "contentHash": "67849ff6a55f915b48de7827fcfba14eb744808801e62298ccd3a0392519c84a",
+      "functions": [],
+      "classes": [
+        {
+          "name": "SyncCoordinator",
+          "methods": [
+            "__init__",
+            "setup_trapq",
+            "_submit_anchor_move",
+            "anchor_step",
+            "sync_to_extruder",
+            "unsync_if_synced"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 154
+        }
+      ],
+      "imports": [
+        {
+          "source": "._buffer_common",
+          "specifiers": [
+            "ANCHOR_NUDGE_MM",
+            "REPRIME_GAP_S",
+            "STATE_OVERFLOW"
+          ]
+        }
+      ],
+      "exports": [
+        "SyncCoordinator"
+      ],
+      "totalLines": 167,
+      "hasStructuralAnalysis": true
+    },
+    "klipper_extras/buffer_types.py": {
+      "filePath": "klipper_extras/buffer_types.py",
+      "contentHash": "4ff249703e850e43ae95b80e03f53453958dd9b07b0c3e5915bacf91069cc75f",
+      "functions": [],
+      "classes": [
+        {
+          "name": "Hall1Context",
+          "methods": [
+            "coerce"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 15
+        },
+        {
+          "name": "AnchorPlan",
+          "methods": [],
+          "properties": [
+            "t0",
+            "skip_reason",
+            "rate_limit_idle_anchor",
+            "clamp_last_move_end_time",
+            "toolhead_time",
+            "enable_floor"
+          ],
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "CleanupOptions",
+          "methods": [],
+          "properties": [
+            "label",
+            "full",
+            "sticky_auto_off",
+            "preserve_lockout",
+            "set_halt_requested"
+          ],
+          "exported": true,
+          "lineCount": 6
+        }
+      ],
+      "imports": [
+        {
+          "source": "dataclasses",
+          "specifiers": [
+            "dataclass"
+          ]
+        },
+        {
+          "source": "enum",
+          "specifiers": [
+            "Enum"
+          ]
+        },
+        {
+          "source": "typing",
+          "specifiers": [
+            "Optional"
+          ]
+        }
+      ],
+      "exports": [
+        "Hall1Context",
+        "AnchorPlan",
+        "CleanupOptions"
+      ],
+      "totalLines": 40,
+      "hasStructuralAnalysis": true
+    },
+    "lll.cfg": {
+      "filePath": "lll.cfg",
+      "contentHash": "e982217b603e8268b1946ed9e4b63e52a1c2f19be357252a4981703584aabfaf",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 600,
+      "hasStructuralAnalysis": false
+    },
+    "printer_data/config/mellow-plus.cfg": {
+      "filePath": "printer_data/config/mellow-plus.cfg",
+      "contentHash": "02245655b308173fb3170b3ad723c1d719423bb381d963d58337a362e27b0337",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 225,
+      "hasStructuralAnalysis": false
+    },
+    "pytest.ini": {
+      "filePath": "pytest.ini",
+      "contentHash": "00a8f7c6c3f6530aafbe05a4edc27478c22c84cc9e8c2523bb772ffa98677e2a",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 4,
+      "hasStructuralAnalysis": false
+    },
+    "tools/__init__.py": {
+      "filePath": "tools/__init__.py",
+      "contentHash": "f1db50b487607192ea0599fbc16af27453661cfa2efc2b6b2000cd46b584f771",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 2,
+      "hasStructuralAnalysis": true
+    },
+    "tools/buffer_baseline_suite.py": {
+      "filePath": "tools/buffer_baseline_suite.py",
+      "contentHash": "1923b6c66b8a186699b37773d0d87369ad9ee506bad2c8e66578959da1ed9835",
+      "functions": [
+        {
+          "name": "_fmt_optional",
+          "params": [
+            "value"
+          ],
+          "returnType": "str",
+          "exported": true,
+          "lineCount": 2
+        },
+        {
+          "name": "_num_slug",
+          "params": [
+            "value"
+          ],
+          "returnType": "str",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "_iter_product",
+          "params": [
+            "values"
+          ],
+          "returnType": "Iterable[tuple[float | None, ...]]",
+          "exported": true,
+          "lineCount": 2
+        },
+        {
+          "name": "_iter_zip_broadcast",
+          "params": [
+            "values"
+          ],
+          "returnType": "Iterable[tuple[float | None, ...]]",
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "build_cases",
+          "params": [
+            "flows",
+            "durations",
+            "speeds",
+            "accels",
+            "feed_speed_gains",
+            "min_feed_floors",
+            "high_flow_thresholds",
+            "interrupt_chunks",
+            "flush_chunks",
+            "lead_times",
+            "filament_diameters",
+            "mode"
+          ],
+          "returnType": "list[Case]",
+          "exported": true,
+          "lineCount": 73
+        },
+        {
+          "name": "write_manifest",
+          "params": [
+            "path",
+            "cases"
+          ],
+          "returnType": "None",
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "load_manifest",
+          "params": [
+            "path"
+          ],
+          "returnType": "list[Case]",
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "generate_gcode",
+          "params": [
+            "cases",
+            "temp_c",
+            "x_mm",
+            "y_mm",
+            "z_mm",
+            "chunk_e_mm",
+            "travel_f",
+            "filament_diameter_mm",
+            "pause_ms"
+          ],
+          "returnType": "str",
+          "exported": true,
+          "lineCount": 48
+        },
+        {
+          "name": "_parse_marker_values",
+          "params": [
+            "line",
+            "token"
+          ],
+          "returnType": "dict[str, str] | None",
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "_parse_metric_sample",
+          "params": [
+            "case_id",
+            "line_number",
+            "line"
+          ],
+          "returnType": "MetricSample | None",
+          "exported": true,
+          "lineCount": 20
+        },
+        {
+          "name": "analyze_log",
+          "params": [
+            "log_path",
+            "manifest_path"
+          ],
+          "returnType": "tuple[list[CaseSummary], list[MetricSample]]",
+          "exported": true,
+          "lineCount": 133
+        },
+        {
+          "name": "write_summary_csv",
+          "params": [
+            "path",
+            "summaries"
+          ],
+          "returnType": "None",
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "write_samples_csv",
+          "params": [
+            "path",
+            "samples"
+          ],
+          "returnType": "None",
+          "exported": true,
+          "lineCount": 7
+        },
+        {
+          "name": "write_summary_json",
+          "params": [
+            "path",
+            "summaries"
+          ],
+          "returnType": "None",
+          "exported": true,
+          "lineCount": 3
+        },
+        {
+          "name": "_parse_float_list",
+          "params": [
+            "values"
+          ],
+          "returnType": "list[float]",
+          "exported": true,
+          "lineCount": 2
+        },
+        {
+          "name": "_parse_optional_float_list",
+          "params": [
+            "values"
+          ],
+          "returnType": "list[float | None]",
+          "exported": true,
+          "lineCount": 2
+        },
+        {
+          "name": "build_parser",
+          "params": [],
+          "returnType": "argparse.ArgumentParser",
+          "exported": true,
+          "lineCount": 64
+        },
+        {
+          "name": "cmd_generate",
+          "params": [
+            "args"
+          ],
+          "returnType": "int",
+          "exported": true,
+          "lineCount": 36
+        },
+        {
+          "name": "cmd_analyze",
+          "params": [
+            "args"
+          ],
+          "returnType": "int",
+          "exported": true,
+          "lineCount": 17
+        },
+        {
+          "name": "main",
+          "params": [
+            "argv"
+          ],
+          "returnType": "int",
+          "exported": true,
+          "lineCount": 9
+        }
+      ],
+      "classes": [
+        {
+          "name": "Case",
+          "methods": [
+            "to_manifest_row",
+            "from_manifest_row",
+            "marker",
+            "macro_call"
+          ],
+          "properties": [
+            "case_id",
+            "flow_mm3s",
+            "duration_s",
+            "speed_mm_s",
+            "accel_mm_s2",
+            "feed_speed_gain",
+            "min_feed_floor",
+            "high_flow_mm3s_threshold",
+            "interrupt_chunk_mm",
+            "flush_chunk_mm",
+            "lead_time_s",
+            "filament_diameter_mm"
+          ],
+          "exported": true,
+          "lineCount": 100
+        },
+        {
+          "name": "MetricSample",
+          "methods": [
+            "to_row"
+          ],
+          "properties": [
+            "case_id",
+            "line_number",
+            "state",
+            "hall_h3",
+            "hall_h2",
+            "hall_h1",
+            "tracker_vel_mm_s",
+            "flow_mm3s",
+            "high_flow",
+            "ready",
+            "target_speed_mm_s",
+            "pending_remaining_mm",
+            "hall1_persist"
+          ],
+          "exported": true,
+          "lineCount": 31
+        },
+        {
+          "name": "CaseSummary",
+          "methods": [
+            "to_row"
+          ],
+          "properties": [
+            "case",
+            "completed",
+            "metric_samples",
+            "avg_flow_mm3s",
+            "max_flow_mm3s",
+            "avg_target_speed_mm_s",
+            "max_target_speed_mm_s",
+            "floor_hit_samples",
+            "floor_hit_pct",
+            "above_floor_samples",
+            "above_floor_pct",
+            "zero_target_samples",
+            "high_flow_samples",
+            "hall3_samples",
+            "hall2_samples",
+            "overflow_samples",
+            "errors",
+            "error_lines"
+          ],
+          "exported": true,
+          "lineCount": 41
+        }
+      ],
+      "imports": [
+        {
+          "source": "argparse",
+          "specifiers": [
+            "argparse"
+          ]
+        },
+        {
+          "source": "csv",
+          "specifiers": [
+            "csv"
+          ]
+        },
+        {
+          "source": "itertools",
+          "specifiers": [
+            "itertools"
+          ]
+        },
+        {
+          "source": "json",
+          "specifiers": [
+            "json"
+          ]
+        },
+        {
+          "source": "math",
+          "specifiers": [
+            "math"
+          ]
+        },
+        {
+          "source": "re",
+          "specifiers": [
+            "re"
+          ]
+        },
+        {
+          "source": "dataclasses",
+          "specifiers": [
+            "dataclass",
+            "asdict"
+          ]
+        },
+        {
+          "source": "datetime",
+          "specifiers": [
+            "datetime",
+            "timezone"
+          ]
+        },
+        {
+          "source": "pathlib",
+          "specifiers": [
+            "Path"
+          ]
+        },
+        {
+          "source": "statistics",
+          "specifiers": [
+            "mean"
+          ]
+        },
+        {
+          "source": "typing",
+          "specifiers": [
+            "Iterable"
+          ]
+        }
+      ],
+      "exports": [
+        "Case",
+        "MetricSample",
+        "CaseSummary",
+        "_fmt_optional",
+        "_num_slug",
+        "_iter_product",
+        "_iter_zip_broadcast",
+        "build_cases",
+        "write_manifest",
+        "load_manifest",
+        "generate_gcode",
+        "_parse_marker_values",
+        "_parse_metric_sample",
+        "analyze_log",
+        "write_summary_csv",
+        "write_samples_csv",
+        "write_summary_json",
+        "_parse_float_list",
+        "_parse_optional_float_list",
+        "build_parser",
+        "cmd_generate",
+        "cmd_analyze",
+        "main"
+      ],
+      "totalLines": 762,
+      "hasStructuralAnalysis": true
+    },
+    "update.sh": {
+      "filePath": "update.sh",
+      "contentHash": "42f0022d18c38bd6a254d5c0bd43cfb0840f5eaff30903a780747a8e6962948f",
+      "functions": [
+        {
+          "name": "collect_ext_sub_modules",
+          "params": [],
+          "exported": false,
+          "lineCount": 14
+        },
+        {
+          "name": "moonraker_rollover_klippy_log",
+          "params": [],
+          "exported": false,
+          "lineCount": 31
+        }
+      ],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 172,
+      "hasStructuralAnalysis": true
+    }
+  }
+}

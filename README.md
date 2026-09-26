@@ -227,6 +227,37 @@ meisten Setups gibt es zwei Gruppen:
 | `load_slow_distance` | `[buffer_feeder mellow]` | Strecke durch Heatbreak/Hotend beim Laden |
 | `unload_sync_distance` | `[buffer_feeder mellow]` | synchroner Extruder-Rueckzug beim Entladen |
 
+### Optional: Schnellladen bis zum Filament-Endstop
+
+Ein bereits konfigurierter Klipper-Schaltsensor im Druckkopf kann das
+Schnellladen beenden. In `[buffer_feeder mellow]` aktivieren:
+
+```ini
+load_endstop_sensor: filament_switch_sensor toolhead
+load_fast_distance: 1000
+```
+
+`filament_switch_sensor toolhead` muss als eigene Klipper-Section mit dem
+passenden `switch_pin` existieren und aktiviert sein. Kein Motion-Sensor.
+Ohne `load_endstop_sensor` bleibt der bisherige distanzbasierte Ablauf aktiv.
+
+Mit Sensor ist `load_fast_distance` die erwartete Strecke: bei 1000 mm ist
+eine Erkennung zwischen 900 und 1100 mm gueltig. Ein frueherer Trigger stoppt
+das Schnellladen mit Fehler; ohne Trigger endet die Suche spaetestens bei
+1100 mm mit Fehler. Die folgenden Ladephasen werden dann nicht ausgefuehrt.
+Ist der Sensor beim Start bereits belegt, wird nur das Schnellladen uebersprungen.
+`DISTANCE` an `BUFFER_LOAD_PHASE1` ersetzt die Sollstrecke inklusive Toleranz.
+`max_feed_time` begrenzt zusaetzlich die Suchdauer. HALL-/JAM-/HALT-Abbrueche
+beenden den Sensor-Ladeablauf; es gibt kein automatisches Wiederanfahren.
+
+Die Strecke wird aus den zeitlich abgefahrenen Sollbewegungen berechnet
+(keine Messung von Filamentschlupf), zum Zeitpunkt der Sensorerkennung.
+Bewegungsabschnitte sind auf `min(3, interrupt_chunk_mm, max_move_chunk_mm)` mm
+begrenzt. Sensorlatenz, 10-ms-Polling und bereits geplante Steps verursachen
+Nachlauf; dies ist kein hardwareseitig sofort stoppender Homing-Endstop.
+Der Endstop muss entsprechend vor dem mechanischen Anschlag sitzen.
+Ein `insert_gcode` dieses Sensors darf keinen weiteren Ladeablauf starten.
+
 ### Diese Werte sind in der mitgelieferten Config bereits bewusst gesetzt
 
 Die aktuelle `lll.cfg` ist kein generischer "Minimalwert", sondern ein

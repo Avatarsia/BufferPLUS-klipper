@@ -51,7 +51,7 @@ from .buffer_fault import FaultManager
 from .buffer_cleanup import CleanupCoordinator
 from .buffer_config import BufferConfigValues
 from .buffer_modulator import ExtruderVelocityTracker
-from .buffer_sensors import HallSensorMonitor
+from .buffer_sensors import HallSensorMonitor, LoadEndstopMonitor
 from .buffer_state import BufferRuntimeState
 from .buffer_stepper import SyncCoordinator
 from .buffer_types import AnchorPlan, CleanupOptions, Hall1Context
@@ -76,6 +76,14 @@ class BufferFeeder:
         self.name = config.get_name().split()[1]   # "mellow"
         self.settings = BufferConfigValues.from_config(config)
         self.settings.apply(self)
+        self._load_endstop_sensor = None
+        self._load_endstop_move = None
+        if self.load_endstop_sensor:
+            if not self.load_endstop_sensor.startswith('filament_switch_sensor '):
+                raise config.error(
+                    'load_endstop_sensor must name a filament_switch_sensor')
+            self._load_endstop_sensor = self.printer.load_object(
+                config, self.load_endstop_sensor)
         self.runtime_state = BufferRuntimeState()
         self.runtime_state.apply(self)
         self._debug_event_last = {}
@@ -2115,6 +2123,9 @@ class BufferFeeder:
         counter — already-queued trapezoids drain on the MCU."""
         if self._pending_remaining_mm <= 0:
             return
+        if (self._load_endstop_move is not None
+                and self._load_endstop_move.poll(eventtime)):
+            return
         if self._abort_signalled():
             # Retract-Streams (Retract-Burst/UNLOAD-Spillover) sind die
             # OVERFLOW-/JAM-Recovery-Bewegung — nur HALT nullt sie
@@ -2210,6 +2221,9 @@ class BufferFeeder:
             self._submit_single_trapezoid(
                 self._pending_direction * chunk, sub_chunk_speed,
                 streaming=True)
+            if (self._load_endstop_move is not None
+                    and self._load_endstop_move.poll(self.reactor.monotonic())):
+                return
             # C-cont T8: keep _pending_speed aligned with the latest
             # modulated speed so the next iteration's chunk_duration
             # math and any consumer of _pending_speed reflects reality.
@@ -2964,6 +2978,18 @@ class BufferFeeder:
             logging.exception("buffer_feeder: enable_stepper failed")
 
     def _disable_stepper(self):
+        # MCU time can pass the move end before a delayed background
+        # flush has generated all steps. Disabling then re-arms Klipper's
+        # activity callback, which may enable again at the old move start.
+        # Use the completed generator cursor, not the next flush target.
+        # With no submitted move, lme may only be a startup/recovery anchor.
+        move_end = (self._current_move['end_time']
+                    if self._current_move is not None
+                    else 0.0)
+        if self.motion_queuing.last_step_gen_time < move_end:
+            self._pending_disable = True
+            return
+        self._pending_disable = False
         # Nach Disable ist der Stepcompress-Cursor nicht mehr synchron —
         # beim naechsten Re-Enable muss set_position() aufgerufen werden
         # (partieller Reprime ohne flush_step_generation). Flag VOR dem
@@ -3146,6 +3172,9 @@ class BufferFeeder:
         if t0 is None:
             return  # anchor skipped (far-future), nothing queued
 
+        if (self._load_endstop_move is not None
+                and self._load_endstop_move.poll(self.reactor.monotonic())):
+            return
         self._append_trapezoid_and_record(t0, signed_distance, speed)
 
     def _sanitize_forced_t0_floors(self, mcu_now):
@@ -3377,6 +3406,9 @@ class BufferFeeder:
                           0., cruise_v, accel)
 
         end_time = t0 + accel_time + cruise_time + decel_time
+        if self._load_endstop_move is not None:
+            self._load_endstop_move.record(
+                t0, distance, cruise_v, accel_time, cruise_time, accel)
         self._last_move_end_time = end_time
         self._commanded_pos += direction * distance
 
@@ -3422,6 +3454,8 @@ class BufferFeeder:
         armed for a since-finished continuous feed does not later
         trip SAFETY_TIMEOUT on a quiescent feeder.
         """
+        if self._load_endstop_move is not None:
+            self._load_endstop_move.error = 'load endstop move interrupted'
         self._continuous_feed = False
         self._continuous_feed_direction = 0
         self._continuous_feed_speed = 0.0
@@ -4035,6 +4069,21 @@ class BufferFeeder:
     cmd_BUFFER_LOAD_PHASE1_help = "LOAD Phase 1 — feeder alone fast to toolhead. DISTANCE=mm"
     def cmd_BUFFER_LOAD_PHASE1(self, gcmd):
         self._halt_requested = False    # ack any stale console HALT
+        if (self._load_endstop_sensor is not None
+                and self._load_endstop_present()):
+            # Repeated LOAD may start with both endstop and HALL1 active.
+            # Skip without submitting motion or releasing the HALL1 lockout.
+            self._raise_if_jam()
+            self._check_phase_entry('LOAD_PHASE1', {
+                STATE_IDLE, STATE_AUTO, STATE_RUNOUT, STATE_LOADING_PULL,
+                STATE_OVERFLOW,
+            })
+            self._halt_motion()
+            self._overflow_interrupted_state = None
+            self._overflow_resume_mm = 0.0
+            self._wait_for_move_drain_allowing_lockout()
+            self._respond('LOAD: endstop already active - skip fast load')
+            return
         self._raise_if_locked_out(gcmd)
         self._check_phase_entry('LOAD_PHASE1', {
             STATE_IDLE, STATE_AUTO, STATE_RUNOUT, STATE_LOADING_PULL,
@@ -4045,6 +4094,9 @@ class BufferFeeder:
         # any in-flight chunk so residual motion doesn't extend Phase 1.
         self._continuous_feed = False
         self._wait_for_move_done(gcmd)
+        if self._load_endstop_sensor is not None:
+            self._load_to_endstop(gcmd, distance, speed)
+            return
         self._set_state(STATE_LOADING_PULL)
         self._enable_stepper()
         self._submit_move(+distance, speed)
@@ -4064,6 +4116,51 @@ class BufferFeeder:
                 self._set_state(STATE_IDLE)
             raise
         self._set_state(STATE_IDLE)
+
+    def _load_endstop_present(self):
+        try:
+            status = self._load_endstop_sensor.get_status(self.reactor.monotonic())
+            if not status['enabled']:
+                raise self._cmd_error('load endstop sensor disabled')
+            return status['filament_detected']
+        except Exception as exc:
+            raise self._cmd_error('load endstop sensor unavailable: %s' % exc)
+
+    def _load_to_endstop(self, gcmd, distance, speed):
+        if self._load_endstop_present():
+            self._respond('LOAD: endstop already active - skip fast load')
+            return
+        monitor = LoadEndstopMonitor(self, self._load_endstop_sensor, distance)
+        self._set_state(STATE_LOADING_PULL)
+        self._load_endstop_move = monitor
+        try:
+            # Cap both first and subsequent chunks. HALL/HALT/JAM guards
+            # remain active; unlike legacy loading a lockout aborts this move.
+            self._submit_move(monitor.maximum, speed,
+                              submit_chunk_cap=min(3.0, self.interrupt_chunk_mm))
+            while True:
+                self._raise_if_locked_out(gcmd)
+                monitor.poll(self.reactor.monotonic())
+                if not self._move_in_flight() and self._pending_remaining_mm <= 0:
+                    break
+                self.reactor.pause(self.reactor.monotonic() + 0.01)
+            if monitor.error is not None:
+                raise self._cmd_error(monitor.error)
+            if monitor.detected_distance is None:
+                raise self._cmd_error(
+                    'load endstop not reached within %.2f mm' % monitor.maximum)
+            self._respond('LOAD: endstop reached at %.2f mm (expected %.2f..%.2f)' % (
+                monitor.detected_distance, monitor.minimum, monitor.maximum))
+        except Exception:
+            self._halt_motion()
+            # An aborted sensor load must never resume on a later HALL1-clear.
+            self._overflow_interrupted_state = None
+            self._overflow_resume_mm = 0.0
+            raise
+        finally:
+            self._load_endstop_move = None
+            if self._state == STATE_LOADING_PULL:
+                self._set_state(STATE_IDLE)
 
     # cmd_BUFFER_LOAD_PHASE2 entfernt. Das parallele Feeder+
     # Extruder-Pattern wurde durch SYNC_TO_EXTRUDER abgeloest (P7-44 in
@@ -5003,6 +5100,7 @@ class BufferFeeder:
             'unload_fast_speed':        self.unload_fast_speed,
             'unload_phase3_speed':      self.unload_phase3_speed,
             'load_fast_distance':       self.load_fast_distance,
+            'load_endstop_sensor':      self.load_endstop_sensor,
             'load_slow_distance':       self.load_slow_distance,
             'load_buffer_max':          self.load_buffer_max,
             'unload_sync_distance':     self.unload_sync_distance,

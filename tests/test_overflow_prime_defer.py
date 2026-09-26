@@ -283,6 +283,7 @@ def test_p779_eifel_c14_reproduction():
     # Stage M1 als laufender Streaming-Chunk.
     feeder._stepcompress_primed = True
     feeder._last_move_end_time = 10.13
+    feeder._current_move = {'end_time': 10.13}
     feeder._commanded_pos = 9.0
     stepper.set_position((9.0, 0.0, 0.0))
 
@@ -292,10 +293,13 @@ def test_p779_eifel_c14_reproduction():
     feeder._pending_disable = True
     feeder._continuous_feed = False
 
-    # Schritt 2: _main_tick sieht M1 zeit-basiert vorbei (now > end)
-    # und ruft _disable_stepper -> primed = False.
-    # Wir simulieren das ohne den ganzen tick zu fahren.
+    # The central guard now prevents the historical early disable.
     feeder._disable_stepper()
+    assert feeder._pending_disable
+    assert feeder._stepcompress_primed
+    # Inject the old invalidated state explicitly to keep testing the
+    # independent overflow-prime defense against ungenerated moves.
+    feeder._stepcompress_primed = False
     assert feeder._stepcompress_primed is False  # Sanity
 
     # Schritt 3: HALL1 cleared -> _resume_after_overflow ->
@@ -394,8 +398,12 @@ def test_p779b_halt_motion_p774_clamp_defer():
         "Setup-Sanity: _current_move MUSS intakt sein (P7-74 Doc-"
         "Garantie Z.3452). Got %r." % (feeder._current_move,))
 
-    # Schritt 2: _disable_stepper -> primed = False.
+    # Early disable is now deferred even after the halt-time clamp.
     feeder._disable_stepper()
+    assert feeder._pending_disable
+    assert feeder._stepcompress_primed
+    # Preserve the historical fault injection for the flush-side guard.
+    feeder._stepcompress_primed = False
     assert feeder._stepcompress_primed is False
 
     # Schritt 3: _resume_after_overflow -> _needs_overflow_prime.

@@ -2,6 +2,8 @@
 #
 # Sub-module of buffer_feeder (kein Klipper-load_config-Eintrypoint).
 
+from collections import deque
+
 from ._buffer_common import (
     BUTTON_FEED, BUTTON_RETRACT,
     CLICK_DOUBLE, CLICK_SINGLE, CLICK_TRIPLE,
@@ -11,6 +13,69 @@ from ._buffer_common import (
     STATE_UNLOADING,
 )
 from .buffer_types import Hall1Context
+
+
+class LoadEndstopMonitor:
+    """Track executed nominal distance, excluding queued lookahead moves."""
+
+    def __init__(self, owner, sensor, distance):
+        self.owner = owner
+        self.sensor = sensor
+        self.minimum = distance * 0.9
+        self.maximum = distance * 1.1
+        self.deadline = owner.reactor.monotonic() + owner.max_feed_time
+        self.moves = deque()
+        self.completed = 0.0
+        self.detected_distance = None
+        self.error = None
+
+    def record(self, t0, distance, speed, accel_time, cruise_time, accel):
+        self.moves.append((t0, distance, speed, accel_time, cruise_time, accel))
+
+    def distance_at(self, print_time):
+        while self.moves:
+            t0, distance, speed, ta, tc, accel = self.moves[0]
+            if print_time < t0 + 2.0 * ta + tc:
+                break
+            self.completed += distance
+            self.moves.popleft()
+        distance = self.completed
+        for t0, length, speed, ta, tc, accel in self.moves:
+            elapsed = max(0.0, print_time - t0)
+            if elapsed < ta:
+                distance += 0.5 * accel * elapsed ** 2
+            elif elapsed < ta + tc:
+                distance += 0.5 * speed * ta + speed * (elapsed - ta)
+            else:
+                remaining = max(0.0, 2.0 * ta + tc - elapsed)
+                distance += length - 0.5 * accel * remaining ** 2
+        return distance
+
+    def poll(self, eventtime):
+        if self.error is None and self.detected_distance is None:
+            try:
+                status = self.sensor.get_status(eventtime)
+                if not status['enabled']:
+                    self.error = 'load endstop sensor disabled'
+                elif status['filament_detected']:
+                    mcu = self.owner.stepper.get_mcu()
+                    self.detected_distance = self.distance_at(
+                        mcu.estimated_print_time(eventtime))
+                    if self.detected_distance + 1.e-6 < self.minimum:
+                        self.error = ('load endstop triggered too early at %.2f mm '
+                                      '(expected %.2f..%.2f mm)' % (
+                                          self.detected_distance,
+                                          self.minimum, self.maximum))
+                elif eventtime >= self.deadline:
+                    self.error = 'load endstop timeout (max_feed_time)'
+            except Exception as exc:
+                self.error = 'load endstop sensor read failed: %s' % exc
+        stopped = self.error is not None or self.detected_distance is not None
+        if stopped:
+            # Preserve the queued motion cursor: already queued steps drain.
+            self.owner._pending_remaining_mm = 0.0
+            self.owner._pending_submit_chunk_cap = None
+        return stopped
 
 
 class HallSensorMonitor:
