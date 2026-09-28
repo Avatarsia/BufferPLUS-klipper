@@ -227,26 +227,54 @@ meisten Setups gibt es zwei Gruppen:
 | `load_slow_distance` | `[buffer_feeder mellow]` | Strecke durch Heatbreak/Hotend beim Laden |
 | `unload_sync_distance` | `[buffer_feeder mellow]` | synchroner Extruder-Rueckzug beim Entladen |
 
-### Optional: Schnellladen bis zum Filament-Endstop
+### Optional: Druckkopfsensor fuer Laden und Entladen
 
-Ein bereits konfigurierter Klipper-Schaltsensor im Druckkopf kann das
-Schnellladen beenden. In `[buffer_feeder mellow]` aktivieren:
+Ein Klipper-Schaltsensor vor dem Extruder kann die Umschaltung beim Laden
+und Entladen steuern. In `[buffer_feeder mellow]` aktivieren:
 
 ```ini
 load_endstop_sensor: filament_switch_sensor toolhead
 load_fast_distance: 1000
+load_sensor_to_extruder: 10
 ```
 
-`filament_switch_sensor toolhead` muss als eigene Klipper-Section mit dem
-passenden `switch_pin` existieren und aktiviert sein. Kein Motion-Sensor.
-Ohne `load_endstop_sensor` bleibt der bisherige distanzbasierte Ablauf aktiv.
+`[filament_switch_sensor toolhead]` muss einmal in `printer.cfg` oder einer
+eingebundenen Datei mit dem passenden `switch_pin` existieren. Kein
+Motion-Sensor; der Pin wird nicht nochmals im Buffer definiert. Name und
+Pin-Polaritaet muessen zur Hardware passen.
 
-Mit Sensor ist `load_fast_distance` die erwartete Strecke: bei 1000 mm ist
-eine Erkennung zwischen 900 und 1100 mm gueltig. Ein frueherer Trigger stoppt
-das Schnellladen mit Fehler; ohne Trigger endet die Suche spaetestens bei
-1100 mm mit Fehler. Die folgenden Ladephasen werden dann nicht ausgefuehrt.
-Ist der Sensor beim Start bereits belegt, wird nur das Schnellladen uebersprungen.
-`DISTANCE` an `BUFFER_LOAD_PHASE1` ersetzt die Sollstrecke inklusive Toleranz.
+Ohne `load_endstop_sensor` bleiben die bisherigen Lade- und Entlademakros
+aktiv; das ist kein Fehler. Ist ein Sensor konfiguriert, kann aber nicht
+geladen werden, nennt der Fehler die gesuchte Section und `switch_pin`.
+Den Namen korrigieren/Section anlegen oder `load_endstop_sensor` entfernen,
+wenn tatsaechlich ohne Sensor gearbeitet werden soll. Bei Sensorfehlern
+gibt es keinen stillen Wechsel auf distanzbasiertes Laden.
+
+`LOAD_FILAMENT` foerdert schnell bis zur Sensormeldung, danach langsam um
+`load_sensor_to_extruder` (Default **10 mm**) bis zum Extruder. Bereits
+abgefahrener nominaler Nachlauf nach Erkennung wird davon abgezogen.
+Anschliessend laden Extruder und Buffer synchron um `load_slow_distance`
+bei `load_slow_speed`. Die bisherige HALL2-Staging-Phase vor dem SYNC wird
+in diesem Sensorpfad nicht ausgefuehrt. Ein anfangs bereits belegter Sensor
+ueberspringt Schnellladen und Nachlauf; HALL-/JAM-Sicherheiten bleiben aktiv.
+
+`UNLOAD_FILAMENT` prueft beim synchronen Rueckzug den Sensor zwischen
+kurzen, abgeschlossenen Bewegungen. Sobald er frei meldet, endet SYNC;
+der Buffer entlaedt danach allein bis zum freien Entrance-Sensor.
+Ein bereits freier Druckkopfsensor ueberspringt den synchronen Teil.
+`SYNC_DIST` bzw. `unload_sync_distance` begrenzt die Sensor-Suche; bei
+fehlender Freimeldung wird abgebrochen. Auch Tip-Forming-Rueckzuege werden
+ueberwacht. Fehler bereinigen SYNC und den gespeicherten GCode-Zustand.
+
+Im Sensorworkflow bleibt die Sensorauswertung aktiv, automatische
+Insert-/Runout-Aktionen werden voruebergehend unterdrueckt. Der vorherige
+Aktivierungszustand wird nach Erfolg oder Fehler wiederhergestellt.
+
+Bei `LOAD_FILAMENT` beendet auch eine fruehere Erkennung das Schnellladen
+(bereits teilweise eingefuehrtes Filament). Ohne Trigger endet die Suche
+spaetestens bei 110% von `load_fast_distance` mit Fehler.
+Der direkte Low-Level-Befehl `BUFFER_LOAD_PHASE1` behaelt sein bisheriges
+90..110%-Prueffenster; dessen `DISTANCE` ersetzt die Sollstrecke.
 `max_feed_time` begrenzt zusaetzlich die Suchdauer. HALL-/JAM-/HALT-Abbrueche
 beenden den Sensor-Ladeablauf; es gibt kein automatisches Wiederanfahren.
 

@@ -243,33 +243,43 @@ def test_load_macro_uses_sensor_even_when_buffer_full(
         'load_endstop_sensor': SENSOR if sensor_enabled else ''})
     set_sensor_active(feeder, 'hall_full', full)
     commands = load_macro_commands(feeder)
-    assert ('BUFFER_LOAD_PHASE1 BUFFER=mellow' in commands) is expect_phase1
+    if sensor_enabled:
+        assert len(commands) == 1
+        assert commands[0].startswith('BUFFER_LOAD_FILAMENT BUFFER=mellow ')
+    else:
+        assert ('BUFFER_LOAD_PHASE1 BUFFER=mellow' in commands) is expect_phase1
 
 
 @pytest.mark.parametrize('trigger', [50., None])
 def test_load_macro_error_prevents_next_phase(monkeypatch, trigger):
     feeder, _, _, _ = setup_load(monkeypatch, trigger)
+    def reject_load(cmd):
+        raise RuntimeError('sensor workflow aborted')
+    monkeypatch.setattr(feeder.toolhead_sensor, 'load', reject_load)
     phase3 = []
     with pytest.raises(RuntimeError):
         for command in load_macro_commands(feeder):
-            if command.startswith('BUFFER_LOAD_PHASE1 '):
-                feeder.cmd_BUFFER_LOAD_PHASE1(FakeGCmd())
+            if command.startswith('BUFFER_LOAD_FILAMENT '):
+                feeder.cmd_BUFFER_LOAD_FILAMENT(FakeGCmd())
             elif command.startswith('BUFFER_LOAD_PHASE3 '):
                 phase3.append(command)
     assert not phase3
 
 
-def test_load_macro_repeat_with_overflow_reaches_fill_phase(monkeypatch):
+def test_load_macro_repeat_with_overflow_delegates_live_checks(monkeypatch):
     feeder, sensor, _, moves = setup_load(monkeypatch)
     sensor.detected = True
     set_sensor_active(feeder, 'hall_overflow', True)
     feeder._state = buffer_feeder.STATE_OVERFLOW
-    for command in load_macro_commands(feeder):
-        if command.startswith('BUFFER_LOAD_PHASE1 '):
-            feeder.cmd_BUFFER_LOAD_PHASE1(FakeGCmd())
-        elif command.startswith('BUFFER_LOAD_PHASE3 '):
-            assert 'OVERFLOW_OK=1' in command
-            break
-    else:
-        pytest.fail('missing buffer fill phase')
+    commands = load_macro_commands(feeder)
+    assert len(commands) == 1
+    assert commands[0].startswith('BUFFER_LOAD_FILAMENT BUFFER=mellow ')
     assert not moves
+
+
+def test_sensor_workflow_accepts_partial_path_and_reports_run_on(monkeypatch):
+    feeder, _, progress, _ = setup_load(monkeypatch, trigger=50.)
+    run_on = feeder._load_to_endstop(FakeGCmd(), 100., feeder.load_fast_speed,
+                                    minimum_ratio=0.0)
+    assert 0. <= run_on <= 6.
+    assert 50. <= progress() <= 56.

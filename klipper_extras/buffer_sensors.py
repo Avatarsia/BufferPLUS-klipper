@@ -18,10 +18,10 @@ from .buffer_types import Hall1Context
 class LoadEndstopMonitor:
     """Track executed nominal distance, excluding queued lookahead moves."""
 
-    def __init__(self, owner, sensor, distance):
+    def __init__(self, owner, sensor, distance, minimum_ratio=0.9):
         self.owner = owner
         self.sensor = sensor
-        self.minimum = distance * 0.9
+        self.minimum = distance * minimum_ratio
         self.maximum = distance * 1.1
         self.deadline = owner.reactor.monotonic() + owner.max_feed_time
         self.moves = deque()

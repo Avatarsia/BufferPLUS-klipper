@@ -36,6 +36,7 @@ class BufferConfigValues:
     grip_follow_speed: float
     load_fast_distance: float
     load_endstop_sensor: str
+    load_sensor_to_extruder: float
     load_slow_distance: float
     load_buffer_max: float
     unload_sync_distance: float
@@ -121,6 +122,8 @@ class BufferConfigValues:
             load_fast_distance=config.getfloat(
                 'load_fast_distance', 1000., above=0.),
             load_endstop_sensor=config.get('load_endstop_sensor', '').strip(),
+            load_sensor_to_extruder=config.getfloat(
+                'load_sensor_to_extruder', 10., minval=0.),
             load_slow_distance=config.getfloat(
                 'load_slow_distance', 180., above=0.),
             load_buffer_max=config.getfloat(

@@ -54,6 +54,7 @@ from .buffer_modulator import ExtruderVelocityTracker
 from .buffer_sensors import HallSensorMonitor, LoadEndstopMonitor
 from .buffer_state import BufferRuntimeState
 from .buffer_stepper import SyncCoordinator
+from .buffer_toolhead import ToolheadSensorWorkflow
 from .buffer_types import AnchorPlan, CleanupOptions, Hall1Context
 
 
@@ -82,8 +83,18 @@ class BufferFeeder:
             if not self.load_endstop_sensor.startswith('filament_switch_sensor '):
                 raise config.error(
                     'load_endstop_sensor must name a filament_switch_sensor')
-            self._load_endstop_sensor = self.printer.load_object(
-                config, self.load_endstop_sensor)
+            try:
+                self._load_endstop_sensor = self.printer.load_object(
+                    config, self.load_endstop_sensor)
+            except Exception as exc:
+                raise config.error(
+                    "Druckkopfsensor '%s' konnte nicht geladen werden. "
+                    "Section [%s] mit switch_pin in printer.cfg oder einer "
+                    "eingebundenen Datei anlegen/pruefen. Ohne Sensor: "
+                    "load_endstop_sensor entfernen fuer den bisherigen "
+                    "distanzbasierten Ablauf. Ursache: %s"
+                    % (self.load_endstop_sensor, self.load_endstop_sensor, exc))
+        self.toolhead_sensor = ToolheadSensorWorkflow(self)
         self.runtime_state = BufferRuntimeState()
         self.runtime_state.apply(self)
         self._debug_event_last = {}
@@ -433,6 +444,7 @@ class BufferFeeder:
             # BUFFER_LOAD_PHASE2 entfernt (durch SYNC_TO_EXTRUDER ersetzt)
             ('BUFFER_LOAD_PHASE3',          self.cmd_BUFFER_LOAD_PHASE3,          None),
             ('BUFFER_UNLOAD_FILAMENT',      self.cmd_BUFFER_UNLOAD_FILAMENT,      None),
+            ('BUFFER_LOAD_FILAMENT',        self.cmd_BUFFER_LOAD_FILAMENT,        None),
             ('BUFFER_UNLOAD_PHASE3',        self.cmd_BUFFER_UNLOAD_PHASE3,        None),
             ('BUFFER_SYNC_TO_EXTRUDER',     self.cmd_BUFFER_SYNC_TO_EXTRUDER,     None),
             ('BUFFER_UNSYNC',               self.cmd_BUFFER_UNSYNC,               None),
@@ -4066,6 +4078,9 @@ class BufferFeeder:
             "or BUFFER_STATE_DUMP to inspect."
             % (cmd_name, self._state, sorted(allowed_states)))
 
+    def cmd_BUFFER_LOAD_FILAMENT(self, gcmd):
+        self.toolhead_sensor.load(gcmd)
+
     cmd_BUFFER_LOAD_PHASE1_help = "LOAD Phase 1 — feeder alone fast to toolhead. DISTANCE=mm"
     def cmd_BUFFER_LOAD_PHASE1(self, gcmd):
         self._halt_requested = False    # ack any stale console HALT
@@ -4126,11 +4141,12 @@ class BufferFeeder:
         except Exception as exc:
             raise self._cmd_error('load endstop sensor unavailable: %s' % exc)
 
-    def _load_to_endstop(self, gcmd, distance, speed):
+    def _load_to_endstop(self, gcmd, distance, speed, minimum_ratio=0.9):
         if self._load_endstop_present():
             self._respond('LOAD: endstop already active - skip fast load')
-            return
-        monitor = LoadEndstopMonitor(self, self._load_endstop_sensor, distance)
+            return 0.0
+        monitor = LoadEndstopMonitor(self, self._load_endstop_sensor, distance,
+                                     minimum_ratio=minimum_ratio)
         self._set_state(STATE_LOADING_PULL)
         self._load_endstop_move = monitor
         try:
@@ -4151,6 +4167,9 @@ class BufferFeeder:
                     'load endstop not reached within %.2f mm' % monitor.maximum)
             self._respond('LOAD: endstop reached at %.2f mm (expected %.2f..%.2f)' % (
                 monitor.detected_distance, monitor.minimum, monitor.maximum))
+            mcu_now = self.stepper.get_mcu().estimated_print_time(
+                self.reactor.monotonic())
+            return max(0.0, monitor.distance_at(mcu_now) - monitor.detected_distance)
         except Exception:
             self._halt_motion()
             # An aborted sensor load must never resume on a later HALL1-clear.
@@ -4292,6 +4311,8 @@ class BufferFeeder:
 
     cmd_BUFFER_UNLOAD_FILAMENT_help = "UNLOAD_FILAMENT als Python-Workflow mit garantiertem Cleanup"
     def cmd_BUFFER_UNLOAD_FILAMENT(self, gcmd):
+        if self._load_endstop_sensor is not None:
+            return self.toolhead_sensor.unload(gcmd)
         # Entry-Guard (Review 2026-07-09): vorher ohne jeden State-
         # Check — ein UNLOAD waehrend INITIAL_GRIP/LOAD swappte den
         # Trapq mitten im Grip und das nested BUFFER_UNLOAD_PHASE3
@@ -5101,6 +5122,7 @@ class BufferFeeder:
             'unload_phase3_speed':      self.unload_phase3_speed,
             'load_fast_distance':       self.load_fast_distance,
             'load_endstop_sensor':      self.load_endstop_sensor,
+            'load_sensor_to_extruder':  self.load_sensor_to_extruder,
             'load_slow_distance':       self.load_slow_distance,
             'load_buffer_max':          self.load_buffer_max,
             'unload_sync_distance':     self.unload_sync_distance,

@@ -118,10 +118,11 @@ def run_case(feeder_class, delayed):
         assert toggles == sorted(toggles), "Enable clock moved backwards"
         assert not feeder._stepcompress_primed, "Completed disable kept priming"
     finally:
-        lib.steppersyncmgr_free(mgr)
-        lib.trapq_free(tq)
+        # Drain serial messages before freeing the manager's commandqueue.
         lib.serialqueue_exit(sq)
         lib.serialqueue_free(sq)
+        lib.steppersyncmgr_free(mgr)
+        lib.trapq_free(tq)
         os.close(fd)
 
 
