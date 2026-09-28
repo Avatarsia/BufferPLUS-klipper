@@ -1,0 +1,2458 @@
+{
+  "version": "1.0.0",
+  "project": {
+    "name": "LLL Plus Buffer",
+    "languages": [
+      "config",
+      "markdown",
+      "python",
+      "shell"
+    ],
+    "frameworks": [
+      "Klipper",
+      "Python",
+      "pytest"
+    ],
+    "description": "Klipper-Python-Extension fuer den Mellow LLL Plus Filament Buffer; der Buffer-Feeder laeuft auf einer eigenen Move-Queue und foerdert waehrend des Drucks parallel zum Druckkopf nach, ohne diesen anzuhalten.",
+    "analyzedAt": "2026-05-23T19:43:43.022219Z",
+    "gitCommitHash": "7141b783a5655c16cd367c31d0eabc9d059d280a"
+  },
+  "nodes": [
+    {
+      "id": "file:klipper_extras/buffer_feeder.py",
+      "type": "file",
+      "name": "buffer_feeder.py",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Haupt-Modul des Mellow LLL Plus Buffer-Plugins (~4500 LOC) — implementiert die BufferFeeder-Klasse mit eigener Move-Queue, die parallel zum Druck Filament nachfuettert. Beinhaltet GCode-Commands (cmd_BUFFER_*), AUTO-Streaming-Pfad (_flush_callback_bang_bang, _tick_pending_chunk), Watchdog-Anchor-Mechanik (_plan_t0_anchor, _on_mcu_flush, forced_t0), HALL-Sensor-Sicherheits-Logik (HALL1-Overflow-Stop, HALL3-Demand-Gain) und Sync-Management (SYNC_EXTRUDER_MOTION, FORCE_MOVE).",
+      "tags": [
+        "haupt-modul",
+        "klipper-extension",
+        "auto-streaming",
+        "buffer-feeder",
+        "motion-queuing"
+      ],
+      "complexity": "complex",
+      "languageNotes": "Klipper-Extension via load_config_prefix-Pattern. Nutzt register_mux_command (Mux-Key EXTRUDER=) statt register_command zur Vermeidung von Naming-Konflikten. Setzt direkt auf Klipper-interne APIs: stepcompress, trapq, itersolve, reactor."
+    },
+    {
+      "id": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "type": "class",
+      "name": "BufferFeeder",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "lineRange": [
+        68,
+        4538
+      ],
+      "summary": "Zentrale Plugin-Klasse (~4470 LOC, ~150 Methoden) — verwaltet die komplette Buffer-Feeder-Logik: HALL-Sensor-Events, AUTO-Streaming mit Bang-Bang-Regelung, Sicherheits-Stopps (Overflow/Jam), Sync-Extruder-Motion, GCode-Command-Dispatch und Hardware-Steuerung des dedizierten Steppers. Haelt State-Machine fuer IDLE/AUTO/LOAD-PHASE1..3/UNLOAD/JAM/OVERFLOW und koordiniert Watchdog-Anchor-Mechanik gegen stepcompress.last_step_clock-Race-Conditions.",
+      "tags": [
+        "haupt-klasse",
+        "state-machine",
+        "klipper-plugin",
+        "buffer-feeder"
+      ],
+      "complexity": "complex",
+      "languageNotes": "Monolithische Klasse — Refactor-Kandidat fuer Aufspaltung in Service-Klassen (siehe _buffer_common, buffer_state, buffer_sensors etc. als bereits ausgelagerte Helper)."
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:load_config_prefix",
+      "type": "function",
+      "name": "load_config_prefix",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "lineRange": [
+        4545,
+        4546
+      ],
+      "summary": "Klipper-Plugin-Entry-Point — wird vom Klipper-Loader aufgerufen und instanziiert pro [buffer_feeder NAME]-Sektion eine BufferFeeder-Instanz.",
+      "tags": [
+        "entry-point",
+        "klipper-plugin-api",
+        "factory"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:__init__",
+      "type": "function",
+      "name": "__init__",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "lineRange": [
+        69,
+        800
+      ],
+      "summary": "Konstruktor — liest Config-Werte (HALL-Pins, Stepper-Settings, Timings), registriert HALL-Sensor-Callbacks, Button-Events, GCode-Commands via register_mux_command und Klipper-Lifecycle-Handler (handle_connect, handle_ready, handle_shutdown). Initialisiert State, Trapq, Stepcompress und Reactor-Timer.",
+      "tags": [
+        "konstruktor",
+        "registrierung",
+        "config-parsing",
+        "lifecycle"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_register_gcode_commands",
+      "type": "function",
+      "name": "_register_gcode_commands",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Registriert alle BUFFER_*-GCode-Commands via register_mux_command mit Mux-Key EXTRUDER= um Naming-Konflikte mit anderen Extensions zu vermeiden.",
+      "tags": [
+        "gcode-registry",
+        "mux-command",
+        "klipper-api"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_handle_connect",
+      "type": "function",
+      "name": "_handle_connect",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Klipper-Lifecycle-Callback (connect-Phase) — bindet Extruder-Referenzen, initialisiert Trapq und Stepcompress fuer den Feeder-Stepper, setzt initiale Anchor-Werte.",
+      "tags": [
+        "lifecycle",
+        "klipper-hook",
+        "trapq-setup"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_handle_ready",
+      "type": "function",
+      "name": "_handle_ready",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Klipper-Lifecycle-Callback (ready-Phase) — startet Reactor-Timer (Main-Tick), aktiviert Startup-Grace-Periode und initiale Idle-Behandlung.",
+      "tags": [
+        "lifecycle",
+        "klipper-hook",
+        "timer-start"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_handle_shutdown",
+      "type": "function",
+      "name": "_handle_shutdown",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Klipper-Shutdown-Handler — stoppt alle Timer, disabled Stepper, raeumt Trapq auf und sorgt fuer sauberes Beenden ohne Hardware-Hang.",
+      "tags": [
+        "lifecycle",
+        "shutdown",
+        "cleanup",
+        "sicherheit"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:hall_empty",
+      "type": "function",
+      "name": "hall_empty",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "HALL-Sensor-Event-Handler — wird gefeuert wenn der Buffer als leer gemeldet wird (HALL1-Pegel niedrig). Triggert Demand-Gain im Streaming-Pfad oder Wiederaufladen im manuellen Modus.",
+      "tags": [
+        "sensor-callback",
+        "HALL1",
+        "event-handler"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:hall_full",
+      "type": "function",
+      "name": "hall_full",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "HALL-Sensor-Event-Handler — Buffer voll gemeldet (HALL2-Pegel). Reduziert Demand-Gain im Bang-Bang-Regler und armiert Post-Full-Bias-Clamp gegen Overshoot.",
+      "tags": [
+        "sensor-callback",
+        "HALL2",
+        "event-handler",
+        "bang-bang"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:hall_overflow",
+      "type": "function",
+      "name": "hall_overflow",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Sicherheits-kritischer HALL3-Handler — wird bei Buffer-Overflow gefeuert. Stoppt sofort jede Feeder-Bewegung (_halt_motion), wechselt in OVERFLOW-State und blockiert weitere Feed-Commands bis manueller Reset.",
+      "tags": [
+        "sicherheits-stopp",
+        "HALL3",
+        "overflow",
+        "kritisch"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_main_tick",
+      "type": "function",
+      "name": "_main_tick",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Zentraler Reactor-Timer-Tick — Dispatch-Punkt fuer Safety-Timeouts, Cooldown-Ende, Grip-Completion, Runout-Follow und Pending-Chunk-Submission im Streaming-Pfad. Laeuft regelmaessig (idR. einige ms-Takt).",
+      "tags": [
+        "timer-tick",
+        "dispatcher",
+        "haupt-loop"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_tick_pending_chunk",
+      "type": "function",
+      "name": "_tick_pending_chunk",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Verarbeitet ausstehende Streaming-Chunks im AUTO-Pfad — entscheidet ob ein neuer Sub-Chunk (interrupt_chunk_mm) submittiert werden darf, basierend auf HALL-State, In-Flight-Check und Watchdog-Anchor-Verfuegbarkeit.",
+      "tags": [
+        "auto-streaming",
+        "chunk-submission",
+        "interrupt-chunk"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_bang_bang_tick",
+      "type": "function",
+      "name": "_bang_bang_tick",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Bang-Bang-Regler-Tick im AUTO-Modus — vergleicht HALL-Soll-Pegel mit Ist-Pegel und schaltet Feed-Speed zwischen 0 und Target. Beruecksichtigt High-Flow-Carry und Post-Full-Bias-Clamp.",
+      "tags": [
+        "bang-bang",
+        "auto-streaming",
+        "regelung"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_compute_target_feed_speed",
+      "type": "function",
+      "name": "_compute_target_feed_speed",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Berechnet die Ziel-Feed-Geschwindigkeit aus Extruder-Velocity, Sync-Ratio und Demand-Gain. Wird vom Bang-Bang-Regler als Soll-Wert genutzt.",
+      "tags": [
+        "auto-streaming",
+        "feed-speed",
+        "sync-ratio"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_on_mcu_flush",
+      "type": "function",
+      "name": "_on_mcu_flush",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "MCU-Flush-Callback — wird von Klipper aufgerufen wenn der Step-Compress-Buffer geflusht wird. Triggert Watchdog-Anchor und Streaming-Chunk-Submission, mit Schutz gegen Race-Condition durch In-Flight-Move (_flush_should_defer_pending_itersolve).",
+      "tags": [
+        "flush-callback",
+        "watchdog",
+        "race-condition-guard",
+        "kritisch"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_flush_submit_streaming_chunk",
+      "type": "function",
+      "name": "_flush_submit_streaming_chunk",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Submittiert einen Streaming-Chunk aus dem flush-Callback-Pfad — gekoppelt an forced_t0-Mechanik um stepcompress.last_step_clock-Konflikte zu vermeiden.",
+      "tags": [
+        "flush-callback",
+        "auto-streaming",
+        "chunk-submission",
+        "stepcompress"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_plan_t0_anchor",
+      "type": "function",
+      "name": "_plan_t0_anchor",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Plant den t0-Anchor fuer den naechsten Move — kombiniert Lookahead, MAX_T0_LOOKAHEAD-Clamping und forced_t0-Override. Kritisch: bei forced_t0=None UND lookahead > MAX_T0_LOOKAHEAD wird geSKIPt statt geclampt (siehe NOT-TO-DO stepcompress.last_step_clock).",
+      "tags": [
+        "watchdog-anchor",
+        "t0-planning",
+        "stepcompress",
+        "kritisch"
+      ],
+      "complexity": "complex",
+      "languageNotes": "Wichtige Pitfall-Doku: t0=max(...) schuetzt NICHT vor stepcompress.last_step_clock. Eigenes Heartbeat-Surrogat via _last_mcu_flush_time + forced_t0 kwarg im Watchdog-Anchor (P7-78 Lesson)."
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_compute_t0_anchor",
+      "type": "function",
+      "name": "_compute_t0_anchor",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Berechnet den t0-Anchor-Zeitpunkt aus mehreren Quellen (last_step_clock, stepper-time, forced_t0, sanitized floors). Helper fuer _plan_t0_anchor.",
+      "tags": [
+        "watchdog-anchor",
+        "t0-planning",
+        "stepcompress"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_sanitize_forced_t0_floors",
+      "type": "function",
+      "name": "_sanitize_forced_t0_floors",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Saniert die forced_t0-Floor-Werte gegen ungueltige (zu kleine) Zeitstempel und schuetzt vor Versionsmismatch zwischen MCU-clock und Klippy-Zeit.",
+      "tags": [
+        "watchdog-anchor",
+        "sanitization",
+        "robustheit"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_reprime_stepcompress_if_needed",
+      "type": "function",
+      "name": "_reprime_stepcompress_if_needed",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Reprimt die Stepcompress-Struktur wenn der naechste Move einen frueheren t0 als last_step_clock haette — vermeidet stepcompress_reset (zerstoerend) durch eigenes Heartbeat-Surrogat.",
+      "tags": [
+        "stepcompress",
+        "watchdog-anchor",
+        "race-condition-guard"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_submit_move",
+      "type": "function",
+      "name": "_submit_move",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Submittiert einen vollstaendigen Move (mit Trapezoid-Profil) an die Move-Queue — kombiniert _plan_t0_anchor, _append_trapezoid_and_record und Enable-Stepper-Logik.",
+      "tags": [
+        "motion-queuing",
+        "trapezoid",
+        "move-submission"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_submit_single_trapezoid",
+      "type": "function",
+      "name": "_submit_single_trapezoid",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Submittiert ein einzelnes Trapezoid-Segment (cruise/accel/decel) an trapq_append. Low-Level-Helper unter _submit_move.",
+      "tags": [
+        "trapq",
+        "trapezoid",
+        "low-level"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_append_trapezoid_and_record",
+      "type": "function",
+      "name": "_append_trapezoid_and_record",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Appendet Trapezoid an trapq und protokolliert den Move im internen Tracking fuer In-Flight-Detection und Heartbeat-Time-Update.",
+      "tags": [
+        "trapq",
+        "move-tracking",
+        "stepcompress"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_halt_motion",
+      "type": "function",
+      "name": "_halt_motion",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Stoppt jede laufende Feeder-Bewegung sofort — flusht Trapq, deaktiviert Stepper und setzt State auf HALT. Wird von hall_overflow und cmd_BUFFER_HALT genutzt.",
+      "tags": [
+        "sicherheits-stopp",
+        "halt",
+        "motion-control",
+        "kritisch"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_start_continuous_motion",
+      "type": "function",
+      "name": "_start_continuous_motion",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Startet kontinuierliche Feeder-Bewegung im Streaming-Modus — initialisiert Watchdog-Anchor, armiert flush_callback und uebergibt Kontrolle an _bang_bang_tick.",
+      "tags": [
+        "auto-streaming",
+        "motion-control",
+        "watchdog"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_sync_to_extruder",
+      "type": "function",
+      "name": "_sync_to_extruder",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Synchronisiert den Feeder-Stepper an den Haupt-Extruder via SYNC_EXTRUDER_MOTION-Mechanismus. Wird beim Druckstart aktiviert und bleibt permanent stehen (siehe Memory: Sync-Feedback-Architektur).",
+      "tags": [
+        "sync-management",
+        "extruder-sync",
+        "motion-queuing"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_unsync_if_synced",
+      "type": "function",
+      "name": "_unsync_if_synced",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Loest die Sync zum Extruder wieder auf — nur sicher ausserhalb des Drucks aufrufbar (vgl. Memory: FORCE_MOVE nur ausserhalb Druck).",
+      "tags": [
+        "sync-management",
+        "unsync",
+        "motion-queuing"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_trigger_jam",
+      "type": "function",
+      "name": "_trigger_jam",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Triggert den Jam-Zustand — stoppt Bewegung, blockiert Feed-Commands und feuert User-Notification. Recovery nur via cmd_BUFFER_CLEAR_JAM.",
+      "tags": [
+        "sicherheits-stopp",
+        "jam",
+        "fault-state",
+        "kritisch"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_FEED",
+      "type": "function",
+      "name": "cmd_BUFFER_FEED",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "GCode-Command BUFFER_FEED — manuelles Vorwaerts-Feed um angegebene Strecke/Speed. Pruefen auf Jam/Lockout und Submittierung via _submit_move.",
+      "tags": [
+        "gcode-command",
+        "manuell",
+        "feed"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_RETRACT",
+      "type": "function",
+      "name": "cmd_BUFFER_RETRACT",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "GCode-Command BUFFER_RETRACT — manuelles Rueckwaerts-Feed (Retract). Gegenstueck zu BUFFER_FEED, geht ueber _cmd_feed_common.",
+      "tags": [
+        "gcode-command",
+        "manuell",
+        "retract"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_HALT",
+      "type": "function",
+      "name": "cmd_BUFFER_HALT",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "GCode-Command BUFFER_HALT — sofortiger Stop jeder Feeder-Bewegung via _halt_motion. Notbremse fuer User.",
+      "tags": [
+        "gcode-command",
+        "sicherheits-stopp",
+        "halt"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_AUTO_ON",
+      "type": "function",
+      "name": "cmd_BUFFER_AUTO_ON",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "GCode-Command BUFFER_AUTO_ON — aktiviert den AUTO-Streaming-Modus mit Bang-Bang-Regelung. Prueft Ready-Bedingungen via _check_auto_ready bevor State-Wechsel.",
+      "tags": [
+        "gcode-command",
+        "auto-streaming",
+        "mode-switch"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_AUTO_ON_IF_READY",
+      "type": "function",
+      "name": "cmd_BUFFER_AUTO_ON_IF_READY",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Variante von BUFFER_AUTO_ON — aktiviert AUTO nur wenn alle Vorbedingungen erfuellt, sonst no-op. Fuer Macro-Integration.",
+      "tags": [
+        "gcode-command",
+        "auto-streaming",
+        "conditional"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_AUTO_OFF",
+      "type": "function",
+      "name": "cmd_BUFFER_AUTO_OFF",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "GCode-Command BUFFER_AUTO_OFF — deaktiviert AUTO-Modus, stoppt Bang-Bang-Tick und gibt Stepper frei.",
+      "tags": [
+        "gcode-command",
+        "auto-streaming",
+        "mode-switch"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_WAIT_IDLE",
+      "type": "function",
+      "name": "cmd_BUFFER_WAIT_IDLE",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "GCode-Command BUFFER_WAIT_IDLE — blockiert bis alle Feeder-Bewegungen abgeschlossen sind, ueber Reactor-Pause-Polling.",
+      "tags": [
+        "gcode-command",
+        "wait",
+        "sync"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_LOAD_PHASE1",
+      "type": "function",
+      "name": "cmd_BUFFER_LOAD_PHASE1",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "GCode-Command BUFFER_LOAD_PHASE1 — startet Filament-Loading-Phase 1 (Initial-Grip). Teil der Multi-Phase-Load-Sequenz.",
+      "tags": [
+        "gcode-command",
+        "load",
+        "phase1"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_LOAD_PHASE3",
+      "type": "function",
+      "name": "cmd_BUFFER_LOAD_PHASE3",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "GCode-Command BUFFER_LOAD_PHASE3 — Phase 3 des Filament-Loadings (Endposition mit HALL2-Stable-Check).",
+      "tags": [
+        "gcode-command",
+        "load",
+        "phase3"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_UNLOAD_FILAMENT",
+      "type": "function",
+      "name": "cmd_BUFFER_UNLOAD_FILAMENT",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "GCode-Command BUFFER_UNLOAD_FILAMENT — Komplettes Filament-Unload mit definiertem Speed und HALL-Sensor-Ende-Detection.",
+      "tags": [
+        "gcode-command",
+        "unload",
+        "filament"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_SYNC_TO_EXTRUDER",
+      "type": "function",
+      "name": "cmd_BUFFER_SYNC_TO_EXTRUDER",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "GCode-Command BUFFER_SYNC_TO_EXTRUDER — manueller Sync-Trigger zum Extruder. Wrapper um _sync_to_extruder.",
+      "tags": [
+        "gcode-command",
+        "sync-management",
+        "extruder-sync"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_UNSYNC",
+      "type": "function",
+      "name": "cmd_BUFFER_UNSYNC",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "GCode-Command BUFFER_UNSYNC — Sync-Aufloesung. Wrapper um _unsync_if_synced.",
+      "tags": [
+        "gcode-command",
+        "sync-management",
+        "unsync"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_CLEAR_JAM",
+      "type": "function",
+      "name": "cmd_BUFFER_CLEAR_JAM",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "GCode-Command BUFFER_CLEAR_JAM — manueller Jam-Reset durch User. Loest Fault-State und erlaubt erneute Feed-Commands.",
+      "tags": [
+        "gcode-command",
+        "recovery",
+        "jam-clear"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_STATE_DUMP",
+      "type": "function",
+      "name": "cmd_BUFFER_STATE_DUMP",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "GCode-Command BUFFER_STATE_DUMP — Debug-Output des kompletten internen State (HALL, Phase, Timers, Anchor-Werte) fuer Diagnose.",
+      "tags": [
+        "gcode-command",
+        "debug",
+        "diagnose"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_SET",
+      "type": "function",
+      "name": "cmd_BUFFER_SET",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "GCode-Command BUFFER_SET — Laufzeit-Tuning einzelner Config-Parameter (z.B. demand_gain, interrupt_chunk_mm) ohne Restart.",
+      "tags": [
+        "gcode-command",
+        "konfiguration",
+        "tuning"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:cmd_FORCE_BUFFER_FILL",
+      "type": "function",
+      "name": "cmd_FORCE_BUFFER_FILL",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "GCode-Command FORCE_BUFFER_FILL — erzwingt Buffer-Auffuellung unabhaengig vom HALL-State. Diagnose-/Setup-Tool.",
+      "tags": [
+        "gcode-command",
+        "force-fill",
+        "diagnose"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:get_status",
+      "type": "function",
+      "name": "get_status",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Klipper-Status-API — gibt aktuellen State (HALL, Phase, Active, Suspend, Benchmark-Mode, Critical-Action-Guard) als dict fuer Web-Frontends (Mainsail/Fluidd) zurueck.",
+      "tags": [
+        "status-api",
+        "klipper-hook",
+        "web-frontend"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:klipper_extras/buffer_feeder.py:_set_state",
+      "type": "function",
+      "name": "_set_state",
+      "filePath": "klipper_extras/buffer_feeder.py",
+      "summary": "Zentraler State-Setter — protokolliert State-Wechsel, validiert Transition und triggert State-abhaengige Callbacks. Die einzige Stelle die self.state aendern darf.",
+      "tags": [
+        "state-machine",
+        "state-transition",
+        "logging"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "document:NOT-TO-DO.md",
+      "type": "document",
+      "name": "NOT-TO-DO.md",
+      "filePath": "NOT-TO-DO.md",
+      "summary": "Projekt-spezifisches Fehlerprotokoll mit chronologisch dokumentierten Stolperfallen (stepcompress-Pitfalls, Klipper-Mux-Migration, Bang-Bang-Limits) und Vermeidungsstrategien fuer kuenftige Sessions.",
+      "tags": [
+        "documentation",
+        "fehlerprotokoll",
+        "lessons-learned",
+        "klipper",
+        "stepcompress"
+      ],
+      "complexity": "simple",
+      "languageNotes": "Tabellen-Format `| Datum | Tag | Fehler | Vermeidung |` als Einzeiler-Eintraege — wird bei jedem Session-Start gelesen."
+    },
+    {
+      "id": "document:README.md",
+      "type": "document",
+      "name": "README.md",
+      "filePath": "README.md",
+      "summary": "Umfassende deutschsprachige Benutzer-Dokumentation des BufferPLUS-Klipper-Plugins mit 51 Sektionen — von Installation und Konfiguration ueber GCode-Commands bis zu High-Flow-Tuning, Baseline-Tests und einem technischen Anhang.",
+      "tags": [
+        "documentation",
+        "entry-point",
+        "user-guide",
+        "klipper",
+        "buffer-feeder"
+      ],
+      "complexity": "complex",
+      "languageNotes": "Vollstaendig auf Deutsch verfasst; deckt Installation, Tuning, Troubleshooting und Hardware-Hinweise (High-Flow, Jam-Detection, FW-Flash) ab."
+    },
+    {
+      "id": "file:install.sh",
+      "type": "file",
+      "name": "install.sh",
+      "filePath": "install.sh",
+      "summary": "Bash-Installer, der die Plugin-Module via Symlink in `klippy/extras/` einhaengt, Klipper- und Moonraker-Configs auf Konsistenz prueft und den Klipper-Service neu startet.",
+      "tags": [
+        "shell-script",
+        "installer",
+        "deployment",
+        "klipper",
+        "symlink"
+      ],
+      "complexity": "complex",
+      "languageNotes": "Nutzt collect_ext_sub_modules zum Auto-Erkennen aller `buffer_*`/`_buffer_common`-Module — neue Submodule werden ohne Installer-Aenderung mitgenommen."
+    },
+    {
+      "id": "file:klipper_extras/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "filePath": "klipper_extras/__init__.py",
+      "summary": "Package-Marker fuer die lokale Klipper-Extension-Sammlung; enthaelt nur einen Docstring und macht den Ordner zu einem Python-Paket.",
+      "tags": [
+        "package-marker",
+        "entry-point",
+        "python",
+        "klipper-extras"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:klipper_extras/_buffer_common.py",
+      "type": "file",
+      "name": "_buffer_common.py",
+      "filePath": "klipper_extras/_buffer_common.py",
+      "summary": "Zentrales Konstanten-Modul fuer das BufferPLUS-Plugin: State-Namen (AUTO/IDLE/LOAD_PHASE_*), Timing-Defaults (MAIN_TICK 50 Hz, REPRIME_GAP, ANCHOR_NUDGE) und Klick-/Button-IDs, die von allen Submodulen geteilt werden.",
+      "tags": [
+        "shared-constants",
+        "state-machine",
+        "utility",
+        "klipper",
+        "buffer-feeder"
+      ],
+      "complexity": "moderate",
+      "languageNotes": "Fuehrender Underscore im Dateinamen verhindert, dass Klipper das Modul als `load_config_prefix`-Eintragspunkt missversteht."
+    },
+    {
+      "id": "file:klipper_extras/buffer_baseline_log.py",
+      "type": "file",
+      "name": "buffer_baseline_log.py",
+      "filePath": "klipper_extras/buffer_baseline_log.py",
+      "summary": "Logging-Helfer, der waehrend Tuning-Laeufen eine dedizierte Baseline-Datei an das Python-Logging anhaengt und nur Praefix-gefilterte Buffer-Events herausschreibt.",
+      "tags": [
+        "logging",
+        "tuning",
+        "baseline",
+        "diagnostics",
+        "klipper"
+      ],
+      "complexity": "moderate",
+      "languageNotes": "Verwendet `_PrefixFilter`, um nur Buffer-Meldungen in das separate Logfile zu lenken — schont das Klippy-Hauptlog."
+    },
+    {
+      "id": "class:klipper_extras/buffer_baseline_log.py:BaselineLogfile",
+      "type": "class",
+      "name": "BaselineLogfile",
+      "filePath": "klipper_extras/buffer_baseline_log.py",
+      "lineRange": [
+        41,
+        140
+      ],
+      "summary": "Verwalter fuer das Baseline-Tuning-Log — kann zur Laufzeit attach/detach, schreibt einzelne Marker-Eintraege und sichert das Anlegen des Zielverzeichnisses.",
+      "tags": [
+        "logging",
+        "file-handler",
+        "tuning",
+        "lifecycle"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:klipper_extras/buffer_cleanup.py",
+      "type": "file",
+      "name": "buffer_cleanup.py",
+      "filePath": "klipper_extras/buffer_cleanup.py",
+      "summary": "Koordinator fuer geordnete Cleanup-Pfade — Reset auf IDLE bei Disconnect/Print-End, Jam-Recovery und Wiederherstellung des GCode-States nach Macro-Eingriffen.",
+      "tags": [
+        "cleanup",
+        "recovery",
+        "state-machine",
+        "buffer-feeder",
+        "klipper"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:klipper_extras/buffer_cleanup.py:CleanupCoordinator",
+      "type": "class",
+      "name": "CleanupCoordinator",
+      "filePath": "klipper_extras/buffer_cleanup.py",
+      "lineRange": [
+        6,
+        68
+      ],
+      "summary": "Kapselt die Reset-Sequenz (unsync, halt_motion, clear_recovery_flags, state=IDLE) und das Jam-Clearing inkl. Auto-Ready-Probe; arbeitet auf einem `owner`-BufferFeeder.",
+      "tags": [
+        "cleanup",
+        "jam-recovery",
+        "state-machine",
+        "delegate"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:klipper_extras/buffer_config.py",
+      "type": "file",
+      "name": "buffer_config.py",
+      "filePath": "klipper_extras/buffer_config.py",
+      "summary": "Parser fuer die `[buffer_feeder]`-Section in `lll.cfg` — liest 58 Tuning-Parameter (Speeds, Distances, Hall-Timings, Feature-Flags, High-Flow-Gains) und liefert sie als Dataclass-aehnliches Objekt an den BufferFeeder.",
+      "tags": [
+        "config-parser",
+        "buffer-feeder",
+        "tuning-parameters",
+        "klipper"
+      ],
+      "complexity": "moderate",
+      "languageNotes": "`from_config`-Classmethod als Factory + `apply`-Methode, die alle Felder per `setattr` auf den BufferFeeder kopiert."
+    },
+    {
+      "id": "class:klipper_extras/buffer_config.py:BufferConfigValues",
+      "type": "class",
+      "name": "BufferConfigValues",
+      "filePath": "klipper_extras/buffer_config.py",
+      "lineRange": [
+        5,
+        176
+      ],
+      "summary": "Container fuer alle aus `lll.cfg` geparsten Buffer-Parameter; bietet `from_config` als Klipper-Config-Loader und `apply`, das die Werte auf einen BufferFeeder-Owner uebertraegt.",
+      "tags": [
+        "config-container",
+        "dataclass",
+        "factory",
+        "tuning"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:klipper_extras/buffer_fault.py",
+      "type": "file",
+      "name": "buffer_fault.py",
+      "filePath": "klipper_extras/buffer_fault.py",
+      "summary": "Fault-Overlay-Logik: erkennt HALL1-Overflow als Sicherheitsstopp, fuehrt Resume-Sequenzen nach Overflow durch und entscheidet via `check_auto_ready`, wann AUTO wieder freigegeben werden darf.",
+      "tags": [
+        "fault-handling",
+        "safety",
+        "hall-sensor",
+        "recovery",
+        "buffer-feeder"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "class:klipper_extras/buffer_fault.py:FaultManager",
+      "type": "class",
+      "name": "FaultManager",
+      "filePath": "klipper_extras/buffer_fault.py",
+      "lineRange": [
+        18,
+        212
+      ],
+      "summary": "Zentraler Manager fuer Fault-Lifecycle — `is_hall1_active` als Sicherheits-Probe (Hall1Context-Coercion), `resume_after_overflow` orchestriert Stepper-Enable/State-Wechsel/Resume-Move, `check_auto_ready` setzt das Auto-Engage-Gate.",
+      "tags": [
+        "fault-manager",
+        "overflow-recovery",
+        "state-machine",
+        "safety"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:klipper_extras/buffer_modulator.py",
+      "type": "file",
+      "name": "buffer_modulator.py",
+      "filePath": "klipper_extras/buffer_modulator.py",
+      "summary": "ExtruderVelocityTracker liest periodisch die Extruder-Position vom MCU, fuehrt ein Rolling-Window und liefert die aktuelle Velocity/volumetrischen Flow — Grundlage fuer die HALL3-Demand-Gain-Modulation.",
+      "tags": [
+        "velocity-tracker",
+        "high-flow",
+        "extruder",
+        "modulation",
+        "buffer-feeder"
+      ],
+      "complexity": "moderate",
+      "languageNotes": "Setzt auf `mcu.estimated_print_time` + `find_past`-Trapq-Lookup, um Drift zwischen Reactor-Zeit und MCU-Zeit zu vermeiden."
+    },
+    {
+      "id": "class:klipper_extras/buffer_modulator.py:ExtruderVelocityTracker",
+      "type": "class",
+      "name": "ExtruderVelocityTracker",
+      "filePath": "klipper_extras/buffer_modulator.py",
+      "lineRange": [
+        9,
+        119
+      ],
+      "summary": "Rolling-Sample-Tracker fuer Extruder-Velocity und volumetrischen Flow; `tick` sampled, `get_velocity`/`get_volumetric_flow` liefern geglaettete Werte fuer die Bang-Bang-Demand-Gain.",
+      "tags": [
+        "sampling",
+        "velocity",
+        "volumetric-flow",
+        "rolling-window"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:klipper_extras/buffer_sensors.py",
+      "type": "file",
+      "name": "buffer_sensors.py",
+      "filePath": "klipper_extras/buffer_sensors.py",
+      "summary": "HALL-Sensor-Monitor fuer den 3-Stage-Buffer (HALL1/HALL2/HALL3) plus Entrance-Runout und Feed/Retract-Buttons: registriert Pins ueber `buttons.register_buttons`, debounced Raw-Events und dispatcht semantische State-Wechsel an den BufferFeeder.",
+      "tags": [
+        "hall-sensor",
+        "state-machine",
+        "debounce",
+        "klipper-buttons",
+        "buffer-feeder"
+      ],
+      "complexity": "complex",
+      "languageNotes": "Trennt klar zwischen Raw-Pin-Events, Debounce-Schicht und semantischen Helpern (`hall_empty`/`hall_full`/`hall_overflow`/`entrance_detected`) — verhindert Race-Conditions an HALL3."
+    },
+    {
+      "id": "class:klipper_extras/buffer_sensors.py:HallSensorMonitor",
+      "type": "class",
+      "name": "HallSensorMonitor",
+      "filePath": "klipper_extras/buffer_sensors.py",
+      "lineRange": [
+        16,
+        405
+      ],
+      "summary": "Zentrale Sensor-Klasse: registriert alle Buffer-Pins, fuehrt Debounce-Tick, mapped Raw-Zustaende in semantische States und delegiert Reaktionen (Overflow-Enter, Runout, Single/Double/Triple-Click) an den BufferFeeder-Owner.",
+      "tags": [
+        "hall-sensor",
+        "debounce",
+        "click-detection",
+        "state-dispatcher"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:klipper_extras/buffer_state.py",
+      "type": "file",
+      "name": "buffer_state.py",
+      "filePath": "klipper_extras/buffer_state.py",
+      "summary": "Container fuer den gesamten Buffer-Runtime-State (rund 80 Felder: Sync-Status, Hall-Timer, Overflow-Resume-Daten, Phase-3-Tracking, Cooldown, Macro-Save) — wird per `apply` auf den BufferFeeder-Owner gespiegelt.",
+      "tags": [
+        "runtime-state",
+        "state-container",
+        "buffer-feeder",
+        "initialization"
+      ],
+      "complexity": "moderate",
+      "languageNotes": "Reines Daten-Objekt: alle Defaults zentral an einer Stelle, `apply` setzt sie via `vars().items()` + `setattr` als Attribute auf den Owner."
+    },
+    {
+      "id": "class:klipper_extras/buffer_state.py:BufferRuntimeState",
+      "type": "class",
+      "name": "BufferRuntimeState",
+      "filePath": "klipper_extras/buffer_state.py",
+      "lineRange": [
+        8,
+        92
+      ],
+      "summary": "Dataclass-aehnlicher State-Container mit allen Lauf-Variablen des BufferFeeders (Sync, Hall-Timer, Overflow-Resume, Phase-3, Print-Phase, Critical-Action-Guard, Timer-Handles); `apply` kopiert sie auf den Owner.",
+      "tags": [
+        "runtime-state",
+        "dataclass",
+        "owner-mirror"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "file:klipper_extras/buffer_stepper.py",
+      "type": "file",
+      "name": "buffer_stepper.py",
+      "filePath": "klipper_extras/buffer_stepper.py",
+      "summary": "SyncCoordinator kapselt Trapq-Setup, Anchor-Step-Submits (boot/idle/pre-sync) und das Sync-/Unsync-Handling zwischen Buffer-Stepper und Extruder-Trapq — essenziell fuer das Stepcompress-Cursor-Refresh.",
+      "tags": [
+        "stepper",
+        "trapq",
+        "sync",
+        "anchor-step",
+        "buffer-feeder"
+      ],
+      "complexity": "complex",
+      "languageNotes": "Adressiert den `stepcompress.last_step_clock`-Pitfall (siehe NOT-TO-DO 2026-05-13) via expliziter Anchor-Moves vor jedem Sync."
+    },
+    {
+      "id": "class:klipper_extras/buffer_stepper.py:SyncCoordinator",
+      "type": "class",
+      "name": "SyncCoordinator",
+      "filePath": "klipper_extras/buffer_stepper.py",
+      "lineRange": [
+        13,
+        166
+      ],
+      "summary": "Verwaltet `motion_queuing.allocate_trapq`, gibt Anchor-Steps zum Cursor-Refresh aus und schaltet den Buffer-Stepper sicher auf den Extruder-Trapq und zurueck (inkl. Critical-Action-Guard).",
+      "tags": [
+        "sync-coordinator",
+        "trapq",
+        "stepcompress",
+        "anchor"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "file:klipper_extras/buffer_types.py",
+      "type": "file",
+      "name": "buffer_types.py",
+      "filePath": "klipper_extras/buffer_types.py",
+      "summary": "Typ-Definitionen / Enums fuer das Plugin: `Hall1Context` (Coerce-Helper), `AnchorPlan` (Daten fuer Stepcompress-Anchor) und `CleanupOptions` (Flags fuer den CleanupCoordinator).",
+      "tags": [
+        "type-definition",
+        "dataclass",
+        "enums",
+        "buffer-feeder"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "class:klipper_extras/buffer_types.py:Hall1Context",
+      "type": "class",
+      "name": "Hall1Context",
+      "filePath": "klipper_extras/buffer_types.py",
+      "lineRange": [
+        6,
+        20
+      ],
+      "summary": "Enum-aehnlicher Kontext-Typ fuer HALL1-Active-Pruefungen mit `coerce`-Classmethod, der String-/Enum-Inputs konsistent in einen typsicheren Wert wandelt.",
+      "tags": [
+        "enum",
+        "coerce",
+        "hall-sensor"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "config:lll.cfg",
+      "type": "config",
+      "name": "lll.cfg",
+      "filePath": "lll.cfg",
+      "summary": "Mitgelieferte Default-Klipper-Konfiguration fuer den Mellow LLL Plus: `[buffer_feeder]`-Section mit allen Tuning-Parametern plus Sensor-Pins, TMC2208-Stepper-Config und passende GCode-Macros (LOAD/UNLOAD/BUFFER_*).",
+      "tags": [
+        "klipper-config",
+        "buffer-feeder",
+        "default-config",
+        "tmc2208",
+        "user-config"
+      ],
+      "complexity": "complex",
+      "languageNotes": "Wichtigste Benutzer-Datei — wird per Include in `printer.cfg` eingebunden; Aenderungen hier wirken direkt auf das BufferPLUS-Plugin."
+    },
+    {
+      "id": "config:printer_data/config/mellow-plus.cfg",
+      "type": "config",
+      "name": "mellow-plus.cfg",
+      "filePath": "printer_data/config/mellow-plus.cfg",
+      "summary": "Test-Drucker-Konfiguration fuer einen Mellow-LLL-Plus-Setup im `printer_data/config/`-Layout — referenziert den Buffer-Feeder mit konkreten Pin-Mappings und dient als realistisches Integrationsbeispiel.",
+      "tags": [
+        "klipper-config",
+        "test-printer",
+        "example-config",
+        "buffer-feeder"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "config:pytest.ini",
+      "type": "config",
+      "name": "pytest.ini",
+      "filePath": "pytest.ini",
+      "summary": "Minimalste Pytest-Konfiguration, die das `tests/`-Verzeichnis als alleinigen Testpfad markiert — alle Unit-Tests fuer den BufferFeeder laufen damit ohne weitere Discovery-Heuristik.",
+      "tags": [
+        "pytest",
+        "test-config",
+        "configuration"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:tools/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "filePath": "tools/__init__.py",
+      "summary": "Leerer Package-Marker, der das `tools/`-Verzeichnis als Python-Paket fuer eigenstaendige Diagnose-/Tuning-Skripte verfuegbar macht.",
+      "tags": [
+        "package-marker",
+        "tools",
+        "python"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:tools/buffer_baseline_suite.py",
+      "type": "file",
+      "name": "buffer_baseline_suite.py",
+      "filePath": "tools/buffer_baseline_suite.py",
+      "summary": "Standalone-CLI zur Baseline-Vermessung des Buffer-Feeders: generiert parametrisierte GCode-Test-Suiten (Flow x Speed x Accel x Floors), parsed Klippy-Logs und schreibt Summary-/Samples-CSVs sowie JSON.",
+      "tags": [
+        "cli-tool",
+        "baseline",
+        "tuning",
+        "log-analysis",
+        "buffer-feeder"
+      ],
+      "complexity": "complex",
+      "languageNotes": "Zwei argparse-Subcommands: `generate` (G-Code + Manifest) und `analyze` (Log-Parsing + CSV/JSON-Export). Kein Import des Plugins selbst — laeuft komplett offline."
+    },
+    {
+      "id": "class:tools/buffer_baseline_suite.py:Case",
+      "type": "class",
+      "name": "Case",
+      "filePath": "tools/buffer_baseline_suite.py",
+      "lineRange": [
+        81,
+        180
+      ],
+      "summary": "Dataclass fuer eine einzelne Baseline-Konfiguration (Flow, Duration, Speed, Accel, Feed-Gain, Floors, High-Flow-Threshold ...); kann sich als CSV-Manifest-Zeile serialisieren/deserialisieren und liefert Marker + Macro-Call-String fuer das GCode-Template.",
+      "tags": [
+        "dataclass",
+        "test-case",
+        "manifest",
+        "baseline"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "class:tools/buffer_baseline_suite.py:MetricSample",
+      "type": "class",
+      "name": "MetricSample",
+      "filePath": "tools/buffer_baseline_suite.py",
+      "lineRange": [
+        184,
+        214
+      ],
+      "summary": "Eine geparste Metric-Zeile aus dem Klippy-Log mit Hall-Stati, Flow, Tracker-Velocity und Target-Speed; `to_row` liefert die CSV-Repraesentation.",
+      "tags": [
+        "dataclass",
+        "metrics",
+        "log-parsing",
+        "sample"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "class:tools/buffer_baseline_suite.py:CaseSummary",
+      "type": "class",
+      "name": "CaseSummary",
+      "filePath": "tools/buffer_baseline_suite.py",
+      "lineRange": [
+        218,
+        258
+      ],
+      "summary": "Aggregierte Auswertung pro Case: Mittel-/Max-Flow, Floor-Hit-Prozent, Hall-Zaehler, Overflow-Counts und Error-Liste. Bildet die Zeile in der Summary-CSV.",
+      "tags": [
+        "dataclass",
+        "summary",
+        "metrics-aggregation",
+        "baseline"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:tools/buffer_baseline_suite.py:build_cases",
+      "type": "function",
+      "name": "build_cases",
+      "filePath": "tools/buffer_baseline_suite.py",
+      "lineRange": [
+        288,
+        360
+      ],
+      "summary": "Baut aus mehreren Parameter-Listen (Flows, Durations, Speeds, Accels, Gains, Floors, Chunks ...) die kreuzprodukt- oder zip-broadcast-basierte Case-Matrix fuer eine Baseline-Suite.",
+      "tags": [
+        "test-matrix",
+        "parameter-sweep",
+        "cartesian-product"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:tools/buffer_baseline_suite.py:generate_gcode",
+      "type": "function",
+      "name": "generate_gcode",
+      "filePath": "tools/buffer_baseline_suite.py",
+      "lineRange": [
+        378,
+        425
+      ],
+      "summary": "Rendert die GCode-Datei fuer eine Case-Liste — Header, Travel, Per-Case-Marker und Macro-Call, Cooldown und End-Marker — fuer den Klipper-Druck-Lauf.",
+      "tags": [
+        "gcode-generation",
+        "baseline",
+        "template"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:tools/buffer_baseline_suite.py:analyze_log",
+      "type": "function",
+      "name": "analyze_log",
+      "filePath": "tools/buffer_baseline_suite.py",
+      "lineRange": [
+        460,
+        592
+      ],
+      "summary": "Liest ein Klippy-Logfile zeilenweise, korreliert Marker mit Cases, sammelt MetricSamples und Errors pro Case und liefert (samples, summaries) fuer den CSV-/JSON-Export.",
+      "tags": [
+        "log-parsing",
+        "metrics-extraction",
+        "case-correlation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "function:tools/buffer_baseline_suite.py:build_parser",
+      "type": "function",
+      "name": "build_parser",
+      "filePath": "tools/buffer_baseline_suite.py",
+      "lineRange": [
+        626,
+        689
+      ],
+      "summary": "Konfiguriert den argparse-Parser mit den beiden Subcommands `generate` und `analyze` inklusive aller Sweep-Parameter und Output-Pfade.",
+      "tags": [
+        "argparse",
+        "cli",
+        "subcommands"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:tools/buffer_baseline_suite.py:cmd_generate",
+      "type": "function",
+      "name": "cmd_generate",
+      "filePath": "tools/buffer_baseline_suite.py",
+      "lineRange": [
+        692,
+        727
+      ],
+      "summary": "CLI-Handler fuer das `generate`-Subcommand: parsed Parameter-Listen, baut Cases, schreibt Manifest und GCode-Output.",
+      "tags": [
+        "cli-handler",
+        "generate",
+        "manifest"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:tools/buffer_baseline_suite.py:cmd_analyze",
+      "type": "function",
+      "name": "cmd_analyze",
+      "filePath": "tools/buffer_baseline_suite.py",
+      "lineRange": [
+        730,
+        746
+      ],
+      "summary": "CLI-Handler fuer das `analyze`-Subcommand: laedt Manifest + Log, schreibt Summary-CSV, Samples-CSV und optional Summary-JSON.",
+      "tags": [
+        "cli-handler",
+        "analyze",
+        "csv-export"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "function:tools/buffer_baseline_suite.py:main",
+      "type": "function",
+      "name": "main",
+      "filePath": "tools/buffer_baseline_suite.py",
+      "lineRange": [
+        749,
+        757
+      ],
+      "summary": "CLI-Entrypoint, der argparse aufruft und in `cmd_generate` oder `cmd_analyze` dispatcht.",
+      "tags": [
+        "entry-point",
+        "cli",
+        "dispatcher"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "file:update.sh",
+      "type": "file",
+      "name": "update.sh",
+      "filePath": "update.sh",
+      "summary": "Update-Skript: zieht den Repo-Stand per Git, rollt das Klippy-Log per Moonraker-API und ruft den Installer fuer das Re-Symlinken der Module auf.",
+      "tags": [
+        "shell-script",
+        "updater",
+        "moonraker",
+        "git-pull",
+        "deployment"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "function:update.sh:moonraker_rollover_klippy_log",
+      "type": "function",
+      "name": "moonraker_rollover_klippy_log",
+      "filePath": "update.sh",
+      "lineRange": [
+        58,
+        88
+      ],
+      "summary": "Triggert via Moonraker-API einen Logfile-Rollover, damit nach dem Update ein frisches Klippy-Log entsteht (sauberer Diagnose-Start).",
+      "tags": [
+        "moonraker",
+        "log-rollover",
+        "diagnostics"
+      ],
+      "complexity": "moderate"
+    }
+  ],
+  "edges": [
+    {
+      "source": "file:klipper_extras/buffer_feeder.py",
+      "target": "file:klipper_extras/_buffer_common.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:klipper_extras/buffer_feeder.py",
+      "target": "file:klipper_extras/buffer_baseline_log.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:klipper_extras/buffer_feeder.py",
+      "target": "file:klipper_extras/buffer_cleanup.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:klipper_extras/buffer_feeder.py",
+      "target": "file:klipper_extras/buffer_config.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:klipper_extras/buffer_feeder.py",
+      "target": "file:klipper_extras/buffer_fault.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:klipper_extras/buffer_feeder.py",
+      "target": "file:klipper_extras/buffer_modulator.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:klipper_extras/buffer_feeder.py",
+      "target": "file:klipper_extras/buffer_sensors.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:klipper_extras/buffer_feeder.py",
+      "target": "file:klipper_extras/buffer_state.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:klipper_extras/buffer_feeder.py",
+      "target": "file:klipper_extras/buffer_stepper.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:klipper_extras/buffer_feeder.py",
+      "target": "file:klipper_extras/buffer_types.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:klipper_extras/buffer_feeder.py",
+      "target": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:klipper_extras/buffer_feeder.py",
+      "target": "function:klipper_extras/buffer_feeder.py:load_config_prefix",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:klipper_extras/buffer_feeder.py",
+      "target": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:klipper_extras/buffer_feeder.py",
+      "target": "function:klipper_extras/buffer_feeder.py:load_config_prefix",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:__init__",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_register_gcode_commands",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_handle_connect",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_handle_ready",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_handle_shutdown",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:hall_empty",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:hall_full",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:hall_overflow",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_main_tick",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_tick_pending_chunk",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_bang_bang_tick",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_compute_target_feed_speed",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_on_mcu_flush",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_flush_submit_streaming_chunk",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_plan_t0_anchor",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_compute_t0_anchor",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_sanitize_forced_t0_floors",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_reprime_stepcompress_if_needed",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_submit_move",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_submit_single_trapezoid",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_append_trapezoid_and_record",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_halt_motion",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_start_continuous_motion",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_sync_to_extruder",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_unsync_if_synced",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_trigger_jam",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_FEED",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_RETRACT",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_HALT",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_AUTO_ON",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_AUTO_ON_IF_READY",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_AUTO_OFF",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_WAIT_IDLE",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_LOAD_PHASE1",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_LOAD_PHASE3",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_UNLOAD_FILAMENT",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_SYNC_TO_EXTRUDER",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_UNSYNC",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_CLEAR_JAM",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_STATE_DUMP",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_SET",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:cmd_FORCE_BUFFER_FILL",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:get_status",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "target": "function:klipper_extras/buffer_feeder.py:_set_state",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:load_config_prefix",
+      "target": "class:klipper_extras/buffer_feeder.py:BufferFeeder",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:hall_overflow",
+      "target": "function:klipper_extras/buffer_feeder.py:_halt_motion",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_HALT",
+      "target": "function:klipper_extras/buffer_feeder.py:_halt_motion",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_FEED",
+      "target": "function:klipper_extras/buffer_feeder.py:_submit_move",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_RETRACT",
+      "target": "function:klipper_extras/buffer_feeder.py:_submit_move",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_AUTO_ON",
+      "target": "function:klipper_extras/buffer_feeder.py:_start_continuous_motion",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_SYNC_TO_EXTRUDER",
+      "target": "function:klipper_extras/buffer_feeder.py:_sync_to_extruder",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_UNSYNC",
+      "target": "function:klipper_extras/buffer_feeder.py:_unsync_if_synced",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:_submit_move",
+      "target": "function:klipper_extras/buffer_feeder.py:_plan_t0_anchor",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:_submit_move",
+      "target": "function:klipper_extras/buffer_feeder.py:_append_trapezoid_and_record",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:_submit_move",
+      "target": "function:klipper_extras/buffer_feeder.py:_submit_single_trapezoid",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:_plan_t0_anchor",
+      "target": "function:klipper_extras/buffer_feeder.py:_compute_t0_anchor",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:_plan_t0_anchor",
+      "target": "function:klipper_extras/buffer_feeder.py:_sanitize_forced_t0_floors",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:_plan_t0_anchor",
+      "target": "function:klipper_extras/buffer_feeder.py:_reprime_stepcompress_if_needed",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:_on_mcu_flush",
+      "target": "function:klipper_extras/buffer_feeder.py:_flush_submit_streaming_chunk",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:_main_tick",
+      "target": "function:klipper_extras/buffer_feeder.py:_tick_pending_chunk",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:_main_tick",
+      "target": "function:klipper_extras/buffer_feeder.py:_bang_bang_tick",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:_bang_bang_tick",
+      "target": "function:klipper_extras/buffer_feeder.py:_compute_target_feed_speed",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:_start_continuous_motion",
+      "target": "function:klipper_extras/buffer_feeder.py:_bang_bang_tick",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:cmd_BUFFER_CLEAR_JAM",
+      "target": "function:klipper_extras/buffer_feeder.py:_set_state",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:hall_overflow",
+      "target": "function:klipper_extras/buffer_feeder.py:_set_state",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:_trigger_jam",
+      "target": "function:klipper_extras/buffer_feeder.py:_halt_motion",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "function:klipper_extras/buffer_feeder.py:_trigger_jam",
+      "target": "function:klipper_extras/buffer_feeder.py:_set_state",
+      "type": "calls",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:klipper_extras/buffer_cleanup.py",
+      "target": "file:klipper_extras/_buffer_common.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:klipper_extras/buffer_fault.py",
+      "target": "file:klipper_extras/_buffer_common.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:klipper_extras/buffer_fault.py",
+      "target": "file:klipper_extras/buffer_types.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:klipper_extras/buffer_sensors.py",
+      "target": "file:klipper_extras/_buffer_common.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:klipper_extras/buffer_sensors.py",
+      "target": "file:klipper_extras/buffer_types.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:klipper_extras/buffer_state.py",
+      "target": "file:klipper_extras/_buffer_common.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:klipper_extras/buffer_stepper.py",
+      "target": "file:klipper_extras/_buffer_common.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:klipper_extras/buffer_baseline_log.py",
+      "target": "class:klipper_extras/buffer_baseline_log.py:BaselineLogfile",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:klipper_extras/buffer_baseline_log.py",
+      "target": "class:klipper_extras/buffer_baseline_log.py:BaselineLogfile",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:klipper_extras/buffer_cleanup.py",
+      "target": "class:klipper_extras/buffer_cleanup.py:CleanupCoordinator",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:klipper_extras/buffer_cleanup.py",
+      "target": "class:klipper_extras/buffer_cleanup.py:CleanupCoordinator",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:klipper_extras/buffer_config.py",
+      "target": "class:klipper_extras/buffer_config.py:BufferConfigValues",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:klipper_extras/buffer_config.py",
+      "target": "class:klipper_extras/buffer_config.py:BufferConfigValues",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:klipper_extras/buffer_fault.py",
+      "target": "class:klipper_extras/buffer_fault.py:FaultManager",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:klipper_extras/buffer_fault.py",
+      "target": "class:klipper_extras/buffer_fault.py:FaultManager",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:klipper_extras/buffer_modulator.py",
+      "target": "class:klipper_extras/buffer_modulator.py:ExtruderVelocityTracker",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:klipper_extras/buffer_modulator.py",
+      "target": "class:klipper_extras/buffer_modulator.py:ExtruderVelocityTracker",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:klipper_extras/buffer_sensors.py",
+      "target": "class:klipper_extras/buffer_sensors.py:HallSensorMonitor",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:klipper_extras/buffer_sensors.py",
+      "target": "class:klipper_extras/buffer_sensors.py:HallSensorMonitor",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:klipper_extras/buffer_state.py",
+      "target": "class:klipper_extras/buffer_state.py:BufferRuntimeState",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:klipper_extras/buffer_state.py",
+      "target": "class:klipper_extras/buffer_state.py:BufferRuntimeState",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:klipper_extras/buffer_stepper.py",
+      "target": "class:klipper_extras/buffer_stepper.py:SyncCoordinator",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:klipper_extras/buffer_stepper.py",
+      "target": "class:klipper_extras/buffer_stepper.py:SyncCoordinator",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:klipper_extras/buffer_types.py",
+      "target": "class:klipper_extras/buffer_types.py:Hall1Context",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:klipper_extras/buffer_types.py",
+      "target": "class:klipper_extras/buffer_types.py:Hall1Context",
+      "type": "exports",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "file:tools/buffer_baseline_suite.py",
+      "target": "class:tools/buffer_baseline_suite.py:Case",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/buffer_baseline_suite.py",
+      "target": "class:tools/buffer_baseline_suite.py:MetricSample",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/buffer_baseline_suite.py",
+      "target": "class:tools/buffer_baseline_suite.py:CaseSummary",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/buffer_baseline_suite.py",
+      "target": "function:tools/buffer_baseline_suite.py:build_cases",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/buffer_baseline_suite.py",
+      "target": "function:tools/buffer_baseline_suite.py:generate_gcode",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/buffer_baseline_suite.py",
+      "target": "function:tools/buffer_baseline_suite.py:analyze_log",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/buffer_baseline_suite.py",
+      "target": "function:tools/buffer_baseline_suite.py:build_parser",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/buffer_baseline_suite.py",
+      "target": "function:tools/buffer_baseline_suite.py:cmd_generate",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/buffer_baseline_suite.py",
+      "target": "function:tools/buffer_baseline_suite.py:cmd_analyze",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:tools/buffer_baseline_suite.py",
+      "target": "function:tools/buffer_baseline_suite.py:main",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:update.sh",
+      "target": "function:update.sh:moonraker_rollover_klippy_log",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "config:lll.cfg",
+      "target": "file:klipper_extras/buffer_feeder.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:lll.cfg",
+      "target": "file:klipper_extras/buffer_config.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:printer_data/config/mellow-plus.cfg",
+      "target": "file:klipper_extras/buffer_feeder.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "config:pytest.ini",
+      "target": "file:klipper_extras/buffer_feeder.py",
+      "type": "configures",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "document:README.md",
+      "target": "file:klipper_extras/buffer_feeder.py",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "document:README.md",
+      "target": "config:lll.cfg",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "document:README.md",
+      "target": "file:install.sh",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "document:README.md",
+      "target": "file:update.sh",
+      "type": "documents",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "file:install.sh",
+      "target": "file:klipper_extras/buffer_feeder.py",
+      "type": "deploys",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:install.sh",
+      "target": "file:klipper_extras/_buffer_common.py",
+      "type": "deploys",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:install.sh",
+      "target": "file:klipper_extras/buffer_baseline_log.py",
+      "type": "deploys",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:install.sh",
+      "target": "file:klipper_extras/buffer_cleanup.py",
+      "type": "deploys",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:install.sh",
+      "target": "file:klipper_extras/buffer_config.py",
+      "type": "deploys",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:install.sh",
+      "target": "file:klipper_extras/buffer_fault.py",
+      "type": "deploys",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:install.sh",
+      "target": "file:klipper_extras/buffer_modulator.py",
+      "type": "deploys",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:install.sh",
+      "target": "file:klipper_extras/buffer_sensors.py",
+      "type": "deploys",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:install.sh",
+      "target": "file:klipper_extras/buffer_state.py",
+      "type": "deploys",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:install.sh",
+      "target": "file:klipper_extras/buffer_stepper.py",
+      "type": "deploys",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:install.sh",
+      "target": "file:klipper_extras/buffer_types.py",
+      "type": "deploys",
+      "direction": "forward",
+      "weight": 0.7
+    },
+    {
+      "source": "file:update.sh",
+      "target": "file:install.sh",
+      "type": "depends_on",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "file:klipper_extras/buffer_feeder.py",
+      "target": "file:klipper_extras/__init__.py",
+      "type": "imports",
+      "direction": "forward",
+      "weight": 0.7,
+      "recoveredFromImportMap": true
+    }
+  ],
+  "layers": [
+    {
+      "id": "layer:kern-haupt-feeder",
+      "name": "Kern: Haupt-Feeder",
+      "description": "Monolithisches Haupt-Modul der Klipper-Extension mit der BufferFeeder-Klasse (~4500 LOC), die Move-Queue, AUTO-Streaming, HALL-Sensor-Sicherheit und GCode-Commands buendelt, plus Package-Entry-Point fuer den Klipper-Loader.",
+      "nodeIds": [
+        "file:klipper_extras/buffer_feeder.py",
+        "file:klipper_extras/__init__.py"
+      ]
+    },
+    {
+      "id": "layer:kern-helfer-module",
+      "name": "Kern: Helfer-Module",
+      "description": "Aus buffer_feeder.py ausgelagerte Hilfsmodule fuer State-Tracking, HALL-Sensor-Monitor, Stepper-Wrapper, Velocity-Modulation, Fault-Overlay, Cleanup-Logik, Tuning-Logs, Config-Parser, Type-Konstanten sowie geteilte Utilities (_buffer_common ist mit fan-in 6 zentraler Baustein).",
+      "nodeIds": [
+        "file:klipper_extras/_buffer_common.py",
+        "file:klipper_extras/buffer_baseline_log.py",
+        "file:klipper_extras/buffer_cleanup.py",
+        "file:klipper_extras/buffer_config.py",
+        "file:klipper_extras/buffer_fault.py",
+        "file:klipper_extras/buffer_modulator.py",
+        "file:klipper_extras/buffer_sensors.py",
+        "file:klipper_extras/buffer_state.py",
+        "file:klipper_extras/buffer_stepper.py",
+        "file:klipper_extras/buffer_types.py"
+      ]
+    },
+    {
+      "id": "layer:konfiguration",
+      "name": "Konfiguration",
+      "description": "Klipper-INI-Konfigurationen (lll.cfg als primaere Benutzerkonfig, mellow-plus.cfg als Test-Drucker-Setup) sowie pytest.ini fuer das Test-Runner-Setup.",
+      "nodeIds": [
+        "config:lll.cfg",
+        "config:printer_data/config/mellow-plus.cfg",
+        "config:pytest.ini"
+      ]
+    },
+    {
+      "id": "layer:werkzeuge-diagnose",
+      "name": "Werkzeuge & Diagnose",
+      "description": "Standalone-Diagnose-Scripts ausserhalb des Klipper-Plugins, insbesondere die buffer_baseline_suite zur Baseline-Erzeugung und -Auswertung fuer Tuning-Sessions.",
+      "nodeIds": [
+        "file:tools/__init__.py",
+        "file:tools/buffer_baseline_suite.py"
+      ]
+    },
+    {
+      "id": "layer:installation-deployment",
+      "name": "Installation & Deployment",
+      "description": "Bash-Skripte fuer Erstinstallation und Update — symlinken die klipper_extras/-Module in klippy/extras/ und uebernehmen git pull + Reinstall auf dem Drucker.",
+      "nodeIds": [
+        "file:install.sh",
+        "file:update.sh"
+      ]
+    },
+    {
+      "id": "layer:dokumentation",
+      "name": "Dokumentation",
+      "description": "Markdown-Dokumentation: README mit Hardware-/Konfigurations-/GCode-Referenz und NOT-TO-DO als Fehlerprotokoll mit dokumentierten Sackgassen und Pitfalls.",
+      "nodeIds": [
+        "document:README.md",
+        "document:NOT-TO-DO.md"
+      ]
+    }
+  ],
+  "tour": [
+    {
+      "order": 1,
+      "title": "Projekt-Ueberblick & Pitfalls",
+      "description": "Einstieg in das BufferPLUS-Klipper-Plugin: README.md erklaert die Kernidee — der Mellow LLL Plus Filament Buffer laeuft als eigene Klipper-Extension mit eigener Move-Queue und fuettert waehrend des Drucks parallel nach. NOT-TO-DO.md ergaenzt diese Sicht um das Fehlerprotokoll mit dokumentierten Sackgassen (stepcompress-Pitfalls, Bang-Bang-Limits, Mux-Migration), die das aktuelle Design erklaeren. Wer diese beiden Dateien gelesen hat, kennt die vier HALL-Zustaende (HALL3 = leer, Zwischenzone = Arbeitsbereich, HALL2 = voll, HALL1 = Overflow) und die wichtigsten Stolperfallen, die im Code als Schutzmechanismen wiederauftauchen.",
+      "nodeIds": [
+        "document:README.md",
+        "document:NOT-TO-DO.md"
+      ]
+    },
+    {
+      "order": 2,
+      "title": "Konfigurations-Sicht des Users",
+      "description": "Bevor wir in den Code gehen, schauen wir wie der User das Plugin sieht: lll.cfg ist die mitgelieferte Default-Klipper-Konfiguration mit der `[buffer_feeder]`-Section, allen Tuning-Parametern, HALL-Sensor-Pin-Mappings, TMC2208-Stepper-Setup und den GCode-Macros (LOAD/UNLOAD/BUFFER_*). Diese Datei ist die Schnittstelle zwischen Hardware-Realitaet (welche Pins, welche Speeds) und der Plugin-Logik — jeder spaetere Code-Pfad wird Parameter aus dieser Section konsumieren. Sie zeigt auch konkret, wie der `use_flush_callback_bang_bang: True`-Pfad aktiviert wird, der spaeter im AUTO-Streaming relevant ist.",
+      "nodeIds": [
+        "config:lll.cfg"
+      ],
+      "languageLesson": "Klipper-Configs sind INI-Format mit Sektions-Praefixen. `[buffer_feeder NAME]` triggert den Loader, der `load_config_prefix(config)` in der Plugin-Datei aufruft. Der Suffix NAME ist der Mux-Key und erlaubt mehrere Buffer-Instanzen."
+    },
+    {
+      "order": 3,
+      "title": "Klipper-Entry-Point & Haupt-Modul",
+      "description": "Der Klipper-Loader importiert klipper_extras/__init__.py als Package-Marker und ruft dann load_config_prefix in buffer_feeder.py auf — dem monolithischen Haupt-Modul mit ~4500 LOC. Die BufferFeeder-Klasse buendelt alles: Move-Queue, AUTO-Streaming-Pfad, HALL-Sensor-Sicherheits-Logik (HALL1-Overflow-Stop, HALL3-Demand-Gain), Watchdog-Anchor-Mechanik und alle GCode-Commands. Dies ist der Kern der gesamten Extension — alle folgenden Schritte zerlegen die ausgelagerten Helfer, die dieses Hauptmodul orchestriert.",
+      "nodeIds": [
+        "file:klipper_extras/__init__.py",
+        "file:klipper_extras/buffer_feeder.py"
+      ],
+      "languageLesson": "Klipper-Plugins exportieren `load_config_prefix(config)` (mehrere Instanzen pro Praefix-Sektion) oder `load_config(config)` (Singleton). Innerhalb des Plugins werden GCode-Commands per `register_mux_command(name, mux_key, mux_value, callback)` registriert — niemals `register_command` verwenden, das fuehrt zu Naming-Konflikten mit anderen Extensions."
+    },
+    {
+      "order": 4,
+      "title": "Geteilte Konstanten & Type-Definitionen",
+      "description": "Die niedrigste Schicht des Plugins: _buffer_common.py haelt die State-Namen (AUTO/IDLE/LOAD_PHASE_*), Timing-Defaults (MAIN_TICK 50 Hz, REPRIME_GAP, ANCHOR_NUDGE) und Klick-/Button-IDs, die saemtliche Helfer-Module teilen — mit Fan-In 7 das am haeufigsten importierte File. buffer_types.py definiert die typsicheren Hilfsstrukturen Hall1Context (Coerce-Helper fuer HALL1-Probe), AnchorPlan (Daten fuer Stepcompress-Anchor) und CleanupOptions (Flags fuer den CleanupCoordinator). Diese Konstanten und Enums bilden das gemeinsame Vokabular, auf das alle folgenden Module aufbauen.",
+      "nodeIds": [
+        "file:klipper_extras/_buffer_common.py",
+        "file:klipper_extras/buffer_types.py"
+      ]
+    },
+    {
+      "order": 5,
+      "title": "Runtime-State-Container",
+      "description": "buffer_state.py kapselt ~80 Felder Runtime-State des BufferFeeders: Sync-Status, Hall-Timer, Overflow-Resume-Daten, Phase-3-Tracking, Cooldown, Macro-Save, Timer-Handles. Die BufferRuntimeState-Dataclass wird per `apply` auf den BufferFeeder-Owner gespiegelt — sie ist die einzige zentrale Stelle, an der alle Lauf-Variablen definiert sind. Dieser Container existiert, damit die State-Logik aus dem 4500-LOC-Haupt-Modul herausgeloest werden konnte, ohne die Lifecycle-Semantik zu zerschneiden.",
+      "nodeIds": [
+        "file:klipper_extras/buffer_state.py"
+      ]
+    },
+    {
+      "order": 6,
+      "title": "HALL-Sensor-Monitor (Hardware-Eingang)",
+      "description": "buffer_sensors.py implementiert den HallSensorMonitor — die Hardware-Seite des Plugins. Er registriert alle Buffer-Pins (HALL1/HALL2/HALL3 plus Entrance-Runout und Feed/Retract-Buttons) ueber `buttons.register_buttons`, fuehrt einen Debounce-Tick und mapped Raw-Pin-Zustaende in semantische States (Buffer leer / Arbeitsbereich / voll / Overflow). Semantische Events (Overflow-Enter, Runout, Single/Double/Triple-Click) werden dann an den BufferFeeder-Owner delegiert — von hier aus geht die HALL-Sicherheitslogik in den Hauptcode.",
+      "nodeIds": [
+        "file:klipper_extras/buffer_sensors.py"
+      ]
+    },
+    {
+      "order": 7,
+      "title": "Stepper-Wrapper & Sync-Koordination",
+      "description": "buffer_stepper.py mit der SyncCoordinator-Klasse ist die andere Hardware-Schnittstelle: Trapq-Setup, Anchor-Step-Submits (boot/idle/pre-sync) und das Sync/Unsync-Handling zwischen Buffer-Stepper und Extruder-Trapq. Hier passiert das `motion_queuing.allocate_trapq` und das essentielle Stepcompress-Cursor-Refresh, das die Anchor-Mechanik vom Haupt-Modul erst funktionieren laesst. Critical-Action-Guard schuetzt davor, waehrend laufender Druck-Bewegungen unsicher zu (un-)syncen — siehe Memory-Notiz zur Sync-Feedback-Architektur.",
+      "nodeIds": [
+        "file:klipper_extras/buffer_stepper.py"
+      ],
+      "languageLesson": "Klipper trennt drei Hardware-Konzepte: trapq (Trapezoid-Move-Queue pro Achse), stepcompress (zeitkomprimierte Step-Sequenz pro Stepper) und itersolve (Kinematik-Solver, der trapq-Moves zu stepcompress-Steps macht). Eigene Move-Queues muessen alle drei korrekt aufsetzen, sonst gibt es `stepcompress.last_step_clock`-Race-Conditions (siehe NOT-TO-DO)."
+    },
+    {
+      "order": 8,
+      "title": "Velocity-Tracker & Bang-Bang-Modulation",
+      "description": "buffer_modulator.py liest periodisch die Extruder-Position vom MCU, fuehrt ein Rolling-Window und liefert die aktuelle Velocity sowie den volumetrischen Flow — das ist die Grundlage fuer die HALL3-Demand-Gain-Modulation im AUTO-Streaming-Pfad. Wenn der Buffer in der Zwischenzone steht, entscheidet der Bang-Bang-Regler im Haupt-Modul anhand dieser Werte, wie stark nachgefuettert werden muss, damit der Buffer nicht zu frueh leer wird (besonders bei High-Flow-Druck). Ohne diesen Tracker waere die Soll-Speed-Berechnung blind fuer den tatsaechlichen Filament-Verbrauch.",
+      "nodeIds": [
+        "file:klipper_extras/buffer_modulator.py"
+      ]
+    },
+    {
+      "order": 9,
+      "title": "Fault-Overlay & Sicherheits-Stopp",
+      "description": "buffer_fault.py implementiert die HALL1-Overflow-Sicherheitskette: `is_hall1_active` als Probe mit Hall1Context-Coercion, `resume_after_overflow` orchestriert Stepper-Enable, State-Wechsel und Resume-Move nach einem Overflow, `check_auto_ready` setzt das Gate, ob AUTO wieder freigegeben werden darf. Dieses Modul ist der Wachhund: wenn HALL1 (Overflow) anschlaegt, wird sofort gestoppt — der Filament-Buffer darf niemals ueberfuellt werden, und das Wieder-Engagement nach einem Fault muss explizit freigeschaltet werden.",
+      "nodeIds": [
+        "file:klipper_extras/buffer_fault.py"
+      ]
+    },
+    {
+      "order": 10,
+      "title": "Cleanup, Config-Parser & Tuning-Log",
+      "description": "Drei Querschnitts-Helfer, die das Plugin abrunden: buffer_cleanup.py mit dem CleanupCoordinator kapselt geordnete Reset-Pfade (unsync, halt_motion, IDLE) bei Disconnect/Print-End sowie Jam-Recovery inkl. Auto-Ready-Probe. buffer_config.py mit BufferConfigValues parsed die 58 Tuning-Parameter aus der `[buffer_feeder]`-Section in lll.cfg (Schritt 2) und uebertraegt sie auf den Owner. buffer_baseline_log.py haengt zur Laufzeit ein dediziertes Baseline-Log-File ans Python-Logging an und schreibt nur Praefix-gefilterte Buffer-Events heraus — die Datengrundlage fuer das Diagnose-Tool aus Schritt 11.",
+      "nodeIds": [
+        "file:klipper_extras/buffer_cleanup.py",
+        "file:klipper_extras/buffer_config.py",
+        "file:klipper_extras/buffer_baseline_log.py"
+      ]
+    },
+    {
+      "order": 11,
+      "title": "Diagnose-Werkzeug: Baseline-Suite",
+      "description": "tools/buffer_baseline_suite.py ist die Standalone-CLI zur Baseline-Vermessung — der wichtigste Tuning-Workflow ausserhalb des Klipper-Plugins. Sie generiert parametrisierte GCode-Test-Suiten (Kreuzprodukt aus Flow x Speed x Accel x Floors), parsed Klippy-Logs (inkl. der Baseline-Log-Eintraege aus Schritt 10) und schreibt Summary-/Samples-CSVs sowie JSON. So lassen sich Tuning-Aenderungen quantitativ vergleichen, statt nach Gefuehl zu schrauben — unverzichtbar bei C-cont-Hotfix-Linien und High-Flow-Korrekturen.",
+      "nodeIds": [
+        "file:tools/buffer_baseline_suite.py",
+        "file:tools/__init__.py"
+      ],
+      "languageLesson": "Python-CLI-Tools mit argparse-Subcommands (generate / analyze) sind die saubere Form fuer Multi-Mode-Werkzeuge. Dataclasses (Case, MetricSample, CaseSummary) modellieren das Datenmodell typsicher und serialisieren sich selbst zu CSV-Zeilen. Dieser Pattern ist eine Alternative zu pandas, wenn die Datenmenge klein bleibt."
+    },
+    {
+      "order": 12,
+      "title": "Installation, Update & Test-Setup",
+      "description": "Der aeusserste Ring: install.sh symlinkt alle klipper_extras/-Module nach `klippy/extras/` (Klipper-Konvention), prueft die Klipper- und Moonraker-Configs auf Konsistenz und startet den Klipper-Service neu. update.sh ergaenzt das um `git pull`, einen Moonraker-Rollover des Klippy-Logs (sauberer Diagnose-Start nach Update) und einen anschliessenden Installer-Aufruf. pytest.ini hingegen ist die minimale Test-Runner-Konfiguration, die das tests/-Verzeichnis als alleinigen Testpfad markiert — alle Unit-Tests fuer den BufferFeeder laufen so ohne weitere Discovery-Heuristik. Damit schliesst sich der Kreis: vom Code bis zur Auslieferung auf dem Drucker.",
+      "nodeIds": [
+        "file:install.sh",
+        "file:update.sh",
+        "config:pytest.ini"
+      ],
+      "languageLesson": "Klipper-Extensions werden traditionell per Symlink in `klippy/extras/` eingehaengt, statt kopiert — so bleibt das Git-Working-Tree die Source-of-Truth, und ein `git pull` reicht zum Update. Bash-Installer mit Symlink + Service-Restart sind das Standard-Pattern fuer Klipper-Plugins (z.B. Klippain, KAMP, Happy Hare folgen alle diesem Schema)."
+    }
+  ]
+}

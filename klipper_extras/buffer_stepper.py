@@ -1,0 +1,246 @@
+# buffer_stepper.py — Sync-Coordinator for the feeder-stepper trapq.
+#
+# Owns the binding between the feeder stepper and either its own trapq
+# (default, autonomous bang-bang/streaming motion) or an extruder's
+# trapq (for explicit SYNC_TO_EXTRUDER macros). Sub-module of
+# buffer_feeder; kein Klipper-load_config-Eintrypoint.
+
+import logging
+
+from ._buffer_common import (
+    ANCHOR_NUDGE_MM, MAX_T0_LOOKAHEAD_S, REPRIME_GAP_S, STATE_OVERFLOW,
+)
+
+
+class SyncCoordinator:
+    def __init__(self, owner):
+        self.owner = owner
+        self.printer = owner.printer
+        self.reactor = owner.reactor
+        self.motion_queuing = None
+        self.trapq = None
+        self.trapq_append = None
+
+    def setup_trapq(self, config):
+        try:
+            self.motion_queuing = self.printer.load_object(config, 'motion_queuing')
+        except (KeyError, AttributeError) as exc:
+            raise config.error(
+                "buffer_feeder requires Klipper's motion_queuing module. "
+                "Install a recent mainline Klipper build that provides "
+                "'motion_queuing' before loading [buffer_feeder].") from exc
+        required = (
+            'allocate_trapq',
+            'lookup_trapq_append',
+            'check_step_generation_scan_windows',
+            'note_mcu_movequeue_activity',
+        )
+        missing = [name for name in required
+                   if not hasattr(self.motion_queuing, name)]
+        if missing:
+            raise config.error(
+                "buffer_feeder requires a newer motion_queuing API. "
+                "Missing: %s. Update Klipper mainline before loading "
+                "[buffer_feeder]." % ", ".join(sorted(missing)))
+        self.trapq = self.motion_queuing.allocate_trapq()
+        self.trapq_append = self.motion_queuing.lookup_trapq_append()
+
+    def _submit_anchor_move(self, *, forced_t0=None, skip_enable=False,
+                            speed=10.0):
+        """Submit a small anchor-step in the safe direction. Returns
+        the direction sign so the caller can format its respond message
+        (boot anchor vs. pre-sync REPRIME use different wording but the
+        underlying motion + direction-policy is identical).
+
+        Keyword-only `forced_t0` routes the submit through the
+        forced_t0!=None branch in _submit_single_trapezoid. Callers in
+        the watchdog-print-block-override path must pass `forced_t0=
+        mcu_now + lead_time`, so the anchor is actually submitted even
+        when the toolhead queue is far-future filled (typical during
+        print). Default None preserves the existing behaviour for all
+        other callers (boot anchor, pre-sync REPRIME, non-print
+        watchdog).
+
+        Keyword-only `skip_enable` (Weg 2): queue the anchor steps
+        WITHOUT energizing the motor. Used by the idle-watchdog under
+        idle_motor_disable=True so the de-energized stepper stays
+        silent (no enable-snap, no holding current) while last_step_-
+        clock is still refreshed. All other callers keep enable.
+        """
+        owner = self.owner
+        if not skip_enable:
+            owner._enable_stepper()
+        anchor_dir = -1.0 if owner.hall_overflow else 1.0
+        owner._submit_move(anchor_dir * ANCHOR_NUDGE_MM, speed,
+                           forced_t0=forced_t0, skip_enable=skip_enable)
+        owner._wait_for_move_done(direction=int(anchor_dir))
+        return anchor_dir
+
+    def anchor_step(self):
+        anchor_dir = self._submit_anchor_move()
+        self.owner._respond("Stepcompress anchor primed (boot %s 0.05mm)"
+                            % ("retract" if anchor_dir < 0 else "feed"))
+
+    def sync_to_extruder(self, extruder_name):
+        owner = self.owner
+        # Already-Synced-Guard (Review 2026-07-09 F2): bei gesetztem
+        # Latch returnt _submit_move still — der Gap-Anchor unten
+        # waere ein Silent-No-Op und der erneute Swap liefe mit stale
+        # Cursor. Idempotent fuer denselben Extruder, harter Fehler
+        # fuer einen anderen.
+        if owner._stepper_synced_to is not None:
+            if owner._stepper_synced_to == extruder_name:
+                owner._respond("Buffer-Feeder already synced to '%s' "
+                               "— no-op" % extruder_name)
+                return
+            raise owner._cmd_error(
+                "Buffer-Feeder already synced to '%s' — call "
+                "BUFFER_UNSYNC before syncing to '%s'"
+                % (owner._stepper_synced_to, extruder_name))
+        extruder = owner.printer.lookup_object(extruder_name)
+        if not hasattr(extruder, 'get_trapq'):
+            raise owner._cmd_error(
+                "Object '%s' is not an extruder (no get_trapq method)"
+                % extruder_name)
+        # Gap-Reprime BEFORE the trapq-swap. The own-trapq path in
+        # _submit_single_trapezoid has a gap-reprime check, but
+        # sync_to_extruder didn't — so if no buffer-stepper move ran for
+        # > CLOCK_DIFF_MAX (~16.7s), the first extruder-step after the
+        # swap would land at a print_time-clock far ahead of the stale
+        # stepcompress cursor → 'Invalid sequence' crash. Refresh the
+        # cursor with a tiny anchor-step (direction follows HALL1 to
+        # avoid forward-feed when buffer is overfilled) so the swap
+        # finds an up-to-date last_step_clock.
+        mcu = owner.stepper.get_mcu()
+        mcu_now = mcu.estimated_print_time(owner.reactor.monotonic())
+        gap = mcu_now - owner._last_move_end_time
+        if gap > REPRIME_GAP_S:
+            # forced_t0 statt None (Review 2026-07-09 F2): mid-print
+            # steht die Toolhead-Queue > MAX_T0_LOOKAHEAD_S voraus —
+            # der forced_t0=None-Pfad wuerde den Anchor via B-Skip
+            # SILENT verwerfen und der Swap liefe mit stale
+            # last_step_clock (exakt der Crash, den dieser Anchor
+            # verhindern soll). mcu_now+lead ist hier sicher: der
+            # Feeder war > REPRIME_GAP_S idle, der letzte Step liegt
+            # also garantiert davor.
+            anchor_t0 = mcu_now + min(owner.lead_time, MAX_T0_LOOKAHEAD_S)
+            anchor_dir = self._submit_anchor_move(forced_t0=anchor_t0)
+            owner._respond("Sync prep: own-trapq cursor refreshed "
+                          "(idle %.1fs, anchor %s 0.05mm)"
+                          % (gap, "retract" if anchor_dir < 0 else "feed"))
+        toolhead = owner.printer.lookup_object('toolhead')
+        try:
+            toolhead.flush_step_generation()
+            # Feeder-Startposition auf die tatsächliche commanded_pos
+            # des Extruder-Steppers setzen, nicht auf (0,0,0). Nach LOAD
+            # steht der Extruder-Stepper intern bei z.B. 180mm;
+            # set_position((0,0,0)) würde den Feeder auf 0 setzen während
+            # itersolve Schritte ab 180mm berechnet → alle Schritte landen
+            # bei t=0 → {i=0,c=N} Invalid sequence. extruder.last_position
+            # ist die physikalische commanded_pos des Extruder-Steppers
+            # (unabhängig von G92-Offsets) — selbes Pattern wie Klipper's
+            # ExtruderStepper.sync_to_extruder.
+            _ext_pos = extruder.last_position
+            owner.stepper.set_position((_ext_pos, 0., 0.))
+            owner.stepper.set_trapq(extruder.get_trapq())
+            self.motion_queuing.check_step_generation_scan_windows()
+        except Exception:
+            # Best-effort rollback so the finally-cleanup of any caller
+            # (e.g. cmd_BUFFER_UNLOAD_FILAMENT) cannot mistake a
+            # half-mutated stepper for a clean state. Clear the arming
+            # flag last so a recursive failure inside the rollback still
+            # leaves the cleanup guard disarmed (unsync_if_synced returns
+            # False), avoiding double-rollback attempts.
+            #
+            # Review 2026-07-09 F6: Position/_commanded_pos/primed
+            # gehoeren zum Rollback. set_position(_ext_pos) lief ggf.
+            # schon durch — ohne Restore rechnet itersolve beim
+            # naechsten Own-Submit ab _ext_pos waehrend das Trapezoid
+            # bei _commanded_pos startet → Step-Burst/Invalid sequence.
+            # primed=False erzwingt den Reprime-Pfad beim naechsten
+            # Submit (heilt den Cursor).
+            rolled_back = False
+            try:
+                owner.stepper.set_trapq(self.trapq)
+                owner.stepper.set_position((0., 0., 0.))
+                self.motion_queuing.check_step_generation_scan_windows()
+                rolled_back = True
+            except Exception:
+                logging.exception(
+                    "buffer_feeder: sync rollback failed — arming sync "
+                    "latch, own-trapq submits stay blocked")
+            owner._commanded_pos = 0.0
+            owner._stepcompress_primed = False
+            if rolled_back:
+                self.owner._stepper_synced_to = None
+            else:
+                # Codex-Review 2026-07-13: Rollback fehlgeschlagen —
+                # der Stepper haengt evtl. noch auf der Extruder-Trapq.
+                # Latch armen, damit _submit_move/Bang-Bang blocken;
+                # Recovery via BUFFER_UNSYNC-Retry.
+                self.owner._stepper_synced_to = extruder_name
+            raise
+        owner._arm_critical_action_guard('sync_to_extruder')
+        self.owner._stepper_synced_to = extruder_name
+        owner._stepcompress_primed = True
+        owner._enable_stepper()
+        owner._respond("Buffer-Feeder synced to '%s' — follows extruder moves"
+                      % extruder_name)
+
+    def unsync_if_synced(self):
+        if self.owner._stepper_synced_to is None:
+            return False
+        owner = self.owner
+        try:
+            toolhead = owner.printer.lookup_object('toolhead')
+            toolhead.flush_step_generation()
+            owner.stepper.set_position((0., 0., 0.))
+            owner.stepper.set_trapq(self.trapq)
+            self.motion_queuing.check_step_generation_scan_windows()
+        except Exception:
+            # Review 2026-07-09 F7 (NOT-TO-DO-Muster "Guard-Flag vor
+            # Mutation"): eine Exception mitten im Swap darf den
+            # Sync-Latch nicht gesetzt lassen — sonst blocken ALLE
+            # _submit_move/Bang-Bang-Pfade dauerhaft und ein deferred
+            # _exit_overflow haengt fuer immer. Forced completion:
+            # own-trapq erzwingen, primed=False (Reprime beim naechsten
+            # Submit heilt den Cursor), Latch loesen, dann re-raisen.
+            #
+            # Codex-Review 2026-07-13: Latch NUR bei erfolgreichem
+            # Recovery loesen. Schlaegt auch das Recovery-set_trapq
+            # fehl, haengt der Stepper evtl. weiter auf der Extruder-
+            # Trapq — geloester Latch wuerde Own-Submits auf der
+            # falschen Queue erlauben. Latch behalten = harter
+            # Lockout, Retry via erneutem BUFFER_UNSYNC.
+            recovered = False
+            try:
+                owner.stepper.set_trapq(self.trapq)
+                owner.stepper.set_position((0., 0., 0.))
+                self.motion_queuing.check_step_generation_scan_windows()
+                recovered = True
+            except Exception:
+                logging.exception(
+                    "buffer_feeder: unsync recovery failed — sync "
+                    "latch kept, submits stay blocked (retry "
+                    "BUFFER_UNSYNC)")
+            if recovered:
+                owner._commanded_pos = 0.0
+                owner._stepcompress_primed = False
+                self.owner._stepper_synced_to = None
+            raise
+        owner._arm_critical_action_guard('unsync')
+        self.owner._stepper_synced_to = None
+        owner._commanded_pos = 0.0
+        mcu = owner.stepper.get_mcu()
+        now_pt = mcu.estimated_print_time(owner.reactor.monotonic())
+        owner._last_move_end_time = max(owner._last_move_end_time,
+                                        now_pt + owner.lead_time)
+        # Catch deferred _exit_overflow. If HALL1 fell while we were
+        # synced, _exit_overflow short-circuited to avoid stranding the
+        # stepper on extruder_trapq during a state-transition. Now that
+        # the sync binding is released, run the deferred exit so the
+        # state-machine catches up.
+        if (owner._state == STATE_OVERFLOW
+                and not owner.hall_overflow):
+            owner._exit_overflow()
+        return True

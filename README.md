@@ -1,469 +1,809 @@
-# Klipper Configuration for Mellow LLL Buffer Plus
+# Mellow LLL Plus Filament Buffer for Klipper
 
-Complete Klipper configuration for the Mellow LLL Filament Plus Buffer with automatic filament feeding and buffer management.
+Diese Erweiterung bindet den Mellow LLL Plus Buffer als eigene
+Klipper-Python-Extension ein. Der Buffer-Feeder laeuft auf einer eigenen
+Move-Queue und kann waehrend des Drucks parallel zum normalen Druckkopf
+arbeiten.
 
-> **Note:** This is the Klipper configuration. For the Buffer Plus firmware source code, see the [main repository README](../README.md).
+Wichtig in einem Satz:
 
-# Revisions 
-1/12/2026 - Updated config to use extra_stepper and force moves instead of the second extruder setup.  
-            This avoids a few conflicts and allows the motor to be synced to the extruder  
-            Added filament runout switch logic.  
-            Can be enabled or disabled with Enable_Filament_Runout or Disable_Filament_Runout    
+- Im normalen Druckbetrieb fuettert der Buffer selbststaendig nach,
+  ohne dass der Druckkopf dafuer angehalten werden soll.
+- Beim expliziten Laden und Entladen wird der Buffer bewusst an den
+  Extruder gekoppelt. In diesen Sonderfaellen kann der Druckkopf
+  sichtbar warten. Das ist Absicht und kein Fehler.
 
-## Features
+Die Datei `lll.cfg` ist die mitgelieferte Beispiel- und Testkonfiguration.
+Der Python-Code hat zusaetzlich interne Fallback-Defaults, aber fuer den
+Alltag ist `lll.cfg` die relevante Benutzerkonfiguration.
 
-- ✅ **Automatic Buffer Control** - Fills buffer automatically when filament is detected
-- ✅ **Smart Feed Bursts** - HALL2 sensor triggers small feed bursts during printing
-- ✅ **Overfill Protection** - HALL1 prevents buffer from jamming into extruder
-- ✅ **Manual Feed/Retract** - Physical buttons for manual filament loading
-- ✅ **Filament Runout Detection** - Optional pause on filament runout
+---
 
-## Hardware Setup
+## Inhalt
 
-### Sensor Configuration
-- **ENDSTOP3 (PB7)**: Filament entrance sensor - detects when filament is loaded
-- **HALL3 (PB4)**: Initial fill sensor - switches from continuous to burst mode
-- **HALL2 (PB3)**: Primary buffer control - triggers feed bursts when neck extends
-- **HALL1 (PB2)**: Overfill limiter - prevents buffer from over-filling
+- [Was das Plugin macht](#was-das-plugin-macht)
+- [Was sich gegenueber frueher geaendert hat](#was-sich-gegenueber-frueher-geaendert-hat)
+- [Voraussetzungen](#voraussetzungen)
+- [Installation](#installation)
+- [Wichtige Konfiguration](#wichtige-konfiguration)
+- [Normale Bedienung](#normale-bedienung)
+- [Wichtige GCode-Commands](#wichtige-gcode-commands)
+- [Status und Logs](#status-und-logs)
+- [Typische Probleme](#typische-probleme)
+- [Technischer Anhang](#technischer-anhang)
+- [Firmware flashen](#firmware-flashen)
+- [Danksagungen](#danksagungen)
+- [Lizenz](#lizenz)
 
-### Button Configuration
-- **Feed Button (PB12)**: Manual continuous feed (hold to feed)
-- **Retract Button (PB13)**: Manual continuous retract (hold to retract)
+---
+
+## Was das Plugin macht
+
+Der Buffer kennt vier wesentliche Zustaende:
+
+| Signal | Einfache Bedeutung | Reaktion |
+|---|---|---|
+| `HALL3` | Buffer ist leer / weit unten | Buffer darf nachfoerdern |
+| Zwischenzone | Buffer steht im Arbeitsbereich | Buffer haelt oder foerdert passend zum Verbrauch |
+| `HALL2` | Buffer ist voll | Buffer stoppt |
+| `HALL1` | Buffer ist ueberfuellt / kritisch | Sofortiger Sicherheits-Stopp |
+
+Im aktuellen Standardbetrieb arbeitet das Plugin nicht mehr nur als
+einfaches "an/aus". Stattdessen beobachtet es den realen Filamentverbrauch
+des Extruders und passt die Buffer-Geschwindigkeit daran an.
+
+Einfach gesagt:
+
+1. Der Druckkopf zieht Filament.
+2. Der Buffer erkennt, wie viel gerade verbraucht wird.
+3. Der Buffer schiebt passend nach.
+4. Die Sensoren begrenzen und sichern das Ganze mechanisch ab.
+
+Das ist der Grund, warum dieses Projekt fuer den Druckbetrieb eine eigene
+Queue benutzt und gerade nicht auf `SYNC_EXTRUDER_MOTION` oder
+`MANUAL_STEPPER MOVE` im normalen AUTO-Pfad setzt.
+
+### Was das Plugin nicht machen soll
+
+- Es soll den Druckkopf waehrend des normalen Drucks nicht absichtlich
+  anhalten.
+- Es soll keine zweite Kinematik fuer XYZ sein.
+- Es soll keine Wunder aus einer unkalibrierten Mechanik machen.
+- Es ersetzt keinen echten Encoder oder Stall-Detection.
+
+---
+
+## Was sich gegenueber frueher geaendert hat
+
+Falls du aeltere Branches oder alte Doku kennst, sind diese Punkte
+wichtig:
+
+- Der aktuelle Druckpfad ist auf die Python-Extension mit eigener Queue
+  ausgelegt.
+- Die mitgelieferte `lll.cfg` ist auf den heutigen Refactor-Stand
+  abgestimmt.
+- Der Standardbetrieb nutzt die moderne
+  `motion_queuing`-Anbindung ueber `use_flush_callback_bang_bang: True`.
+- Der Druckstart ist jetzt bewusst abgesichert: AUTO-Streaming bleibt
+  gesperrt, bis echte Extruderbewegung erkannt wurde.
+- Fuer hohe Durchsaetze gibt es eine High-Flow-Korrektur, damit der
+  Buffer in der Zwischenzone nicht zu frueh "aufhoert".
+
+---
+
+## Voraussetzungen
+
+Du brauchst:
+
+- aktuelles Mainline-Klipper
+- einen funktionierenden `LLL_PLUS`-MCU-Eintrag
+- den Mellow LLL Plus Buffer mit angeschlossenem Stepper und Sensoren
+- in `printer.cfg` mindestens:
+  - `[pause_resume]`
+  - `[extruder]`
+  - `max_extrude_only_distance` gross genug fuer deine Buffer-Makros
+
+Mit der mitgelieferten `lll.cfg` solltest du fuer den Extruder
+mindestens diesen Wert einplanen:
+
+```ini
+[extruder]
+max_extrude_only_distance: 400
+```
+
+Warum 400?
+
+- `load_slow_distance` in der mitgelieferten Config ist 100 mm
+- `unload_sync_distance` in der mitgelieferten Config ist 400 mm
+
+Der Extruder muss also mindestens den groessten dieser rein
+extrudergetriebenen Wege erlauben.
 
 ---
 
 ## Installation
 
-### Step 1: Flash Katapult Bootloader (Recommended)
-
-Katapult (formerly CanBoot) allows easy firmware updates without needing to press physical buttons or enter DFU mode.
-
-#### 1.1: Build Katapult
+### 1. Repo holen
 
 ```bash
 cd ~
-git clone https://github.com/Arksine/katapult
-cd katapult
-make menuconfig
+git clone https://github.com/Avatarsia/BufferPLUS-klipper.git
+cd BufferPLUS-klipper
 ```
 
-**Katapult Configuration:**
-- Micro-controller Architecture: `STMicroelectronics STM32`
-- Processor model: `STM32F072`
-- Build Katapult deployment application: `Do Not build`
-- Clock Reference: `8 MHz crystal`
-- Communication interface: `USB (on PA11/PA12)`
-- Application start offset: `8KiB offset`
-- USB ids: Leave default or customize
-- Support bootloader entry on rapid double click: `[*]` ✓ (Enable this!)
-- Enable bootloader entry on button (or gpio) state (Do not enable this)
-- Enable Status LED `[*]`
-- (PA8)   Status LED GPIO Pin
+Wenn du einen bestimmten Entwicklungsstand testen willst, checke danach
+den gewuenschten Branch aus.
+
+### 2. Installer ausfuehren
 
 ```bash
-make clean
-make
+./install.sh
 ```
 
-#### 1.2: Enter DFU Mode
+Der Installer kann:
 
-The LLL Buffer Plus needs to be put into DFU (Device Firmware Update) mode:
+- die Python-Dateien nach `klippy/extras/` verlinken
+- `lll.cfg` nach `printer_data/config/` kopieren
+- `[include lll.cfg]` in `printer.cfg` ergaenzen
+- optional den Moonraker `update_manager` eintragen
 
-**Method 1: Jumper BOOT0 to 3.3V**
-1. Push and hold the boot button
-2. Push the reset button
-3. Release the boot button
-
-**Method 2: BOOT Button (if accessible)**
-1. Disconnect USB
-2. Hold the **BOOT button** on the board
-3. Connect USB while holding BOOT
-4. Release BOOT button
-
-
-#### 1.3: Verify DFU Mode
+### 3. Klipper neu starten
 
 ```bash
-lsusb | grep DFU
+sudo systemctl restart klipper
 ```
 
-You should see something like:
-```
-Bus 001 Device 015: ID 0483:df11 STMicroelectronics STM Device in DFU Mode
+### 4. Pruefen
+
+In der Klipper-Konsole:
+
+```gcode
+BUFFER_STATE_DUMP BUFFER=mellow
 ```
 
-If not detected, try:
+Wenn du nur eine einzige Buffer-Instanz hast, funktionieren viele
+Commands oft auch ohne `BUFFER=mellow`. In dieser README nutze ich den
+Parameter trotzdem immer explizit, damit die Beispiele eindeutig bleiben.
+
+### Update-Hinweis
+
+Es gibt zwei Wege:
+
+- `./install.sh`
+  - interaktiv
+  - zeigt Unterschiede bei `lll.cfg`
+  - besser fuer normale Anwender
+- `./update.sh`
+  - nicht interaktiv
+  - zieht Git-Updates und ueberschreibt `lll.cfg`
+  - rollt standardmaessig `klippy.log` vor dem Klipper-Neustart ueber
+    Moonraker
+  - eher fuer Entwickler oder bewusstes Testen
+
+Falls du das Log-Rollover fuer einen Lauf nicht willst, kannst du es
+abschalten:
+
 ```bash
-sudo dfu-util -l
+ROLLOVER_KLIPPY_LOG=0 ./update.sh
 ```
 
-#### 1.4: Flash Katapult
+Falls Moonraker nicht auf dem lokalen Default-Port laeuft:
+
+```bash
+MOONRAKER_URL=http://127.0.0.1:7125 ./update.sh
+```
+
+### Moonraker Auto-Update
+
+Wenn du den `update_manager` manuell eintragen willst, achte darauf,
+dass `primary_branch` zu dem Branch passt, den du wirklich benutzen
+moechtest.
+
+Beispiel:
+
+```ini
+[update_manager buffer_feeder]
+type: git_repo
+path: ~/BufferPLUS-klipper
+origin: https://github.com/Avatarsia/BufferPLUS-klipper.git
+primary_branch: <dein-branch>
+is_system_service: False
+managed_services: klipper
+```
+
+---
+
+## Wichtige Konfiguration
+
+Nicht jede Option ist fuer jeden Anwender gleich wichtig. Fuer die
+meisten Setups gibt es zwei Gruppen:
+
+### Diese Werte musst du praktisch immer anfassen
+
+| Parameter | Wo | Wofuer |
+|---|---|---|
+| `rotation_distance` | `[buffer_feeder mellow]` | korrekte Foerdermenge des Buffer-Steppers |
+| `load_fast_distance` | `[buffer_feeder mellow]` | Strecke bis kurz vor den Toolhead |
+| `load_slow_distance` | `[buffer_feeder mellow]` | Strecke durch Heatbreak/Hotend beim Laden |
+| `unload_sync_distance` | `[buffer_feeder mellow]` | synchroner Extruder-Rueckzug beim Entladen |
+
+### Optional: Druckkopfsensor fuer Laden und Entladen
+
+Ein Klipper-Schaltsensor vor dem Extruder kann die Umschaltung beim Laden
+und Entladen steuern. In `[buffer_feeder mellow]` aktivieren:
+
+```ini
+load_endstop_sensor: filament_switch_sensor toolhead
+load_fast_distance: 1000
+load_sensor_to_extruder: 10
+```
+
+`[filament_switch_sensor toolhead]` muss einmal in `printer.cfg` oder einer
+eingebundenen Datei mit dem passenden `switch_pin` existieren. Kein
+Motion-Sensor; der Pin wird nicht nochmals im Buffer definiert. Name und
+Pin-Polaritaet muessen zur Hardware passen.
+
+Ohne `load_endstop_sensor` bleiben die bisherigen Lade- und Entlademakros
+aktiv; das ist kein Fehler. Ist ein Sensor konfiguriert, kann aber nicht
+geladen werden, nennt der Fehler die gesuchte Section und `switch_pin`.
+Den Namen korrigieren/Section anlegen oder `load_endstop_sensor` entfernen,
+wenn tatsaechlich ohne Sensor gearbeitet werden soll. Bei Sensorfehlern
+gibt es keinen stillen Wechsel auf distanzbasiertes Laden.
+
+`LOAD_FILAMENT` foerdert schnell bis zur Sensormeldung, danach langsam um
+`load_sensor_to_extruder` (Default **10 mm**) bis zum Extruder. Bereits
+abgefahrener nominaler Nachlauf nach Erkennung wird davon abgezogen.
+Anschliessend laden Extruder und Buffer synchron um `load_slow_distance`
+bei `load_slow_speed`. Die bisherige HALL2-Staging-Phase vor dem SYNC wird
+in diesem Sensorpfad nicht ausgefuehrt. Ein anfangs bereits belegter Sensor
+ueberspringt Schnellladen und Nachlauf; HALL-/JAM-Sicherheiten bleiben aktiv.
+
+`UNLOAD_FILAMENT` prueft beim synchronen Rueckzug den Sensor zwischen
+kurzen, abgeschlossenen Bewegungen. Sobald er frei meldet, endet SYNC;
+der Buffer entlaedt danach allein bis zum freien Entrance-Sensor.
+Ein bereits freier Druckkopfsensor ueberspringt den synchronen Teil.
+`SYNC_DIST` bzw. `unload_sync_distance` begrenzt die Sensor-Suche; bei
+fehlender Freimeldung wird abgebrochen. Auch Tip-Forming-Rueckzuege werden
+ueberwacht. Fehler bereinigen SYNC und den gespeicherten GCode-Zustand.
+
+Im Sensorworkflow bleibt die Sensorauswertung aktiv, automatische
+Insert-/Runout-Aktionen werden voruebergehend unterdrueckt. Der vorherige
+Aktivierungszustand wird nach Erfolg oder Fehler wiederhergestellt.
+
+Bei `LOAD_FILAMENT` beendet auch eine fruehere Erkennung das Schnellladen
+(bereits teilweise eingefuehrtes Filament). Ohne Trigger endet die Suche
+spaetestens bei 110% von `load_fast_distance` mit Fehler.
+Der direkte Low-Level-Befehl `BUFFER_LOAD_PHASE1` behaelt sein bisheriges
+90..110%-Prueffenster; dessen `DISTANCE` ersetzt die Sollstrecke.
+`max_feed_time` begrenzt zusaetzlich die Suchdauer. HALL-/JAM-/HALT-Abbrueche
+beenden den Sensor-Ladeablauf; es gibt kein automatisches Wiederanfahren.
+
+Die Strecke wird aus den zeitlich abgefahrenen Sollbewegungen berechnet
+(keine Messung von Filamentschlupf), zum Zeitpunkt der Sensorerkennung.
+Bewegungsabschnitte sind auf `min(3, interrupt_chunk_mm, max_move_chunk_mm)` mm
+begrenzt. Sensorlatenz, 10-ms-Polling und bereits geplante Steps verursachen
+Nachlauf; dies ist kein hardwareseitig sofort stoppender Homing-Endstop.
+Der Endstop muss entsprechend vor dem mechanischen Anschlag sitzen.
+Ein `insert_gcode` dieses Sensors darf keinen weiteren Ladeablauf starten.
+
+### Diese Werte sind in der mitgelieferten Config bereits bewusst gesetzt
+
+Die aktuelle `lll.cfg` ist kein generischer "Minimalwert", sondern ein
+getunter Arbeitsstand. Wichtige Beispiele:
+
+| Parameter | Wert in `lll.cfg` | Bedeutung |
+|---|---:|---|
+| `feed_speed` | `70` | obere Nachfoerdergeschwindigkeit im AUTO-Betrieb |
+| `min_feed_floor` | `10.0` | niedriger H3-Mindestwert, damit mittlere bis hohe Flows frueher in die dynamische Regelung kommen |
+| `lead_time` | `0.12` | zeitlicher Vorlauf fuer geplante Moves |
+| `use_flush_callback_bang_bang` | `True` | moderner Druckpfad ueber `motion_queuing` |
+| `flush_callback_chunk_mm` | `45` | groessere Chunks fuer besseren Durchsatz |
+| `interrupt_chunk_mm` | `9` | kleine Sicherheits-Sub-Chunks fuer schnelle Abbrueche |
+| `strict_print_start_guard` | `True` | kein AUTO-Feed vor echter Extrusion |
+| `high_flow_mm3s_threshold` | `24.0` | High-Flow-Schutz gegen Unterfoerderung |
+| `buffer_debug_metrics` | `True` | aktuell fuer Test-/Hardware-Analyse aktiv |
+
+### Welche Debug-Schalter es gibt
+
+| Parameter | Wirkung |
+|---|---|
+| `buffer_debug_events` | loggt Entscheidungen und Handler-Ereignisse ins `klippy.log` |
+| `buffer_debug_metrics` | loggt laufende Messwerte, Sensorlage und Timing ins `klippy.log` |
+
+Fuer normalen Dauerbetrieb solltest du `buffer_debug_metrics` nur dann
+aktiv lassen, wenn du bewusst Hardwaretests faehrst.
+
+### High-Flow-Hinweis
+
+Die aktuelle Logik beruecksichtigt hohe volumetrische Stroeme. Oberhalb
+von `high_flow_mm3s_threshold` darf die Zwischenzone weiter
+proportional foerdern, auch wenn die lineare Extruder-Geschwindigkeit
+unterhalb des klassischen `min_feed_floor` liegt.
+
+Der praktische Grund:
+
+- `24 mm^3/s` sind bei `1.75 mm` Filament nur rund `10 mm/s` linear.
+- Auf diesem Referenzsystem ist `min_feed_floor` deshalb bewusst auf
+  `10.0` gesetzt, damit der Buffer bei ca. `24-30 mm^3/s` frueher aus
+  dem festen H3-Minimum in die dynamische Regelung kommt.
+- Ohne diesen Sonderfall waere der Buffer bei hohem Flow oft zu
+  burst-lastig und koennte unterfoerdern.
+
+---
+
+## Normale Bedienung
+
+### Normaler Druck
+
+Im Normalfall laeuft das so:
+
+1. Filament steckt im Buffer.
+2. Der Druck startet.
+3. Das Plugin wartet kurz, bis echte Extruderbewegung sichtbar ist.
+4. Erst dann beginnt die automatische Nachfoerderung.
+
+Das ist Absicht. So wird verhindert, dass der Buffer schon in der
+Startphase "auf Verdacht" foerdert.
+
+### Filament laden
+
+Das mitgelieferte Makro ist:
+
+```gcode
+LOAD_FILAMENT
+```
+
+Der Ablauf ist:
+
+1. Buffer foerdert schnell bis kurz vor den Toolhead.
+2. Buffer fuellt sich bis zum Sensorsignal.
+3. Buffer und Extruder laufen kurz synchron, damit das Filament sauber
+   ins Hotend kommt.
+
+Wichtig:
+
+- Diese letzte Synchronphase ist bewusst ein Sonderpfad.
+- Dabei kann der Druckkopf bzw. der normale Planner sichtbar warten.
+- Das ist fuer LOAD gewollt und kein Widerspruch zum normalen
+  AUTO-Druckbetrieb.
+
+### Filament entladen
+
+```gcode
+UNLOAD_FILAMENT
+```
+
+Das Makro kuemmert sich um:
+
+- Tip-Forming
+- optionales Abkuehlen der Spitze
+- synchronen Rueckzug ueber den Extruder
+- anschliessenden Rueckzug durch den Buffer
+
+### Buffer manuell fuellen
+
+Wenn Filament am Eingang anliegt und du den Buffer einmal aktiv
+vorspannen willst:
+
+```gcode
+FORCE_BUFFER_FILL BUFFER=mellow
+```
+
+Abbrechen:
+
+```gcode
+STOP_BUFFER_FILL BUFFER=mellow
+```
+
+### Jam zuruecksetzen
+
+Wenn der Buffer auf JAM steht:
+
+```gcode
+CLEAR_JAM
+```
+
+oder direkt:
+
+```gcode
+BUFFER_CLEAR_JAM BUFFER=mellow
+```
+
+---
+
+## Wichtige GCode-Commands
+
+### Alltagsbefehle
+
+| Command | Zweck |
+|---|---|
+| `BUFFER_AUTO_ON BUFFER=mellow` | AUTO-Betrieb einschalten |
+| `BUFFER_AUTO_OFF BUFFER=mellow` | AUTO-Betrieb ausschalten und Lockouts aufraeumen |
+| `BUFFER_HALT BUFFER=mellow` | Feeder sofort stoppen |
+| `BUFFER_STATE_DUMP BUFFER=mellow` | kompletten Zustand ausgeben |
+| `BUFFER_WAIT_IDLE BUFFER=mellow` | warten, bis der Buffer wirklich fertig ist |
+| `FORCE_BUFFER_FILL BUFFER=mellow` | Buffer manuell greifen und fuellen |
+| `STOP_BUFFER_FILL BUFFER=mellow` | laufenden Fill-/Grip-Vorgang abbrechen |
+| `CLEAR_JAM` | JAM-Lockout ueber Wrapper-Makro loesen |
+
+### Direkte Bewegungen
+
+| Command | Zweck |
+|---|---|
+| `BUFFER_FEED BUFFER=mellow DISTANCE=<mm> SPEED=<mm/s>` | Filament vorwaerts foerdern |
+| `BUFFER_RETRACT BUFFER=mellow DISTANCE=<mm> SPEED=<mm/s>` | Filament rueckwaerts foerdern |
+
+Ohne `DISTANCE` laeuft `BUFFER_FEED` als Dauerlauf, bis du ihn stoppst.
+
+### Lade-/Entlade-Bausteine
+
+Diese Befehle sind eher fuer Debug oder eigene Makros gedacht:
+
+| Command | Zweck |
+|---|---|
+| `BUFFER_LOAD_PHASE1 BUFFER=mellow` | schneller Vorlauf bis kurz vor den Toolhead |
+| `BUFFER_LOAD_PHASE3 BUFFER=mellow` | Buffer-Sensorphase beim Laden |
+| `BUFFER_UNLOAD_PHASE3 BUFFER=mellow` | rueckwaerts foerdern bis Eingang frei |
+| `BUFFER_SYNC_TO_EXTRUDER BUFFER=mellow EXTRUDER=extruder` | Buffer an Extruder koppeln |
+| `BUFFER_UNSYNC BUFFER=mellow` | Buffer wieder entkoppeln |
+
+### Laufzeit-Tuning
+
+Wichtiger Sammelbefehl:
+
+```gcode
+BUFFER_SET
+```
+
+Ohne Argumente zeigt er die aktuellen Laufzeitwerte.
+
+Beispiele:
+
+```gcode
+BUFFER_SET DEBUG_EVENTS=1
+BUFFER_SET DEBUG_METRICS=1
+BUFFER_SET HIGH_FLOW_MM3S=30
+BUFFER_SET LEAD_TIME=0.10
+BUFFER_SET SPEED=75
+```
+
+Wichtige `BUFFER_SET`-Parameter:
+
+| Parameter | Wirkung |
+|---|---|
+| `CHUNK_MM` | `flush_callback_chunk_mm` aendern |
+| `INTERRUPT_CHUNK_MM` | Sicherheits-Sub-Chunk aendern |
+| `SPEED` | `feed_speed` aendern |
+| `LEAD_TIME` | `lead_time` aendern |
+| `MAX_MOVE_CHUNK_MM` | maximale Move-Groesse aendern |
+| `DEBUG_EVENTS` | Ereignis-Logs an/aus |
+| `DEBUG_METRICS` | Metrik-Logs an/aus |
+| `STRICT_START_GUARD` | Druckstart-Schutz an/aus |
+| `CRITICAL_GUARD_S` | Schutzfenster nach kritischen Aktionen |
+| `CONSERVATIVE_MODE` | defensiveren Testmodus aktivieren |
+| `HIGH_FLOW_MM3S` | High-Flow-Schwelle aendern |
+
+Wichtig: `BUFFER_SET` ist nicht persistent. Wenn ein Wert gut funktioniert,
+musst du ihn anschliessend in `lll.cfg` uebernehmen.
+
+---
+
+## Status und Logs
+
+### Schnellster Gesundheitscheck
+
+```gcode
+BUFFER_STATE_DUMP BUFFER=mellow
+```
+
+Das ist der beste erste Blick auf:
+
+- aktuellem State
+- Sensorlage
+- aktiven Guards
+- JAM-/RUNOUT-Status
+- Debug-Flags
+
+### Wichtige Status-Felder fuer Makros
+
+Zugriff erfolgt ueber:
+
+```jinja
+printer["buffer_feeder mellow"].<feld>
+```
+
+Die wichtigsten Felder:
+
+| Feld | Bedeutung |
+|---|---|
+| `state` | aktueller Hauptzustand des Buffers |
+| `hall_empty` | HALL3 aktiv |
+| `hall_full` | HALL2 aktiv |
+| `hall_overflow` | HALL1 aktiv |
+| `entrance_detected` | Filament am Eingang erkannt |
+| `continuous_feed` | Buffer foerdert gerade aktiv |
+| `jam_active` | JAM-Lockout ist aktiv |
+| `bang_bang_suspended` | AUTO waehrend Pause unterdrueckt |
+| `print_phase` | `inactive`, `guarded`, `active` oder `paused` |
+| `critical_action_guard_remaining_s` | Restzeit eines Schutzfensters |
+| `synced_to_extruder` | falls der Buffer gerade am Extruder haengt |
+
+### Logs fuer Fehlersuche
+
+Es gibt zwei Ebenen:
+
+1. `buffer_debug_events`
+   - fuer Entscheidungen
+   - warum ein Submit gemacht oder ausgelassen wurde
+2. `buffer_debug_metrics`
+   - fuer Messwerte
+   - Sensorzonen, Extruderverbrauch, Timing, High-Flow-Lage
+
+Beides landet direkt im `klippy.log`.
+
+Empfohlener Ablauf:
+
+1. Fehler reproduzieren
+2. `BUFFER_SET DEBUG_EVENTS=1`
+3. falls noetig zusaetzlich `BUFFER_SET DEBUG_METRICS=1`
+4. Test wiederholen
+5. danach wieder abschalten
+
+---
+
+## Typische Probleme
+
+### Der Druckkopf pausiert waehrend `LOAD_FILAMENT`
+
+Das ist bei diesem Workflow erwartbar.
+
+Grund:
+
+- `LOAD_FILAMENT` benutzt in Phase 3 bewusst
+  `BUFFER_SYNC_TO_EXTRUDER` und danach `BUFFER_UNSYNC`
+- fuer diese Trapq-Umschaltung muss Klipper intern flushen
+- das kann sichtbar wie eine kurze Pause wirken
+
+Wichtig ist die Unterscheidung:
+
+- im normalen AUTO-Druckbetrieb unerwuenscht
+- bei explizitem LOAD/UNLOAD bewusst akzeptiert
+
+### Der Buffer foerdert beim Druckstart zu frueh
+
+Dafuer gibt es heute den `strict_print_start_guard`.
+
+Pruefen:
+
+- `strict_print_start_guard: True`
+- `print_phase` in `BUFFER_STATE_DUMP`
+- `buffer_debug_events`
+
+### Der Buffer foerdert bei hohem Flow nicht schnell genug
+
+Dann sind vor allem diese Punkte relevant:
+
+- `feed_speed`
+- `min_feed_floor`
+- `feed_speed_gain`
+- `flush_callback_chunk_mm`
+- `interrupt_chunk_mm`
+- `high_flow_mm3s_threshold`
+- reale Mechanik und Kalibrierung
+
+Fuer die aktuelle Logik ist der kritische Bereich besonders um
+`24 mm^3/s` und darueber relevant.
+
+### Serientests fuer Baselines
+
+Fuer systematische Versuche liegt im Repo ein Host-Tool:
+
+`tools/buffer_baseline_suite.py`
+
+Damit kannst du:
+
+- eine komplette Multi-Case-Testdatei erzeugen
+- mehrere Flow-Stufen und mehrere Tuning-Werte automatisch durchfahren
+- das resultierende `klippy.log` spaeter in CSV/JSON auswerten
+
+Beispiel Generator:
+
+```bash
+python3 tools/buffer_baseline_suite.py generate \
+  --flows 24 30 40 \
+  --feed-speed-gains 1.10 1.20 \
+  --min-feed-floors 10 12 \
+  --high-flow-thresholds 20 24 \
+  --speeds 100 \
+  --durations 60
+```
+
+Default-Ausgabe:
+
+- G-Code: `~/printer_data/gcodes/buffer_baseline_suite.gcode`
+- Manifest: `~/printer_data/config/buffer_baseline_suite_manifest.csv`
+
+Die erzeugte G-Code-Datei ruft pro Fall `BUFFER_BASELINE_RUN` auf und
+schreibt pro Fall stabile Benchmark-Marker ins `klippy.log`:
+
+- `BFX_SUITE_START` / `BFX_SUITE_END`
+- `BFX_CASE_START` / `BFX_CASE_END`
+- `BFX_MEASURE_START` / `BFX_MEASURE_END`
+
+`BUFFER_BASELINE_RUN` bringt den Buffer vor dem eigentlichen Messlauf
+zuerst automatisch in eine neutrale Sensorzone (nicht H3, nicht H2,
+nicht H1) und startet erst danach die timed Extrusion.
+
+Beispiel Auswertung:
+
+```bash
+python3 tools/buffer_baseline_suite.py analyze \
+  --log ~/printer_data/logs/klippy_real.log
+```
+
+Default-Ausgabe der Auswertung:
+
+- Summary: `~/printer_data/config/buffer_baseline_summary.csv`
+- Samples: `~/printer_data/config/buffer_baseline_samples.csv`
+- JSON: `~/printer_data/config/buffer_baseline_summary.json`
+
+Die Summary zeigt unter anderem:
+
+- wie oft der Buffer am `min_feed_floor` hing
+- ob `target_speed` sichtbar ueber den Floor kam
+- H3/H2/H1-Haeufigkeiten
+- High-Flow-Anteile
+- Log-Fehler wie `Invalid sequence`, `Exception in flush_handler`,
+  `Timer too close`
+
+Falls die Makro-Version Messmarker `BFX_MEASURE_START` /
+`BFX_MEASURE_END` schreibt, wertet das Tool nur noch die eigentliche
+Messphase aus und ignoriert die Vorbereitungsbewegung.
+
+### "Exception in flush_handler" oder "Invalid sequence"
+
+Dann zuerst das `klippy.log` sichern, bevor du neu startest.
+
+Wichtige Marker:
+
+- `Exception in flush_handler`
+- `stepcompress ... Invalid sequence`
+- `Timer too close`
+- der Python-Traceback direkt davor
+
+Die Shutdown-Meldung in Mainsail ist meistens nur das Ende der Kette,
+nicht die eigentliche Ursache.
+
+### Plugin startet nicht wegen `motion_queuing`
+
+Die aktuelle Konfiguration erwartet modernes Mainline-Klipper.
+Fehlt die API, bricht das Plugin heute absichtlich mit klarer Meldung ab,
+statt halb zu starten.
+
+### Sensoren wirken invertiert
+
+Dann zuerst:
+
+- Pinbelegung pruefen
+- `^!`-Konvention in `lll.cfg` nicht blind aendern
+- `BUFFER_STATE_DUMP BUFFER=mellow` waehrend du den Arm haendisch bewegst
+
+### Jam-Detection ist zu empfindlich
+
+Anpassen:
+
+- `jam_clog_dwell_time`
+- `jam_clog_extrude_min`
+- `jam_supply_dwell_time`
+
+Oder komplett deaktivieren:
+
+```ini
+jam_detection_enabled: 0
+```
+
+---
+
+## Technischer Anhang
+
+Dieser Abschnitt ist bewusst kurz und soll die Architektur nur so weit
+erklaeren, dass man ihr Verhalten versteht.
+
+### 1. Normaler Druckpfad
+
+Im normalen Druckbetrieb:
+
+- hat der Buffer seine eigene Trapq
+- darf der Buffer parallel zum Druckkopf arbeiten
+- wird `SYNC_TO_EXTRUDER` nicht benutzt
+- soll `flush_step_generation()` den Druckkopf nicht ausbremsen
+
+Mit der mitgelieferten Config ist das der Standardpfad.
+
+### 2. LOAD/UNLOAD-Sonderpfad
+
+Beim Laden und Entladen ist das anders:
+
+- Buffer und Extruder werden bewusst gekoppelt
+- das ist mechanisch sauberer fuer Hotend-Einzug und Tip-Forming
+- dafuer ist eine sichtbare Pause des normalen Druckpfads akzeptiert
+
+### 3. Druckstart-Schutz
+
+Das Plugin unterscheidet heute zwischen:
+
+- Druck laeuft formal
+- echte Extrusion hat wirklich begonnen
+- Buffer darf wirklich nachfoerdern
+
+Darum existiert `print_phase` und der Start-Guard.
+
+### 4. High-Flow-Korrektur
+
+Der Buffer arbeitet nicht nur mit den Sensoren, sondern auch mit dem
+gemessenen Extruderverbrauch. Das ist besonders wichtig bei hoeheren
+Durchsaetzen, weil dort ein reines HALL3-"an/aus" zu spaet oder zu
+aggressiv reagieren kann.
+
+### 5. Harte Grenzen
+
+Das Projekt kann viel, aber nicht alles:
+
+- nur ein Buffer gleichzeitig
+- keine persistente automatische Kalibrierung
+- keine Encoder-basierte Schlupferkennung
+- Abhaengigkeit von aktueller Mainline-Klipper-API
+
+---
+
+## Firmware flashen
+
+Kurzfassung:
+
+1. Katapult-Bootloader flashen
+2. Klipper-Firmware mit passendem Offset bauen
+3. `serial:` in `[mcu LLL_PLUS]` auf dein Device setzen
+
+Beispiel:
 
 ```bash
 cd ~/katapult
-sudo dfu-util -a 0 -D ~/katapult/out/katapult.bin --dfuse-address 0x08000000:force:mass-erase:leave -d 0483:df11
+make menuconfig
+make clean && make
+sudo dfu-util -a 0 -D out/katapult.bin --dfuse-address 0x08000000:force:mass-erase:leave -d 0483:df11
 ```
-
-You should see output ending with:
-```
-File downloaded successfully
-```
-
-#### 1.5: Verify Katapult
-
-Disconnect and reconnect USB. Check for Katapult device:
-
-```bash
-ls /dev/serial/by-id/
-```
-
-You should see something like:
-```
-usb-katapult_stm32f072xb_XXXXXX-if00
-```
-
----
-
-### Step 2: Build and Flash Klipper Firmware
-
-#### 2.1: Build Klipper
 
 ```bash
 cd ~/klipper
 make menuconfig
+make clean && make
+python3 ~/katapult/scripts/flashtool.py -f out/klipper.bin -d /dev/serial/by-id/usb-katapult_stm32f072xb_*
 ```
 
-**Klipper Configuration:**
-- Micro-controller Architecture: `STMicroelectronics STM32`
-- Processor model: `STM32F072`
-- Bootloader offset: `8KiB bootloader` (for Katapult)
-- Clock Reference: `8 MHz crystal`
-- Communication interface: `USB (on PA11/PA12)`
+Danach in `lll.cfg`:
 
-**Important:** The bootloader offset MUST match what you set in Katapult (8KiB)!
-
-```bash
-make clean
-make
-```
-
-#### 2.2: Flash Klipper via Katapult
-
-Find your device ID:
-```bash
-ls /dev/serial/by-id/
-```
-
-Flash using Katapult's flashtool:
-```bash
-python3 ~/katapult/scripts/flashtool.py -f ~/klipper/out/klipper.bin -d /dev/serial/by-id/usb-katapult_stm32f072xb_XXXXXX-if00
-```
-
-Or using `make flash`:
-```bash
-make flash FLASH_DEVICE=/dev/serial/by-id/usb-katapult_stm32f072xb_XXXXXX-if00
-```
-
-You should see:
-```
-Attempting to connect to bootloader
-Katapult Connected
-Protocol: 1.0.0
-Flashing '/home/pi/klipper/out/klipper.bin'...
-[##################################################]
-Write complete: X pages
-Verifying...
-Verification Complete
-CRC: 0xXXXXXXXX
-Flashing successful
-```
-
-#### 2.3: Verify Klipper
-
-Disconnect and reconnect USB. Check the device ID changed:
-
-```bash
-ls /dev/serial/by-id/
-```
-
-You should now see:
-```
-usb-Klipper_stm32f072xb_XXXXXX-if00
-```
-
----
-
-### Step 3: Configure Klipper
-
-#### 3.1: Copy Configuration File
-
-```bash
-cp mellow.cfg ~/printer_data/config/
-```
-
-#### 3.2: Update printer.cfg
-
-Add to your main `printer.cfg`:
-```cfg
-[include mellow.cfg]
-```
-
-#### 3.3: Update MCU Serial ID
-
-Edit `mellow.cfg` and update the serial path:
-
-```cfg
+```ini
 [mcu LLL_PLUS]
-serial: /dev/serial/by-id/usb-Klipper_stm32f072xb_XXXXXX-if00
-restart_method: command
+serial: /dev/serial/by-id/...
 ```
-
-Replace `XXXXXX` with your actual device ID from Step 2.3.
-
-#### 3.4: Restart Klipper
-
-```
-FIRMWARE_RESTART
-```
-
-Check the Klipper web interface - you should see the LLL_PLUS MCU connected!
 
 ---
 
-### Alternative: Flash Klipper Without Katapult
+## Danksagungen
 
-If you prefer not to use Katapult, you can flash Klipper directly:
-
-#### Build Klipper (No Bootloader)
-
-```bash
-cd ~/klipper
-make menuconfig
-```
-
-**Settings:**
-- Micro-controller Architecture: `STMicroelectronics STM32`
-- Processor model: `STM32F072`
-- Bootloader offset: `No bootloader`
-- Clock Reference: `8 MHz crystal`
-- Communication interface: `USB (on PA11/PA12)`
-
-```bash
-make clean
-make
-```
-
-#### Flash via DFU
-
-1. Enter DFU mode (see Step 1.2)
-2. Flash:
-   ```bash
-   make flash FLASH_DEVICE=0483:df11
-   ```
-
-> **Note:** Without Katapult, future firmware updates will require entering DFU mode manually each time.
+- Originale Konfigurationsidee von
+  [@ss1gohan13](https://github.com/ss1gohan13)
+- Hardware und Ausgangsfirma:
+  [Mellow 3D](https://github.com/mellow-3d) und
+  [Fly3DTeam](https://github.com/Fly3DTeam/Buffer)
+- Referenz fuer Klipper-Patterns:
+  [Happy Hare](https://github.com/moggieuk/Happy-Hare)
+- Katapult:
+  [Arksine](https://github.com/Arksine)
+- Klipper-Team
 
 ---
 
-## How It Works
+## Lizenz
 
-### Initial Loading
-1. Insert filament into entrance sensor (ENDSTOP3/PB7)
-2. Buffer starts **continuous feeding** automatically
-3. When neck reaches top (HALL3 triggers), switches to **burst mode**
-
-### During Printing
-1. Printer pulls filament → Buffer neck extends
-2. When neck reaches mid-point (HALL2 releases) → **15mm feed burst**
-3. Neck retracts back into housing
-4. Repeat as needed
-
-### Overfill Protection
-1. If buffer overfills and neck extends too far (HALL1 releases)
-2. **Auto-feed pauses** until neck retracts
-3. Prevents jamming against extruder
-
----
-
-## Configuration Tuning
-
-### Adjust Feed Burst Amount
-Change the burst size in `_BUFFER_FEED_BURST` macro:
-```cfg
-[gcode_macro _BUFFER_FEED_BURST]
-gcode:
-    {% if printer["gcode_macro _BUFFER_AUTO_CONTROL"].overfill_lock == 0 %}
-        ACTIVATE_EXTRUDER EXTRUDER=extruder1
-        M83
-        G1 E15 F3000  # ← Change E15 to desired burst amount (mm)
-        M118 Buffer: Feed burst complete
-    {% endif %}
-```
-
-### Adjust Feed Speed
-Change feed/retract speed (currently 3000 mm/min = 50 mm/s):
-```cfg
-G1 E10 F3000  # Change F3000 to desired speed (mm/min)
-```
-
-Common speeds:
-- `F1800` = 30 mm/s (slower, more reliable)
-- `F3000` = 50 mm/s (default)
-- `F6000` = 100 mm/s (faster, may skip)
-
-### Motor Current
-Adjust TMC2208 current if motor is too weak or overheating:
-```cfg
-[tmc2208 extruder1]
-uart_pin: LLL_PLUS:PB1
-run_current: 0.35  # Increase up to 0.5 if motor skips, decrease to 0.25 if overheating
-stealthchop_threshold: 999999
-```
-
-### Rotation Distance Calibration
-
-To calibrate your buffer motor for accurate feeding:
-
-1. **Mark the filament** 120mm from the entrance sensor
-2. **Heat your hotend** (if min_extrude_temp is set)
-3. **Activate the buffer extruder:**
-   ```
-   ACTIVATE_EXTRUDER EXTRUDER=extruder1
-   ```
-4. **Feed 100mm:**
-   ```
-   M83
-   G1 E100 F300
-   ```
-5. **Measure** the actual distance the mark moved
-6. **Calculate new rotation distance:**
-   ```
-   new_rotation_distance = current_rotation_distance * (100 / actual_distance_moved)
-   ```
-   
-   Example: If mark moved 95mm instead of 100mm:
-   ```
-   new_rotation_distance = 18.86 * (100 / 95) = 19.85
-   ```
-
-7. **Update config:**
-   ```cfg
-   [extruder1]
-   rotation_distance: 19.85  # Your calculated value
-   ```
-
-8. **Restart and test again** until accurate
-
----
-
-## Troubleshooting
-
-### Flashing Issues
-
-**DFU device not detected:**
-- Check USB cable (must be data cable, not charge-only)
-- Try different USB port
-- Check `lsusb` without grep to see all devices
-- Verify BOOT0 is properly jumpered to 3.3V
-- Try both BOOT button methods
-
-**"Cannot open DFU device":**
-```bash
-sudo dfu-util -a 0 -D ~/katapult/out/katapult.bin --dfuse-address 0x08000000:force:mass-erase:leave -d 0483:df11
-```
-Run with `sudo` if permission denied.
-
-**Katapult not appearing after flash:**
-- Disconnect and reconnect USB
-- Wait 5-10 seconds
-- Check `dmesg | tail` for USB events
-- Reflash Katapult - it may not have written correctly
-
-**Klipper flash fails via Katapult:**
-- Verify bootloader offset matches (8KiB in both Katapult and Klipper)
-- Try entering Katapult manually: Double-tap reset button quickly
-- Reflash Katapult and try again
-
-### Buffer Operation Issues
-
-**Buffer feeds continuously and won't stop:**
-- Check HALL3 sensor is working: `QUERY_ENDSTOPS`
-- Verify neck can physically reach HALL3 when extended
-- Check sensor wiring and polarity
-- Look for "HALL3 TRIGGERED" message in console
-
-**HALL2 bursts happen too frequently:**
-- Increase burst amount (E15 → E20 or E25)
-- Check reverse bowden tube tension
-- Verify printer is actually consuming filament
-
-**Buffer overfills (HALL1 warning):**
-- Decrease burst amount (E15 → E10)
-- Check that printer is pulling filament from buffer
-- Verify no clogs in bowden tube
-- Check extruder is actually feeding
-
-**Manual buttons don't work:**
-- Verify button wiring to PB12 (feed) and PB13 (retract)
-- Check console for "button pressed/released" messages
-- Ensure buttons are wired normally-open (NO)
-- Test with `QUERY_ENDSTOPS` while pressing
-
-**MCU not detected after flashing Klipper:**
-- Verify Klipper firmware is flashed (not Arduino or Katapult)
-- Check USB connection
-- Run `ls /dev/serial/by-id/` to find device
-- Check `dmesg | tail` for USB enumeration errors
-- Reflash Klipper firmware
-
-**"Option 'step_pin' is not valid in section 'extruder X'":**
-- Ensure section is named `[extruder1]` not `[extruder filament_buffer]`
-- Klipper only supports numbered extruders: `extruder`, `extruder1`, `extruder2`, etc.
-
-**TMC UART errors:**
-- Verify UART pin is correct: `uart_pin: LLL_PLUS:PB1`
-- Check TMC2208 is properly seated
-- Verify run_current is not too low (minimum ~0.2)
-
----
-
-## Updating Firmware (with Katapult)
-
-Once Katapult is installed, updating Klipper is easy:
-
-1. **Rebuild Klipper:**
-   ```bash
-   cd ~/klipper
-   make clean
-   make
-   ```
-
-2. **Flash via Katapult:**
-   ```bash
-   python3 ~/katapult/scripts/flashtool.py -f ~/klipper/out/klipper.bin -d /dev/serial/by-id/usb-Klipper_stm32f072xb_XXXXXX-if00
-   ```
-
-3. **Or use double-tap reset:**
-   - Quickly press reset button twice
-   - Device enters Katapult mode for 5 seconds
-   - Flash using the Katapult device ID
-
-No need to open the case or press BOOT buttons! 🎉
-
----
-
-## Credits
-
-Klipper configuration developed by [@ss1gohan13](https://github.com/ss1gohan13) for the Mellow LLL Filament Plus Buffer.
-
-Hardware and original firmware by [Mellow 3D](https://github.com/mellow-3d).
-
-Special thanks to:
-- James on the Klipper Discord
-- Ian on the Klipper Discord
-- [Arksine](https://github.com/Arksine) for Katapult bootloader
-- [Klipper](https://github.com/Klipper3d/klipper) team
-
-## License
-
-MIT License - Feel free to use and modify!
+Dieses Repo liegt unter der GNU GPL v3. Siehe [LICENSE](LICENSE).
