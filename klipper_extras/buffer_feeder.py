@@ -524,6 +524,7 @@ class BufferFeeder:
         try:
             se = self.printer.lookup_object('stepper_enable')
             self._stepper_enable = se.lookup_enable(self.stepper.get_name())
+            self._install_stepper_disable_guard(se)
         except Exception:
             logging.exception("buffer_feeder: could not look up stepper_enable")
 
@@ -2133,6 +2134,9 @@ class BufferFeeder:
         half-a-chunk-duration of ending, so chunks abut without a
         visible gap in motion. Abort signals zero out the pending
         counter — already-queued trapezoids drain on the MCU."""
+        if (getattr(self, '_stepper_disable_in_progress', False)
+                or getattr(self, '_global_disable_in_progress', False)):
+            return
         if self._pending_remaining_mm <= 0:
             return
         if (self._load_endstop_move is not None
@@ -2449,6 +2453,9 @@ class BufferFeeder:
         # fresh — what matters is that the LLL_PLUS MCU is generating
         # steps somewhere, not whether we decided to act on this tick.
         self._last_mcu_flush_time = flush_time
+        if (getattr(self, '_stepper_disable_in_progress', False)
+                or getattr(self, '_global_disable_in_progress', False)):
+            return
         if not self.use_flush_callback_bang_bang:
             self._debug_event(
                 'flush_skip_disabled',
@@ -2976,6 +2983,9 @@ class BufferFeeder:
             self._disable_stepper()
 
     def _enable_stepper(self):
+        if (getattr(self, '_stepper_disable_in_progress', False)
+                or getattr(self, '_global_disable_in_progress', False)):
+            return
         if self._stepper_enable is None:
             return
         self._pending_disable = False   # cancel any deferred disable
@@ -2988,6 +2998,74 @@ class BufferFeeder:
             self._stepper_enable.motor_enable(pt)
         except Exception:
             logging.exception("buffer_feeder: enable_stepper failed")
+
+    def _install_stepper_disable_guard(self, stepper_enable=None):
+        handle = self._stepper_enable
+        if getattr(self, '_guarded_stepper_enable', None) is not handle:
+            self._raw_motor_disable = handle.motor_disable
+            self._guarded_stepper_enable = handle
+            handle.motor_disable = self._guard_motor_disable
+        if (stepper_enable is None
+                or not callable(getattr(stepper_enable, 'set_motors_enable', None))):
+            return
+        # One transaction per printer keeps all selected buffer instances
+        # quiet through the stock M18/M84/SET_STEPPER_ENABLE flush and disable.
+        if not hasattr(stepper_enable, '_buffer_disable_owners'):
+            stepper_enable._buffer_disable_owners = []
+            stepper_enable._buffer_set_motors_enable = stepper_enable.set_motors_enable
+            stepper_enable.set_motors_enable = self._guard_global_stepper_disable
+        if self not in stepper_enable._buffer_disable_owners:
+            stepper_enable._buffer_disable_owners.append(self)
+
+    def _guard_global_stepper_disable(self, stepper_names, enable):
+        se = self.printer.lookup_object('stepper_enable')
+        names = list(stepper_names)
+        owners = [owner for owner in se._buffer_disable_owners
+                  if owner.stepper.get_name() in names]
+        if enable or not owners:
+            return se._buffer_set_motors_enable(names, enable)
+        previous = [(owner, owner._global_disable_in_progress)
+                    for owner in owners]
+        for owner in owners:
+            owner._global_disable_in_progress = True
+        try:
+            result = se._buffer_set_motors_enable(names, enable)
+            for owner in owners:
+                # A deliberate global motor-off also cancels unsent work;
+                # otherwise a later idle flush can re-enable an old prime.
+                owner._halt_motion()
+                owner._needs_overflow_prime = False
+            return result
+        finally:
+            for owner, was_disabling in previous:
+                owner._global_disable_in_progress = was_disabling
+
+    def _guard_motor_disable(self, print_time):
+        if getattr(self, '_stepper_disable_in_progress', False):
+            return
+        self._stepper_disable_in_progress = True
+        try:
+            move_end = (self._current_move['end_time']
+                        if self._current_move is not None else 0.0)
+            if self.motion_queuing.last_step_gen_time < move_end:
+                # A flush callback can append a prime beyond the snapshot
+                # used by Klipper's global flush_all_steps(). Drain once more
+                # with every buffer submit path blocked, before rearming
+                # the automatic activity callback in motor_disable().
+                self.motion_queuing.flush_all_steps()
+                if self.motion_queuing.last_step_gen_time < move_end:
+                    raise self._cmd_error(
+                        'Buffer motor disable: incomplete step generation')
+                print_time = max(print_time,
+                                 self._schedule_time_for_enable_toggle())
+            self._last_enable_schedule_time = max(
+                self._last_enable_schedule_time, print_time)
+            result = self._raw_motor_disable(print_time)
+            self._stepcompress_primed = False
+            self._pending_disable = False
+            return result
+        finally:
+            self._stepper_disable_in_progress = False
 
     def _disable_stepper(self):
         # MCU time can pass the move end before a delayed background
@@ -3049,6 +3127,9 @@ class BufferFeeder:
         which re-checks HALL2/HALL1 between sub-chunks. Default None
         falls back to max_move_chunk_mm (legacy behaviour).
         """
+        if (getattr(self, '_stepper_disable_in_progress', False)
+                or getattr(self, '_global_disable_in_progress', False)):
+            return
         if signed_distance == 0 or speed <= 0:
             return
         # defense-in-depth sync guard. _bang_bang_tick
@@ -3149,6 +3230,9 @@ class BufferFeeder:
         the stepper is synced to an extruder trapq or when the
         computed anchor is far-future stale.
         """
+        if (getattr(self, '_stepper_disable_in_progress', False)
+                or getattr(self, '_global_disable_in_progress', False)):
+            return
         # Innermost defense-in-depth sync guard. Upstream paths already
         # guard, but the dangerous side-effects (flush_step_generation
         # + set_position(0) mid-print) live here, so this final gate

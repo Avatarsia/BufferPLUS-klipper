@@ -25,6 +25,10 @@ class BufferRuntimeState:
     _stepcompress_primed: bool = False
     _last_enable_schedule_time: float = 0.0
     _stepper_enable: Any = None
+    _guarded_stepper_enable: Any = None
+    _raw_motor_disable: Any = None
+    _stepper_disable_in_progress: bool = False
+    _global_disable_in_progress: bool = False
     _state: str = STATE_INIT
     _bang_bang_suspended: bool = False
     _initial_grip_end_time: Optional[float] = None
