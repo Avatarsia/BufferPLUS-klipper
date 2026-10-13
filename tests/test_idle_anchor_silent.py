@@ -21,8 +21,9 @@ Codex-Design-Review AGREE-WITH-CHANGES):
   _disable_stepper rufen und _last_enable_schedule_time fortschieben.
 """
 
+
 import pytest
-from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
+from helpers import build_feeder
 from klipper_extras import buffer_feeder
 
 
@@ -35,13 +36,11 @@ def set_sensor_active(feeder, sensor_name, active):
 
 def make_feeder(values=None, state=buffer_feeder.STATE_IDLE,
                 ps_state="standby"):
-    printer = FakePrinter()
-    printer.objects["print_stats"] = FakePrintStats(state=ps_state)
-    feeder = buffer_feeder.BufferFeeder(
-        FakeConfig(printer=printer, values=values))
-    printer.fire_event('klippy:connect')
-    feeder._startup_grace_done = True
-    feeder._state = state
+    printer, feeder = build_feeder(
+        values,
+        state=state,
+        fire_connect=True,
+        print_state=ps_state)
     for name in ('hall_overflow', 'hall_full', 'hall_empty', 'entrance'):
         set_sensor_active(feeder, name, False)
     feeder.reactor.now = 20.0

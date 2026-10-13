@@ -47,9 +47,10 @@ Backstop summary:
     SAFETY_DISTANCE remains the runaway-feed backstop.
 """
 
+
 import pytest
 
-from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
+from helpers import build_feeder
 from klipper_extras import buffer_feeder
 
 
@@ -68,12 +69,10 @@ def make_feeder(values=None):
             "jam_action": ""}
     if values:
         base.update(values)
-    printer = FakePrinter()
-    printer.objects["print_stats"] = FakePrintStats(state="printing")
-    config = FakeConfig(printer=printer, values=base)
-    feeder = buffer_feeder.BufferFeeder(config)
-    feeder._startup_grace_done = True
-    feeder._state = buffer_feeder.STATE_AUTO
+    printer, feeder = build_feeder(
+        base,
+        state=buffer_feeder.STATE_AUTO,
+        print_state="printing")
     set_sensor_active(feeder, 'hall_overflow', False)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_empty', False)

@@ -40,7 +40,7 @@ from fakes_klipper import (
     FakePrinter,
     FakePrintStats,
 )
-from klipper_extras import buffer_feeder
+from klipper_extras import buffer_feeder, buffer_watchdog
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +229,9 @@ def test_p778_boundary_strict_greater_unit(monkeypatch):
     der ebenfalls strict `>` benutzt (siehe Z.2038-2039:
     `gap_moves > self.idle_anchor_gap`).
     """
-    src = open(buffer_feeder.__file__, encoding='utf-8').read()
+    src = open(buffer_watchdog.__file__, encoding='utf-8').read()
+    # Keep the existing source assertions in their original owner spelling.
+    src = src.replace('owner.', 'self.')
     # Override-Marker muss in Source sein.
     assert "P7-78" in src, "P7-78 marker must be in source"
     assert "print-block stale override" in src, (

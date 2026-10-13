@@ -14,8 +14,9 @@ Grace-Check — UNLOAD konnte waehrend der 2s-Boot-Grace (Sensorbild
 nicht settled, Safety-Logik suspendiert) Bewegungen starten.
 """
 
+
 import pytest
-from fakes_klipper import FakeConfig, FakePrinter
+from helpers import build_feeder
 from helpers import FakeGCmd
 from klipper_extras import buffer_feeder
 
@@ -28,12 +29,10 @@ def set_sensor_active(feeder, sensor_name, active):
 
 
 def make_feeder(values=None):
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
-    printer.fire_event('klippy:connect')
-    feeder._startup_grace_done = True
-    feeder._state = buffer_feeder.STATE_IDLE
+    printer, feeder = build_feeder(
+        values,
+        state=buffer_feeder.STATE_IDLE,
+        fire_connect=True)
     for name in ('hall_overflow', 'hall_full', 'hall_empty'):
         set_sensor_active(feeder, name, False)
     set_sensor_active(feeder, 'entrance', True)

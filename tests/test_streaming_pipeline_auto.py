@@ -58,8 +58,9 @@ und _tick_pending_chunk's HALL2-Clamp ist auf STATE_AUTO und
 forward-direction beschränkt.
 """
 
+
 import pytest
-from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
+from helpers import build_feeder
 from klipper_extras import buffer_feeder
 
 
@@ -83,18 +84,16 @@ def make_feeder(values=None):
     base = {"use_flush_callback_bang_bang": True}
     if values:
         base.update(values)
-    printer = FakePrinter()
-    printer.objects["print_stats"] = FakePrintStats(state="printing")
-    config = FakeConfig(printer=printer, values=base)
-    feeder = buffer_feeder.BufferFeeder(config)
+    printer, feeder = build_feeder(
+        base,
+        state=buffer_feeder.STATE_AUTO,
+        fire_connect=True,
+        print_state="printing")
     # P7-66 R6: fire klippy:connect so _handle_connect runs and
     # wires _stepper_enable. Tests that monitor enable handles or
     # exercise the R1 path need this — without it the FakeStepper-
     # Enable.handles dict stays empty and motor_enable/disable
     # calls are silently dropped by the None-guard in _enable_stepper.
-    printer.fire_event('klippy:connect')
-    feeder._startup_grace_done = True
-    feeder._state = buffer_feeder.STATE_AUTO
     set_sensor_active(feeder, 'hall_overflow', False)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_empty', False)

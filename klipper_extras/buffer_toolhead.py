@@ -1,5 +1,7 @@
 """Sensor-controlled toolhead loading and unloading with scoped cleanup."""
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+
+from .buffer_cleanup import CleanupPolicy
 
 from ._buffer_common import (
     STATE_AUTO, STATE_IDLE, STATE_INIT, STATE_JAM, STATE_LOADING_PULL,
@@ -56,41 +58,41 @@ class ToolheadSensorWorkflow:
         o._raise_if_locked_out(gcmd, direction=-1 if unload else 1)
         saved = (helper.sensor_enabled, helper.min_event_systime)
         self.active = True
-        state_saved = False
-        try:
-            helper.min_event_systime = o.reactor.NEVER
-            helper.sensor_enabled = True
-            self._present()
-            if o._state not in (STATE_JAM, STATE_OVERFLOW):
-                o._set_state(STATE_UNLOADING if unload else STATE_LOADING_PULL)
-            # Stop inherited AUTO/pending work before handing over either trapq.
-            o._halt_motion()
-            o._overflow_interrupted_state = None
-            o._overflow_resume_mm = 0.
-            self._wait(gcmd, -1 if unload else 1)
-            self._run('SAVE_GCODE_STATE NAME=buffer_feeder_op')
-            o._macro_state_saved = True
-            state_saved = True
-            self._run('M83')
-            yield
-        except Exception:
-            o._halt_motion()
-            o._overflow_interrupted_state = None
-            o._overflow_resume_mm = 0.
-            raise
-        finally:
-            try:
-                o._unsync_if_synced()
-            finally:
+        def finish_state():
+            self.active = False
+            if o._state in (STATE_LOADING_PULL, STATE_UNLOADING):
+                o._set_state(STATE_IDLE)
+
+        # Each restoration runs even if another restoration raises.
+        with o.cleanup.on_exit([
+                lambda: setattr(helper, 'sensor_enabled', saved[0]),
+                lambda: setattr(helper, 'min_event_systime', saved[1]),
+                finish_state], policy=CleanupPolicy.STRICT):
+            with ExitStack() as scopes:
                 try:
-                    if state_saved and o._macro_state_saved:
-                        self._run('RESTORE_GCODE_STATE NAME=buffer_feeder_op MOVE=0')
-                        o._macro_state_saved = False
-                finally:
-                    helper.sensor_enabled, helper.min_event_systime = saved
-                    self.active = False
-                    if o._state in (STATE_LOADING_PULL, STATE_UNLOADING):
-                        o._set_state(STATE_IDLE)
+                    helper.min_event_systime = o.reactor.NEVER
+                    helper.sensor_enabled = True
+                    self._present()
+                    if o._state not in (STATE_JAM, STATE_OVERFLOW):
+                        o._set_state(STATE_UNLOADING if unload else STATE_LOADING_PULL)
+                    # Stop inherited work before handing over either trapq.
+                    o._halt_motion()
+                    o.pending_stream.discard_overflow_resume(
+                        clear_interrupted_state=True)
+                    self._wait(gcmd, -1 if unload else 1)
+                    scopes.enter_context(o.cleanup.gcode_state_scope(
+                        policy=CleanupPolicy.STRICT))
+                    scopes.enter_context(o.cleanup.sync_scope(
+                        policy=CleanupPolicy.STRICT))
+                    yield
+                except Exception:
+                    # Stop before the scopes release SYNC; retain the original error.
+                    o.cleanup.run_cleanup([
+                        o._halt_motion,
+                        lambda: o.pending_stream.discard_overflow_resume(
+                            clear_interrupted_state=True)],
+                        policy=CleanupPolicy.BEST_EFFORT)
+                    raise
 
     def _wait(self, gcmd, direction=1):
         o = self.owner
@@ -129,7 +131,7 @@ class ToolheadSensorWorkflow:
                 try:
                     overrun = o._load_to_endstop(
                         gcmd, o.load_fast_distance, o.load_fast_speed,
-                        minimum_ratio=0.)
+                        minimum_ratio=0., overflow_timeout=30.)
                 except Exception as exc:
                     raise self._error('Ankunft nicht bestaetigt: %s; '
                                       'Filamentweg, switch_pin und '

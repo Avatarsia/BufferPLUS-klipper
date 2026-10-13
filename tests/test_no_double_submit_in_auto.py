@@ -31,17 +31,16 @@ owns AUTO chunk submission. Manual/LOAD/UNLOAD phases keep the
 reactor-tick path because _on_mcu_flush early-returns on non-AUTO.
 """
 
+
 import pytest
-from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
+from helpers import build_feeder
 from klipper_extras import buffer_feeder
 
 
 def make_feeder(values=None):
-    printer = FakePrinter()
-    printer.objects["print_stats"] = FakePrintStats(state="printing")
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
-    feeder._startup_grace_done = True
+    printer, feeder = build_feeder(
+        values,
+        print_state="printing")
     # HALL sensors default to "active" for safety-first boot semantics
     # (see HallSensorMonitor.__init__). We need them off so _main_tick
     # passes the HALL1 lockout early-return at its top.
@@ -186,7 +185,7 @@ def test_main_tick_pending_chunk_still_runs_in_manual_feed(monkeypatch):
 
     submit_calls = []
     monkeypatch.setattr(feeder, "_submit_single_trapezoid",
-                        lambda d, s, **kw: submit_calls.append((d, s)))
+                        lambda d, s, **kw: submit_calls.append((d, s)) or buffer_feeder.SubmitResult.QUEUED)
     monkeypatch.setattr(feeder, "_abort_signalled", lambda: False)
 
     feeder._last_move_end_time = 0.0  # past — small gap triggers submit
@@ -223,7 +222,7 @@ def test_main_tick_pending_chunk_runs_in_auto_with_flush_callback(monkeypatch):
 
     submit_calls = []
     monkeypatch.setattr(feeder, "_submit_single_trapezoid",
-                        lambda d, s, **kw: submit_calls.append((d, s)))
+                        lambda d, s, **kw: submit_calls.append((d, s)) or buffer_feeder.SubmitResult.QUEUED)
     monkeypatch.setattr(feeder, "_abort_signalled", lambda: False)
     # Hotfix5: Modulator-Override damit Pending-Chunk-Pfad testbar
     monkeypatch.setattr(feeder, "_compute_target_feed_speed",

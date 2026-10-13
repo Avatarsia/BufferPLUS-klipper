@@ -14,8 +14,9 @@ geclampt) das Flush-Feeding. Config: feed_on_manual_extrusion
 (Default True).
 """
 
+
 import pytest
-from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
+from helpers import build_feeder
 from klipper_extras import buffer_feeder
 
 
@@ -27,14 +28,13 @@ def set_sensor_active(feeder, sensor_name, active):
 
 
 def make_feeder(values=None, ps_state="standby", moving=True):
-    printer = FakePrinter()
-    printer.objects["print_stats"] = FakePrintStats(state=ps_state)
     base = {'use_flush_callback_bang_bang': True}
     base.update(values or {})
-    feeder = buffer_feeder.BufferFeeder(FakeConfig(printer=printer, values=base))
-    printer.fire_event('klippy:connect')
-    feeder._startup_grace_done = True
-    feeder._state = buffer_feeder.STATE_AUTO
+    printer, feeder = build_feeder(
+        base,
+        state=buffer_feeder.STATE_AUTO,
+        fire_connect=True,
+        print_state=ps_state)
     set_sensor_active(feeder, 'hall_overflow', False)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_empty', True)   # Buffer leer -> Demand

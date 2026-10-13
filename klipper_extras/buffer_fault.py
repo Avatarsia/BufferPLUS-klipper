@@ -8,7 +8,7 @@ import logging
 
 from ._buffer_common import (
     BUSY_PHASE_STATES,
-    STATE_AUTO, STATE_INITIAL_GRIP, STATE_JAM, STATE_LOADING_PULL,
+    STATE_AUTO, STATE_IDLE, STATE_INITIAL_GRIP, STATE_JAM, STATE_LOADING_PULL,
     STATE_LOADING_PUSH, STATE_MANUAL_RETRACT, STATE_OVERFLOW,
     STATE_UNLOADING,
 )
@@ -66,6 +66,91 @@ class FaultManager:
         self.owner._hall3_start_time = None
         self.owner._hall3_drop_since = None
 
+    def enter_overflow(self):
+        owner = self.owner
+        monitor = owner._load_endstop_move
+        if monitor is not None and monitor.overflow_timeout:
+            monitor.pause_overflow(owner.reactor.monotonic())
+            owner._respond('LOAD: HALL1 aktiv — pausiert, Abbruch nach mehr als 30 Sekunden')
+            owner._continuous_feed = False
+            owner._halt_motion(preserve_load=True)
+            owner.pending_stream.discard_overflow_resume(
+                clear_interrupted_state=True)
+            owner._schedule_stepper_disable()
+            owner._fault_overflow = True
+            owner._set_state(STATE_OVERFLOW)
+            return
+        owner._set_benchmark_mode(False, reason='overflow', notify=False)
+        owner._respond("*** HALL1 OVERFLOW — Feeder disabled, lockout engaged ***")
+        owner._continuous_feed = False
+        # Save the interrupted state and pending distance BEFORE
+        # _halt_motion() zeroes _pending_remaining_mm, so _exit_overflow
+        # can resume the move after HALL1 clears.
+        owner._overflow_interrupted_state = owner._state
+        owner._overflow_resume_mm  = owner._pending_remaining_mm
+        owner._overflow_resume_dir = owner._pending_direction
+        owner._overflow_resume_spd = owner._pending_speed
+        owner._halt_motion()
+        owner._schedule_stepper_disable()
+        if owner._grip_follow_active:
+            owner._overflow_interrupted_follow = True
+            owner._grip_follow_active = False
+            owner._initial_grip_end_time = None
+        # P7-35 fault-overlay: in overlay mode for LOAD_PHASE_3, keep
+        # _state=LOAD_PHASE_3 and only set the overlay flag. The phase3
+        # cmd loop terminates via fault_overflow check, postcheck raises
+        # like the legacy STATE_OVERFLOW path.
+        owner._fault_overflow = True
+        if owner.use_overflow_overlay and owner._state == STATE_LOADING_PUSH:
+            return
+        owner._set_state(STATE_OVERFLOW)
+
+    def exit_overflow(self):
+        owner = self.owner
+        monitor = owner._load_endstop_move
+        if (monitor is not None and monitor.overflow_timeout
+                and monitor.overflow_since is not None):
+            monitor.end_overflow(owner.reactor.monotonic())
+            owner._fault_overflow = False
+            # The blocking load loop owns resume, including sensor/HALT checks.
+            if owner._state == STATE_OVERFLOW:
+                owner._set_state(STATE_LOADING_PULL)
+            return
+        # defer state-transition while SYNC is active.
+        # Otherwise we'd transition OVERFLOW → IDLE → AUTO while the
+        # stepper is still bound to extruder_trapq. The next bang-bang
+        # tick or _submit_move would then queue moves to own_trapq —
+        # those moves go live at the next BUFFER_UNSYNC and corrupt
+        # the stepcompress cursor (see Eifel-Joe's hardware log: SYNC
+        # #1 → HALL1-fall → OVERFLOW→IDLE→AUTO → UNSYNC → SYNC#2 →
+        # 'stepcompress Invalid sequence'). The macro will call
+        # BUFFER_UNSYNC itself; SyncCoordinator.unsync_if_synced
+        # re-runs this method once the sync binding is released.
+        if owner._stepper_synced_to is not None:
+            return
+        # P7-35 fault-overlay: clear overlay flag without state change
+        # when overlay path is active. _resume_after_overflow handles
+        # restarting the interrupted phase3 move via _overflow_resume_*.
+        if (owner.use_overflow_overlay
+                and owner._fault_overflow
+                and owner._state == STATE_LOADING_PUSH):
+            owner._fault_overflow = False
+            owner._respond("HALL1 cleared — overflow lockout released (overlay)")
+            owner._resume_after_overflow()
+            return
+        if owner._state != STATE_OVERFLOW:
+            return
+        owner._respond("HALL1 cleared — overflow lockout released")
+        # Mark cursor resync pending. _main_tick will submit a
+        # 0.05mm anchor with forced_t0=None (safe reactor context) so the
+        # stepcompress cursor is synchronised before the first fill-move.
+        # _on_mcu_flush skips while this flag is set (see below).
+        owner._needs_overflow_prime = True
+        # Go to IDLE (the _set_state hook calls _halt_motion + stepper-disable).
+        owner._set_state(STATE_IDLE)
+        owner._fault_overflow = False
+        owner._resume_after_overflow()
+
     def resume_after_overflow(self):
         owner = self.owner
         # Refuse to promote out of OVERFLOW while SYNC is still active.
@@ -101,7 +186,7 @@ class FaultManager:
                 resume_mm = owner._overflow_resume_mm
                 resume_dir = owner._overflow_resume_dir
                 resume_spd = owner._overflow_resume_spd
-                owner._overflow_resume_mm = 0.0
+                owner.pending_stream.discard_overflow_resume()
                 owner._stepcompress_primed = False
                 owner._needs_overflow_prime = False
                 owner._grip_follow_active = True
@@ -109,7 +194,7 @@ class FaultManager:
                 owner._set_state(STATE_INITIAL_GRIP)
                 owner._submit_move(resume_dir * resume_mm, resume_spd)
                 return
-            owner._overflow_resume_mm = 0.0
+            owner.pending_stream.discard_overflow_resume()
             owner._maybe_auto_load()
             return
 
@@ -144,7 +229,7 @@ class FaultManager:
             resume_mm = owner._overflow_resume_mm
             resume_dir = owner._overflow_resume_dir
             resume_spd = owner._overflow_resume_spd
-            owner._overflow_resume_mm = 0.0
+            owner.pending_stream.discard_overflow_resume()
             owner._stepcompress_primed = False
             owner._needs_overflow_prime = False
             owner._enable_stepper()
@@ -159,11 +244,11 @@ class FaultManager:
         if (interrupted == STATE_LOADING_PUSH
                 and owner.use_overflow_overlay
                 and owner._state == STATE_LOADING_PUSH):
-            owner._overflow_resume_mm = 0.0
+            owner.pending_stream.discard_overflow_resume()
             owner._enable_stepper()
             return
 
-        owner._overflow_resume_mm = 0.0
+        owner.pending_stream.discard_overflow_resume()
         # JAM-Latch ueberlebt einen OVERFLOW-Zwischenfall (Review
         # 2026-07-09): HALL1-Blip waehrend JAM ueberschreibt STATE_JAM
         # mit OVERFLOW; der Resume darf danach NICHT zu AUTO promoten —

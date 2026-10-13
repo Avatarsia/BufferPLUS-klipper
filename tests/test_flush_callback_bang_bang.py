@@ -22,9 +22,11 @@ states. Hardware test still required to confirm cursor anchor is
 truly race-free at the MCU level.
 """
 
+
 import pytest
 
-from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
+from helpers import build_feeder
+from fakes_klipper import FakeConfig, FakePrinter
 from klipper_extras import buffer_feeder
 
 
@@ -39,12 +41,10 @@ def make_feeder(values=None):
     base = {"use_flush_callback_bang_bang": True}
     if values:
         base.update(values)
-    printer = FakePrinter()
-    printer.objects["print_stats"] = FakePrintStats(state="printing")
-    config = FakeConfig(printer=printer, values=base)
-    feeder = buffer_feeder.BufferFeeder(config)
-    feeder._startup_grace_done = True
-    feeder._state = buffer_feeder.STATE_AUTO
+    printer, feeder = build_feeder(
+        base,
+        state=buffer_feeder.STATE_AUTO,
+        print_state="printing")
     # All HALLs inactive by default (FakeConfig polarity-flip would
     # otherwise leave HALL2 spuriously active and the bang-bang
     # decision branch falls into hall_full first).

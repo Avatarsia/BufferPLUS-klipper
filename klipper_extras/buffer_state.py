@@ -6,6 +6,11 @@ from ._buffer_common import STATE_INIT
 
 @dataclass
 class BufferRuntimeState:
+    """Startup defaults; BufferFeeder owns and mutates the live runtime state.
+
+    This initializer snapshot is not kept in sync with the running feeder.
+    """
+
     _stepper_synced_to: Optional[str] = None
     _jam_active: bool = False
     _hall2_start_time: Optional[float] = None
@@ -107,5 +112,9 @@ class BufferRuntimeState:
     _jam_timer: Any = None
 
     def apply(self, owner):
+        """Initialize owner attributes with a shallow copy of these values.
+
+        Used once at construction; this does not create live bindings.
+        """
         for key, value in vars(self).items():
             setattr(owner, key, value)

@@ -5,8 +5,7 @@ Run on Linux with Klipper's Python dependencies installed. No hardware is used.
 The delayed flush is injected; this does not reproduce host/MCU scheduling.
 """
 import argparse
-import ast
-import logging
+import importlib.util
 import os
 from pathlib import Path
 import sys
@@ -14,18 +13,11 @@ from types import SimpleNamespace
 
 
 def load_feeder(path):
-    tree = ast.parse(path.read_text(encoding="utf-8-sig"))
-    cls = next(n for n in tree.body
-               if isinstance(n, ast.ClassDef) and n.name == "BufferFeeder")
-    names = {"_schedule_stepper_disable", "_disable_stepper",
-             "_move_in_flight", "_schedule_time_for_enable_toggle"}
-    methods = [n for n in cls.body
-               if isinstance(n, ast.FunctionDef) and n.name in names]
-    assert {n.name for n in methods} == names, "Missing feeder methods"
-    namespace = {"logging": logging}
-    exec(compile(ast.Module(body=methods, type_ignores=[]), str(path), "exec"),
-         namespace)
-    return type("FeederMethods", (), {n: namespace[n] for n in names})
+    spec = importlib.util.spec_from_file_location(
+        "klipper_extras._disable_feeder_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class MotionQueue:
@@ -40,7 +32,7 @@ class MotionQueue:
         self.callbacks.remove(callback)
 
 
-def run_case(feeder_class, delayed):
+def run_case(feeder_module, delayed):
     import chelper
     from stepper import MCU_stepper
     from extras.stepper_enable import EnableTracking, StepperEnablePin
@@ -74,7 +66,13 @@ def run_case(feeder_class, delayed):
         toggles = []
         pin = SimpleNamespace(set_digital=lambda t, value: toggles.append((t, value)))
         enable = EnableTracking(stepper, StepperEnablePin(pin, 0))
-        feeder = feeder_class()
+        feeder = feeder_module.BufferFeeder.__new__(feeder_module.BufferFeeder)
+        feeder.motor = feeder_module.MotorLifecycle(feeder)
+        feeder.diagnostics = feeder_module.BufferDiagnostics(feeder)
+        feeder.print_session = feeder_module.PrintSessionCoordinator(feeder)
+        feeder.legacy_workflow = feeder_module.LegacyFilamentWorkflow(feeder)
+        feeder.idle_watchdog = feeder_module.IdleWatchdogCoordinator(feeder)
+        feeder.streaming = feeder_module.StreamingCoordinator(feeder)
         feeder.stepper = stepper
         feeder.printer = printer
         clock = SimpleNamespace(now=10.1)
@@ -133,10 +131,11 @@ def main():
                         default=Path(__file__).resolve().parents[1]
                         / "klipper_extras" / "buffer_feeder.py")
     args = parser.parse_args()
+    sys.path.insert(0, str(args.feeder_path.resolve().parents[1]))
     sys.path.insert(0, str(args.klipper_path.resolve() / "klippy"))
-    feeder_class = load_feeder(args.feeder_path)
-    run_case(feeder_class, delayed=False)
-    run_case(feeder_class, delayed=True)
+    module = load_feeder(args.feeder_path)
+    run_case(module, delayed=False)
+    run_case(module, delayed=True)
     print("PASS: 2 stock-C disable/enable regression cases")
 
 

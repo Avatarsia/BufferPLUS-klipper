@@ -44,7 +44,7 @@ from fakes_klipper import (
     FakePrinter,
     FakePrintStats,
 )
-from klipper_extras import buffer_feeder
+from klipper_extras import buffer_feeder, buffer_watchdog
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +444,7 @@ def test_c_lme_clamp_inside_watchdog_branch_when_fires(monkeypatch, caplog):
     #
     # Realistischer Test: verifiziere dass C-Code-Pfad existiert
     # via getattr-Source-Check.
-    src = open(buffer_feeder.__file__, encoding='utf-8').read()
+    src = open(buffer_watchdog.__file__, encoding='utf-8').read()
     assert "P7-77 C" in src, "P7-77 C marker must be in source"
     # Und dass der alte unconditional-Tick-Rollback umetikettiert ist:
     # P7-76 D wurde zu P7-77 C verschoben, alter Top-Level-Block entfernt.

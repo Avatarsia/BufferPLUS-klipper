@@ -13,7 +13,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from fakes_klipper import FakeConfig, FakePrinter, FakePrinterStepper
-from helpers import FakeGCmd, set_sensor_active
+from helpers import FakeGCmd, build_feeder, set_sensor_active
 
 
 if "stepper" not in sys.modules:
@@ -44,7 +44,7 @@ def fake_config(fake_printer):
 def feeder(fake_printer, fake_config):
     """Standard feeder ohne klippy:connect. Fuer Tests die _stepper_enable
     nicht brauchen."""
-    return buffer_feeder.BufferFeeder(fake_config)
+    return build_feeder(config=fake_config, grace_done=False)[1]
 
 
 @pytest.fixture
@@ -52,9 +52,8 @@ def feeder_with_connect(fake_printer, fake_config):
     """Feeder mit klippy:connect-Event gefeuert. Verkabelt _stepper_enable.
     Pflicht fuer Tests die Enable-Verhalten exercisen (NOT-TO-DO 2026-05-12).
     """
-    feeder_obj = buffer_feeder.BufferFeeder(fake_config)
-    fake_printer.fire_event('klippy:connect')
-    return feeder_obj
+    return build_feeder(config=fake_config, grace_done=False,
+                        fire_connect=True)[1]
 
 
 @pytest.fixture
@@ -65,18 +64,11 @@ def feeder_factory(fake_printer):
         values: dict patched onto FakeConfig.DEFAULT_VALUES
         state: optional buffer_feeder.STATE_* to assign to feeder._state
         grace_done: default True — sets _startup_grace_done
-        fire_connect: default False — fires klippy:connect before instantiation
+        fire_connect: default False — fires klippy:connect after instantiation
     """
 
     def make(values=None, state=None, grace_done=True, fire_connect=False):
-        if fire_connect:
-            fake_printer.fire_event('klippy:connect')
-        config = FakeConfig(printer=fake_printer, values=values)
-        feeder_obj = buffer_feeder.BufferFeeder(config)
-        if grace_done:
-            feeder_obj._startup_grace_done = True
-        if state is not None:
-            feeder_obj._state = state
-        return fake_printer, feeder_obj
+        return build_feeder(values, printer=fake_printer, state=state,
+                            grace_done=grace_done, fire_connect=fire_connect)
 
     return make

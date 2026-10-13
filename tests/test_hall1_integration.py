@@ -1,20 +1,7 @@
 import pytest
 
+from helpers import FakeGCmd
 from klipper_extras import buffer_feeder
-
-
-class FakeGCmdLocal:
-    def __init__(self, values=None):
-        self.values = {key.upper(): value for key, value in (values or {}).items()}
-
-    def get(self, key, default=None):
-        return self.values.get(key.upper(), default)
-
-    def get_int(self, key, default=None, **kwargs):
-        return int(self.values.get(key.upper(), default))
-
-    def get_float(self, key, default=None, **kwargs):
-        return float(self.values.get(key.upper(), default))
 
 
 def set_sensor_active(feeder, sensor_name, active):
@@ -130,7 +117,7 @@ def test_cmd_buffer_load_phase3_rejects_entry_when_hall1_is_active(feeder, monke
     )
 
     with pytest.raises(RuntimeError, match="HALL1 OVERFLOW active"):
-        feeder.cmd_BUFFER_LOAD_PHASE3(FakeGCmdLocal())
+        feeder.cmd_BUFFER_LOAD_PHASE3(FakeGCmd())
 
     assert events == []
 
@@ -168,7 +155,7 @@ def test_cmd_buffer_load_phase3_with_overflow_ok_skips_hall1_entry_lockout(feede
         ),
     )
 
-    feeder.cmd_BUFFER_LOAD_PHASE3(FakeGCmdLocal({"OVERFLOW_OK": 1}))
+    feeder.cmd_BUFFER_LOAD_PHASE3(FakeGCmd({"OVERFLOW_OK": 1}))
 
     assert events == [
         (

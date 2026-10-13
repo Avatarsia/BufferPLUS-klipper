@@ -27,17 +27,16 @@ Bug C — _tick_pending_chunk nullt Retract-Pending bei HALL1:
   weiterhin auf jedes Abort-Signal ab.
 """
 
+
 import pytest
-from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
+from helpers import build_feeder
 from klipper_extras import buffer_feeder
 
 
 def make_feeder(values=None):
-    printer = FakePrinter()
-    printer.objects["print_stats"] = FakePrintStats(state="standby")
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
-    feeder._startup_grace_done = True
+    printer, feeder = build_feeder(
+        values,
+        print_state="standby")
     set_sensor_active(feeder, 'hall_overflow', False)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_empty', False)
@@ -179,7 +178,7 @@ def test_pending_chunk_retract_survives_hall1(monkeypatch):
 
     submit_calls = []
     monkeypatch.setattr(feeder, "_submit_single_trapezoid",
-                        lambda d, s, **kw: submit_calls.append((d, s)))
+                        lambda d, s, **kw: submit_calls.append((d, s)) or buffer_feeder.SubmitResult.QUEUED)
 
     feeder._tick_pending_chunk(eventtime=10.0)
 
@@ -203,7 +202,7 @@ def test_pending_chunk_retract_halt_still_zeroes(monkeypatch):
 
     submit_calls = []
     monkeypatch.setattr(feeder, "_submit_single_trapezoid",
-                        lambda d, s, **kw: submit_calls.append((d, s)))
+                        lambda d, s, **kw: submit_calls.append((d, s)) or buffer_feeder.SubmitResult.QUEUED)
 
     feeder._tick_pending_chunk(eventtime=10.0)
 
@@ -226,7 +225,7 @@ def test_pending_chunk_forward_still_zeroed_on_hall1(monkeypatch):
 
     submit_calls = []
     monkeypatch.setattr(feeder, "_submit_single_trapezoid",
-                        lambda d, s, **kw: submit_calls.append((d, s)))
+                        lambda d, s, **kw: submit_calls.append((d, s)) or buffer_feeder.SubmitResult.QUEUED)
 
     feeder._tick_pending_chunk(eventtime=10.0)
 

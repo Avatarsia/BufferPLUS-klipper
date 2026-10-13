@@ -38,8 +38,9 @@ F5 — Watchdog-Print-Block nur an print_stats:
 F6/F7 — sync_to_extruder-Rollback unvollstaendig / unsync ohne Rollback.
 """
 
+
 import pytest
-from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
+from helpers import build_feeder
 from klipper_extras import buffer_feeder
 
 
@@ -51,14 +52,10 @@ def set_sensor_active(feeder, sensor_name, active):
 
 
 def make_feeder(values=None, state=None, connect=True):
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
-    if connect:
-        printer.fire_event('klippy:connect')
-    feeder._startup_grace_done = True
-    if state is not None:
-        feeder._state = state
+    printer, feeder = build_feeder(
+        values,
+        state=state,
+        fire_connect=connect)
     set_sensor_active(feeder, 'hall_overflow', False)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_empty', False)

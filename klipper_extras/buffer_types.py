@@ -28,6 +28,8 @@ class AnchorPlan:
     clamp_last_move_end_time: Optional[float] = None
     toolhead_time: Optional[float] = None
     enable_floor: Optional[float] = None
+    forced_t0_clamped: bool = False
+    skipped_t0: Optional[float] = None
 
 
 @dataclass(frozen=True)
