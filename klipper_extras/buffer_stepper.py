@@ -72,7 +72,8 @@ class SyncCoordinator:
             owner._enable_stepper()
         anchor_dir = -1.0 if owner.hall_overflow else 1.0
         owner._submit_move(anchor_dir * ANCHOR_NUDGE_MM, speed,
-                           forced_t0=forced_t0, skip_enable=skip_enable)
+                           forced_t0=forced_t0, skip_enable=skip_enable,
+                           retain_skipped_distance=False)
         owner._wait_for_move_done(direction=int(anchor_dir))
         return anchor_dir
 

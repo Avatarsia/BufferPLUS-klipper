@@ -1,20 +1,23 @@
 """Global Klipper disables must drain buffer moves before rearming activity."""
 
+
 import pytest
 
-from fakes_klipper import FakeConfig, FakePrinter
+from helpers import build_feeder
+from fakes_klipper import FakePrinter
 from klipper_extras import buffer_feeder
 
 
 def make_feeder(printer=None, name='buffer_feeder mellow'):
-    printer = printer or FakePrinter()
-    feeder = buffer_feeder.BufferFeeder(FakeConfig(printer=printer, name=name, values={
-        'idle_anchor_mode': 'silent', 'idle_anchor_gap': 999.0,
-        'use_flush_callback_bang_bang': True,
-    }))
-    printer.fire_event('klippy:connect')
-    feeder._startup_grace_done = True
-    feeder._state = buffer_feeder.STATE_AUTO
+    printer, feeder = build_feeder(
+        {
+            'idle_anchor_mode': 'silent', 'idle_anchor_gap': 999.0,
+            'use_flush_callback_bang_bang': True,
+        },
+        printer=printer,
+        name=name,
+        state=buffer_feeder.STATE_AUTO,
+        fire_connect=True)
     feeder.reactor.now = 11.0
     feeder._current_move = {'end_time': 10.025}
     feeder._last_move_end_time = 10.025

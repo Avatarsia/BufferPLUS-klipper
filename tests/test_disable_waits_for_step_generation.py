@@ -1,19 +1,19 @@
 """Motor disable must not re-arm activity callbacks for ungenerated moves."""
 
+
 import pytest
 
-from fakes_klipper import FakeConfig, FakePrinter
+from helpers import build_feeder
 from klipper_extras import buffer_feeder
 
 
 def make_feeder():
-    printer = FakePrinter()
-    feeder = buffer_feeder.BufferFeeder(FakeConfig(printer=printer, values={
-        'idle_anchor_mode': 'silent', 'idle_anchor_gap': 999.0,
-    }))
-    printer.fire_event('klippy:connect')
-    feeder._startup_grace_done = True
-    feeder._state = buffer_feeder.STATE_IDLE
+    printer, feeder = build_feeder(
+        {
+            'idle_anchor_mode': 'silent', 'idle_anchor_gap': 999.0,
+        },
+        state=buffer_feeder.STATE_IDLE,
+        fire_connect=True)
     feeder.reactor.now = 11.0
     feeder._current_move = {'end_time': 10.025}
     feeder._last_move_end_time = 10.025

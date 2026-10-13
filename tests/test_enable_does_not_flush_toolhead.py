@@ -23,12 +23,20 @@ sufficient.
 def test_enable_does_not_flush_toolhead(feeder_factory):
     """The fix: _enable_stepper() must NOT trigger any toolhead flush.
     Pre-fix this counter would tick up on every bang-bang feed."""
-    printer, feeder = feeder_factory()
+    printer, feeder = feeder_factory(fire_connect=True)
+    handle = feeder._stepper_enable
+    assert handle is not None, 'klippy:connect must wire the motor handle'
+    schedule_before = feeder._last_enable_schedule_time
     toolhead = printer.lookup_object('toolhead')
     flushes_before = toolhead.flush_calls
     th_lookups_before = toolhead.get_last_move_time_calls
 
+    enables_before = len(handle.enables)
     feeder._enable_stepper()
+
+    assert len(handle.enables) == enables_before + 1
+    assert handle.enables[-1] == feeder._last_enable_schedule_time
+    assert feeder._last_enable_schedule_time > schedule_before
 
     assert toolhead.flush_calls == flushes_before
     assert toolhead.get_last_move_time_calls == th_lookups_before
@@ -36,11 +44,21 @@ def test_enable_does_not_flush_toolhead(feeder_factory):
 
 def test_disable_does_not_flush_toolhead(feeder_factory):
     """Same fix applies to disable_stepper — it shares the helper."""
-    printer, feeder = feeder_factory()
+    printer, feeder = feeder_factory(fire_connect=True)
+    handle = feeder._stepper_enable
+    assert handle is not None, 'klippy:connect must wire the motor handle'
+    schedule_before = feeder._last_enable_schedule_time
     toolhead = printer.lookup_object('toolhead')
     flushes_before = toolhead.flush_calls
 
+    disables_before = len(handle.disables)
+    th_lookups_before = toolhead.get_last_move_time_calls
     feeder._disable_stepper()
+
+    assert len(handle.disables) == disables_before + 1
+    assert handle.disables[-1] == feeder._last_enable_schedule_time
+    assert feeder._last_enable_schedule_time > schedule_before
+    assert toolhead.get_last_move_time_calls == th_lookups_before
 
     assert toolhead.flush_calls == flushes_before
 

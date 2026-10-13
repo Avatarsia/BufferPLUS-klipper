@@ -19,29 +19,13 @@ This test runs the equivalent state machine + sensor pattern in fakes
 and asserts each fix grips at the right point.
 """
 
-from fakes_klipper import FakeConfig, FakePrinter
+
+from helpers import FakeGCmd, build_feeder
 from klipper_extras import buffer_feeder
 
 
-class FakeGCmd:
-    def __init__(self, values=None):
-        self.values = {key.upper(): value for key, value in (values or {}).items()}
-
-    def get(self, key, default=None):
-        return self.values.get(key.upper(), default)
-
-    def get_int(self, key, default=None, **kwargs):
-        return int(self.values.get(key.upper(), default))
-
-    def get_float(self, key, default=None, **kwargs):
-        return float(self.values.get(key.upper(), default))
-
-
 def make_feeder():
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer)
-    feeder = buffer_feeder.BufferFeeder(config)
-    feeder._startup_grace_done = True
+    printer, feeder = build_feeder(None)
     return printer, feeder
 
 

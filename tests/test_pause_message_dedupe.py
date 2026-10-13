@@ -37,7 +37,9 @@ am identischen Flap (bei state='complete'/'cancelled' greift der nur-
 denselben Latch (``_print_end_msg_shown``), Reset bei printing/paused.
 """
 
-from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
+
+from helpers import build_feeder
+from fakes_klipper import FakePrintStats
 from klipper_extras import buffer_feeder
 
 
@@ -46,14 +48,12 @@ END_MSG_FRAGMENT = "Print ended"
 
 
 def make_feeder(values=None):
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
+    printer, feeder = build_feeder(
+        values,
+        state=buffer_feeder.STATE_AUTO,
+        fire_connect=True)
     # Enable-Pfad verdrahten, damit Faelle mit _continuous_feed/
     # _halt_motion (Review-Nit PR #49) ohne Setup-Drift ergaenzbar sind.
-    printer.fire_event('klippy:connect')
-    feeder._startup_grace_done = True
-    feeder._state = buffer_feeder.STATE_AUTO  # kein JAM/auto-engage in _on_idle_printing
     return printer, feeder
 
 

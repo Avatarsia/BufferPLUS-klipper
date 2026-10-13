@@ -23,14 +23,15 @@ the SYNC must be properly released first (or _stepper_synced_to must
 be cleared via the unsync path BEFORE state-transition to AUTO).
 """
 
-from fakes_klipper import FakeConfig, FakePrinter
+
+from helpers import build_feeder
 from klipper_extras import buffer_feeder
 
 
 def make_feeder(values=None):
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
+    printer, feeder = build_feeder(
+        values,
+        grace_done=False)
     return printer, feeder
 
 

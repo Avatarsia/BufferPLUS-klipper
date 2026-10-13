@@ -13,6 +13,8 @@ phases must early-return without firing PAUSE — vertauschung of the
 state list during refactor would silently pause the print.
 """
 
+
+from helpers import FakeGCmd
 from klipper_extras import buffer_feeder
 
 
@@ -30,17 +32,7 @@ def test_python_unload_nested_calls_include_buffer_mux_key(fake_printer, feeder)
     fake_printer.lookup_object("extruder").heater.temperature = 220.0
     feeder._startup_grace_done = True  # UNLOAD-Grace-Guard (Codex-Review 2026-07-13)
 
-    class FakeGCmdLocal:
-        def get(self, key, default=None):
-            return default
-
-        def get_int(self, key, default=None, **kwargs):
-            return int(default)
-
-        def get_float(self, key, default=None, **kwargs):
-            return float(default)
-
-    feeder.cmd_BUFFER_UNLOAD_FILAMENT(FakeGCmdLocal())
+    feeder.cmd_BUFFER_UNLOAD_FILAMENT(FakeGCmd())
 
     nested_calls = [s for _, s in gcode.scripts if s.startswith("BUFFER_")]
     for call in nested_calls:

@@ -32,9 +32,10 @@ it is not retested here — see test_p752_flush_callback_bang_bang
 ::test_flush_no_submit_when_synced_to_extruder.
 """
 
+
 import pytest
 
-from fakes_klipper import FakeConfig, FakePrinter
+from helpers import build_feeder
 from klipper_extras import buffer_feeder
 
 
@@ -50,11 +51,9 @@ def make_feeder(values=None, state=None):
     All hall sensors inactive (the FakeConfig polarity-flip-default
     would otherwise leave HALL2/HALL1 spuriously active and most of
     these tests would short-circuit before reaching the guard)."""
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
-    feeder._startup_grace_done = True
-    feeder._state = state if state is not None else buffer_feeder.STATE_AUTO
+    printer, feeder = build_feeder(
+        values,
+        state=state if state is not None else buffer_feeder.STATE_AUTO)
     set_sensor_active(feeder, 'hall_overflow', False)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_empty', False)
@@ -170,7 +169,7 @@ def test_submit_move_skips_when_synced(monkeypatch):
 
     trap_calls = []
     monkeypatch.setattr(feeder, "_submit_single_trapezoid",
-                        lambda d, s, **kw: trap_calls.append((d, s)))
+                        lambda d, s, **kw: trap_calls.append((d, s)) or buffer_feeder.SubmitResult.QUEUED)
 
     feeder._submit_move(50.0, feeder.feed_speed)
 
@@ -186,7 +185,7 @@ def test_submit_move_runs_normally_when_not_synced(monkeypatch):
 
     trap_calls = []
     monkeypatch.setattr(feeder, "_submit_single_trapezoid",
-                        lambda d, s, **kw: trap_calls.append((d, s)))
+                        lambda d, s, **kw: trap_calls.append((d, s)) or buffer_feeder.SubmitResult.QUEUED)
 
     feeder._submit_move(50.0, feeder.feed_speed)
 
@@ -340,7 +339,7 @@ def test_submit_move_during_mid_print_sync_no_pending_set(monkeypatch):
     # (self._pending_remaining_mm = 0.0).
     trap_calls = []
     monkeypatch.setattr(feeder, "_submit_single_trapezoid",
-                        lambda d, s, **kw: trap_calls.append((d, s)))
+                        lambda d, s, **kw: trap_calls.append((d, s)) or buffer_feeder.SubmitResult.QUEUED)
 
     feeder._submit_move(60.0, feeder.feed_speed)
 

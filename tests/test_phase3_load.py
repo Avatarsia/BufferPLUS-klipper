@@ -43,15 +43,13 @@ _main_tick is still HALL1-bypassed via _post_load_overflow_grace
 to STATE_OVERFLOW.
 """
 
-from fakes_klipper import FakeConfig, FakePrinter
+
+from helpers import FakeGCmd, build_feeder
 from klipper_extras import buffer_feeder
 
 
 def make_feeder(values=None):
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
-    feeder._startup_grace_done = True
+    printer, feeder = build_feeder(values)
     return printer, feeder
 
 
@@ -60,15 +58,6 @@ def set_sensor_active(feeder, sensor_name, active):
     raw = (not active) if polarity_flip else active
     feeder._pin_stable_state[sensor_name] = raw
     feeder._pin_raw_state[sensor_name] = raw
-
-
-class FakeGCmd:
-    def get(self, k, d=None):
-        return d
-    def get_int(self, k, d=None, **kw):
-        return int(d)
-    def get_float(self, k, d=None, **kw):
-        return float(d)
 
 
 # ---------------------------------------------------------------------------

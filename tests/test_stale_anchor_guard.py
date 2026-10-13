@@ -67,9 +67,10 @@ Tags: Eifel-Joe 22-cycle, stale-anchor defense-in-depth, post-halt
 streaming submit.
 """
 
+
 import pytest
 
-from fakes_klipper import FakeConfig, FakePrinter
+from helpers import build_feeder
 from klipper_extras import buffer_feeder
 
 
@@ -84,12 +85,10 @@ def make_feeder(values=None):
     base = {"use_flush_callback_bang_bang": True}
     if values:
         base.update(values)
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=base)
-    feeder = buffer_feeder.BufferFeeder(config)
-    printer.fire_event('klippy:connect')
-    feeder._startup_grace_done = True
-    feeder._state = buffer_feeder.STATE_AUTO
+    printer, feeder = build_feeder(
+        base,
+        state=buffer_feeder.STATE_AUTO,
+        fire_connect=True)
     set_sensor_active(feeder, 'hall_overflow', False)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_empty', False)

@@ -1,4 +1,4 @@
-from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
+from helpers import build_feeder
 from helpers import set_sensor_active
 from klipper_extras import buffer_feeder
 
@@ -7,13 +7,11 @@ def make_feeder(values=None, print_state="printing"):
     base = {"use_flush_callback_bang_bang": True}
     if values:
         base.update(values)
-    printer = FakePrinter()
-    printer.objects["print_stats"] = FakePrintStats(state=print_state)
-    config = FakeConfig(printer=printer, values=base)
-    feeder = buffer_feeder.BufferFeeder(config)
-    printer.fire_event('klippy:connect')
-    feeder._startup_grace_done = True
-    feeder._state = buffer_feeder.STATE_AUTO
+    printer, feeder = build_feeder(
+        base,
+        state=buffer_feeder.STATE_AUTO,
+        fire_connect=True,
+        print_state=print_state)
     set_sensor_active(feeder, 'hall_overflow', False)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_empty', False)

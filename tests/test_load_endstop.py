@@ -20,6 +20,80 @@ class Sensor:
         return {'enabled': self.enabled, 'filament_detected': self.detected}
 
 
+@pytest.mark.parametrize('fault', ['halt', 'jam', 'disabled'])
+def test_paused_sensor_load_still_aborts_other_faults(monkeypatch, fault):
+    feeder, sensor, progress, moves = setup_load(monkeypatch, None)
+    pause = feeder.reactor.pause
+    started = None
+
+    def inject(when):
+        nonlocal started
+        result = pause(when)
+        if started is None and progress() > 10.:
+            started = when
+            set_sensor_active(feeder, 'hall_overflow', True)
+            feeder._enter_overflow()
+        elif started is not None and when - started > .2:
+            if fault == 'halt':
+                feeder._halt_requested = True
+            elif fault == 'jam':
+                feeder._jam_active = True
+            else:
+                sensor.enabled = False
+        return result
+
+    monkeypatch.setattr(feeder.reactor, 'pause', inject)
+    with pytest.raises(RuntimeError, match='HALT|JAM|disabled'):
+        feeder._load_to_endstop(FakeGCmd(), 100., 50., minimum_ratio=0.,
+                                overflow_timeout=30.)
+    count = len(moves)
+    set_sensor_active(feeder, 'hall_overflow', False)
+    feeder._exit_overflow()
+    assert len(moves) == count
+    assert feeder._overflow_resume_mm == 0.
+    assert feeder._load_endstop_move is None
+    assert feeder.reactor.now < 5.
+
+
+def test_sensor_trigger_during_pause_does_not_restart_fast_load(monkeypatch):
+    feeder, sensor, progress, moves = setup_load(monkeypatch, None)
+    pause = feeder.reactor.pause
+    started = None
+    count = None
+
+    def inject(when):
+        nonlocal started, count
+        result = pause(when)
+        if started is None and progress() > 10.:
+            started = when
+            set_sensor_active(feeder, 'hall_overflow', True)
+            feeder._enter_overflow()
+            count = len(moves)
+        elif started is not None:
+            sensor.detected = True
+            if when - started > .5:
+                set_sensor_active(feeder, 'hall_overflow', False)
+                feeder._exit_overflow()
+        return result
+
+    monkeypatch.setattr(feeder.reactor, 'pause', inject)
+    feeder._load_to_endstop(FakeGCmd(), 100., 50., minimum_ratio=0.,
+                            overflow_timeout=30.)
+    assert len(moves) == count
+    assert progress() <= 16.
+
+
+@pytest.mark.parametrize('duration, fails', [(30., False), (30.001, True)])
+def test_hall1_timeout_boundary_also_checked_on_clear(monkeypatch, duration, fails):
+    from klipper_extras.buffer_sensors import LoadEndstopMonitor
+    feeder, sensor, _, _ = setup_load(monkeypatch)
+    monitor = LoadEndstopMonitor(feeder, sensor, 100., overflow_timeout=30.)
+    monitor.pause_overflow(0.)
+    monitor.end_overflow(duration)
+    assert bool(monitor.error) == fails
+    assert monitor.deadline == pytest.approx(feeder.max_feed_time + duration)
+
+
 def setup_load(monkeypatch, trigger=100., values=None):
     printer = FakePrinter()
     sensor = Sensor()

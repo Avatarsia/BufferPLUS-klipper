@@ -26,8 +26,10 @@ C) Post-LOAD HALL1 grace: after Phase 3 with overflow_ok=1 exits
    HALL1 actually falls.
 """
 
+
 import pytest
 
+from helpers import FakeGCmd
 from klipper_extras import buffer_feeder
 
 
@@ -41,26 +43,12 @@ def set_sensor_active(feeder, sensor_name, active):
 # ---------------------------------------------------------------------------
 
 
-class FakeGCmdLocal:
-    def __init__(self, values=None):
-        self.values = {key.upper(): value for key, value in (values or {}).items()}
-
-    def get(self, key, default=None):
-        return self.values.get(key.upper(), default)
-
-    def get_int(self, key, default=None, **kwargs):
-        return int(self.values.get(key.upper(), default))
-
-    def get_float(self, key, default=None, **kwargs):
-        return float(self.values.get(key.upper(), default))
-
-
 def test_buffer_auto_on_if_ready_engages_when_ready(feeder):
     """Happy path: HALL1 inactive, no JAM, no PAUSE — engages AUTO."""
     set_sensor_active(feeder, 'entrance', True)
     set_sensor_active(feeder, 'hall_overflow', False)
 
-    feeder.cmd_BUFFER_AUTO_ON_IF_READY(FakeGCmdLocal())
+    feeder.cmd_BUFFER_AUTO_ON_IF_READY(FakeGCmd())
 
     assert feeder._state == buffer_feeder.STATE_AUTO
 
@@ -72,7 +60,7 @@ def test_buffer_auto_on_if_ready_skips_silently_when_hall1_active(fake_printer, 
     set_sensor_active(feeder, 'hall_overflow', True)
     gcode = fake_printer.lookup_object('gcode')
 
-    feeder.cmd_BUFFER_AUTO_ON_IF_READY(FakeGCmdLocal())
+    feeder.cmd_BUFFER_AUTO_ON_IF_READY(FakeGCmd())
 
     assert feeder._state == buffer_feeder.STATE_IDLE
     assert any("AUTO not engaged" in msg for msg in gcode.info_messages)
@@ -84,7 +72,7 @@ def test_buffer_auto_on_hard_command_still_raises_on_hall1(feeder):
     set_sensor_active(feeder, 'hall_overflow', True)
 
     with pytest.raises(Exception, match="HALL1 overflow active"):
-        feeder.cmd_BUFFER_AUTO_ON(FakeGCmdLocal())
+        feeder.cmd_BUFFER_AUTO_ON(FakeGCmd())
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +206,7 @@ def test_post_load_grace_clears_on_auto_off(feeder):
     feeder._state = buffer_feeder.STATE_AUTO
     feeder._post_load_overflow_grace = True
 
-    feeder.cmd_BUFFER_AUTO_OFF(FakeGCmdLocal())
+    feeder.cmd_BUFFER_AUTO_OFF(FakeGCmd())
 
     assert feeder._post_load_overflow_grace is False
 
@@ -234,7 +222,7 @@ def test_auto_off_can_skip_workflow_abort_for_benchmark_tail(feeder):
     feeder._state = buffer_feeder.STATE_AUTO
     feeder._halt_requested = False
 
-    feeder.cmd_BUFFER_AUTO_OFF(FakeGCmdLocal({"ABORT_WORKFLOW": 0}))
+    feeder.cmd_BUFFER_AUTO_OFF(FakeGCmd({"ABORT_WORKFLOW": 0}))
 
     assert feeder._state == buffer_feeder.STATE_IDLE
     assert feeder._halt_requested is False
@@ -245,7 +233,7 @@ def test_post_load_grace_clears_on_stop_buffer_fill(feeder):
     feeder._state = buffer_feeder.STATE_AUTO
     feeder._post_load_overflow_grace = True
 
-    feeder.cmd_STOP_BUFFER_FILL(FakeGCmdLocal())
+    feeder.cmd_STOP_BUFFER_FILL(FakeGCmd())
 
     assert feeder._post_load_overflow_grace is False
 

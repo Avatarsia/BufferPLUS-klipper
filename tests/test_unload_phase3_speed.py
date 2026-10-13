@@ -23,33 +23,27 @@ Typische Einstellung nach dem Fix:
   unload_phase3_speed: 50  # mm/s — schnell fuer Phase 3 (Buffer allein)
 """
 
-from fakes_klipper import FakeConfig, FakePrinter
+
+from helpers import FakeGCmd as CanonicalFakeGCmd
+from helpers import build_feeder
 from klipper_extras import buffer_feeder
 
 
-class FakeGCmd:
-    """Minimales GCmd-Fake: kein Wert gesetzt → Default wird durchgereicht."""
+class FakeGCmd(CanonicalFakeGCmd):
+    """Record SPEED defaults while retaining canonical parsing and bounds."""
+
     def __init__(self, values=None):
-        self.values = {k.upper(): v for k, v in (values or {}).items()}
-        self.float_calls = {}   # Protokolliert: key → (default, returned)
-
-    def get(self, key, default=None):
-        return self.values.get(key.upper(), default)
-
-    def get_int(self, key, default=None, **kwargs):
-        return int(self.values.get(key.upper(), default))
+        super().__init__(values)
+        self.float_calls = {}
 
     def get_float(self, key, default=None, **kwargs):
-        result = float(self.values.get(key.upper(), default))
+        result = super().get_float(key, default, **kwargs)
         self.float_calls[key.upper()] = (default, result)
         return result
 
 
 def make_feeder(values=None):
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values or {})
-    feeder = buffer_feeder.BufferFeeder(config)
-    feeder._startup_grace_done = True
+    printer, feeder = build_feeder(values or {})
     return printer, feeder
 
 

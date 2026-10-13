@@ -949,6 +949,7 @@ def _capture_trapezoids(feeder, monkeypatch):
 
     def fake_trap(distance, speed, **kwargs):
         trapezoids.append({'distance': distance, 'speed': speed, **kwargs})
+        return buffer_feeder.SubmitResult.QUEUED
 
     monkeypatch.setattr(feeder, '_submit_single_trapezoid', fake_trap)
     return trapezoids

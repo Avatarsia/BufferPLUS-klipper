@@ -3,16 +3,17 @@
 Migrated from test_sync_coordinator.py, test_unsync.py, test_halt_order.py (2026-05-12).
 """
 
+
 import pytest
 
-from fakes_klipper import FakeConfig, FakePrinter
+from helpers import build_feeder
 from klipper_extras import buffer_feeder
 
 
 def make_feeder(values=None):
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
+    printer, feeder = build_feeder(
+        values,
+        grace_done=False)
     return printer, feeder
 
 

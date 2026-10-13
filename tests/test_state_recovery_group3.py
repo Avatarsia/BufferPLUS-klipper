@@ -20,8 +20,9 @@
 - Modulator-HALL3-Floor war der einzige Pfad ohne feed_speed-Clamp.
 """
 
+
 import pytest
-from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
+from helpers import build_feeder
 from helpers import FakeGCmd
 from klipper_extras import buffer_feeder
 
@@ -34,14 +35,11 @@ def set_sensor_active(feeder, sensor_name, active):
 
 
 def make_feeder(values=None, state=None, ps_state="standby"):
-    printer = FakePrinter()
-    printer.objects["print_stats"] = FakePrintStats(state=ps_state)
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
-    printer.fire_event('klippy:connect')
-    feeder._startup_grace_done = True
-    if state is not None:
-        feeder._state = state
+    printer, feeder = build_feeder(
+        values,
+        state=state,
+        fire_connect=True,
+        print_state=ps_state)
     set_sensor_active(feeder, 'hall_overflow', False)
     set_sensor_active(feeder, 'hall_full', False)
     set_sensor_active(feeder, 'hall_empty', False)

@@ -18,7 +18,8 @@ from .buffer_types import Hall1Context
 class LoadEndstopMonitor:
     """Track executed nominal distance, excluding queued lookahead moves."""
 
-    def __init__(self, owner, sensor, distance, minimum_ratio=0.9):
+    def __init__(self, owner, sensor, distance, minimum_ratio=0.9,
+                 overflow_timeout=0.):
         self.owner = owner
         self.sensor = sensor
         self.minimum = distance * minimum_ratio
@@ -28,6 +29,26 @@ class LoadEndstopMonitor:
         self.completed = 0.0
         self.detected_distance = None
         self.error = None
+        self.overflow_timeout = overflow_timeout
+        self.overflow_since = None
+        self.resume_needed = False
+
+    def pause_overflow(self, eventtime):
+        if self.overflow_since is None:
+            self.overflow_since = eventtime
+        self.resume_needed = True
+
+    def end_overflow(self, eventtime):
+        if self.overflow_since is not None:
+            elapsed = eventtime - self.overflow_since
+            if elapsed > self.overflow_timeout:
+                self.error = 'HALL1 laenger als 30 Sekunden aktiv; Filamentweg/PTFE pruefen'
+            self.deadline += elapsed
+            self.overflow_since = None
+
+    def remaining_distance(self):
+        return max(0., self.maximum - self.completed
+                   - sum(move[1] for move in self.moves))
 
     def record(self, t0, distance, speed, accel_time, cruise_time, accel):
         self.moves.append((t0, distance, speed, accel_time, cruise_time, accel))
@@ -52,6 +73,9 @@ class LoadEndstopMonitor:
         return distance
 
     def poll(self, eventtime):
+        if (self.overflow_since is not None
+                and eventtime - self.overflow_since > self.overflow_timeout):
+            self.error = 'HALL1 laenger als 30 Sekunden aktiv; Filamentweg/PTFE pruefen'
         if self.error is None and self.detected_distance is None:
             try:
                 status = self.sensor.get_status(eventtime)
@@ -66,15 +90,14 @@ class LoadEndstopMonitor:
                                       '(expected %.2f..%.2f mm)' % (
                                           self.detected_distance,
                                           self.minimum, self.maximum))
-                elif eventtime >= self.deadline:
+                elif self.overflow_since is None and eventtime >= self.deadline:
                     self.error = 'load endstop timeout (max_feed_time)'
             except Exception as exc:
                 self.error = 'load endstop sensor read failed: %s' % exc
         stopped = self.error is not None or self.detected_distance is not None
         if stopped:
             # Preserve the queued motion cursor: already queued steps drain.
-            self.owner._pending_remaining_mm = 0.0
-            self.owner._pending_submit_chunk_cap = None
+            self.owner.pending_stream.finish()
         return stopped
 
 

@@ -13,16 +13,15 @@ the buffer in its prior state so the next entrance-insert grips
 normally.
 """
 
+
 import pytest
-from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
+from helpers import build_feeder
+from fakes_klipper import FakePrintStats
 from klipper_extras import buffer_feeder
 
 
 def make_feeder(values=None):
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
-    feeder._startup_grace_done = True
+    printer, feeder = build_feeder(values)
     feeder._print_running = True  # we test the printing→ready transition
     return printer, feeder
 

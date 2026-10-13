@@ -275,8 +275,15 @@ Bei `LOAD_FILAMENT` beendet auch eine fruehere Erkennung das Schnellladen
 spaetestens bei 110% von `load_fast_distance` mit Fehler.
 Der direkte Low-Level-Befehl `BUFFER_LOAD_PHASE1` behaelt sein bisheriges
 90..110%-Prueffenster; dessen `DISTANCE` ersetzt die Sollstrecke.
-`max_feed_time` begrenzt zusaetzlich die Suchdauer. HALL-/JAM-/HALT-Abbrueche
-beenden den Sensor-Ladeablauf; es gibt kein automatisches Wiederanfahren.
+Beim Schnellladen bis zum Druckkopfsensor pausiert HALL1 die Foerderung.
+Nach Freigabe wird die verbleibende Strecke automatisch weitergeladen.
+Erst wenn HALL1 durchgehend laenger als **30 Sekunden** aktiv bleibt,
+bricht der Ablauf ab. Jede Freigabe setzt diese Wartezeit zurueck.
+`max_feed_time` begrenzt die Suchdauer ohne diese HALL1-Pausen; die
+110%-Distanzgrenze bleibt ueber alle Fortsetzungen erhalten.
+JAM, HALT und Sensorfehler brechen weiterhin sofort ab, ohne Wiederanfahren.
+Nach Sensor-Ankunft (10-mm-Nachlauf und SYNC) sowie beim direkten
+`BUFFER_LOAD_PHASE1` bleiben die bisherigen HALL1-Abbrueche unveraendert.
 
 Die Strecke wird aus den zeitlich abgefahrenen Sollbewegungen berechnet
 (keine Messung von Filamentschlupf), zum Zeitpunkt der Sensorerkennung.
@@ -443,9 +450,17 @@ Diese Befehle sind eher fuer Debug oder eigene Makros gedacht:
 |---|---|
 | `BUFFER_LOAD_PHASE1 BUFFER=mellow` | schneller Vorlauf bis kurz vor den Toolhead |
 | `BUFFER_LOAD_PHASE3 BUFFER=mellow` | Buffer-Sensorphase beim Laden |
+| `BUFFER_LOAD_SYNCED BUFFER=mellow EXTRUDER=extruder DISTANCE=<mm> SPEED=<mm/s>` | finaler synchroner Extruder-Push mit garantiertem UNSYNC/RESTORE |
 | `BUFFER_UNLOAD_PHASE3 BUFFER=mellow` | rueckwaerts foerdern bis Eingang frei |
 | `BUFFER_SYNC_TO_EXTRUDER BUFFER=mellow EXTRUDER=extruder` | Buffer an Extruder koppeln |
 | `BUFFER_UNSYNC BUFFER=mellow` | Buffer wieder entkoppeln |
+
+`BUFFER_LOAD_SYNCED` verwendet ohne DISTANCE/SPEED die konfigurierten
+`load_slow_distance`/`load_slow_speed`. Er uebernimmt einen vorhandenen
+Macro-Save-Slot und restauriert den urspruenglichen E-Mode auch bei Abbruch;
+ohne Slot sichert er den Zustand selbst. EXTRUDER muss der aktive Extruder sein.
+Ein fehlgeschlagenes SAVE bricht vor M83 ab; fehlgeschlagenes RESTORE behaelt
+den Slot fuer `BUFFER_RESTORE_STATE`.
 
 ### Laufzeit-Tuning
 

@@ -55,3 +55,42 @@ python tools/verify_global_disable_stepgen.py --klipper-path /path/to/klipper
 Die drei neuen C-Faelle zeigen mit dem Fix nur Enable und Disable, kein
 veraltetes Re-Enable. Bereits abgeschlossene lokale Moves benoetigen
 keinen zusaetzlichen Flush.
+
+## Gemeinsamer Check nach der Timing-/Motor-Extraktion
+
+Der Runner startet die komplette Pytest-Suite und beide vorhandenen
+C-Harnesses jeweils in einem eigenen Prozess (180 s Timeout pro Prozess).
+Er benoetigt Linux bzw. WSL mit Linux-Python, `pytest`, `cffi`, `gcc`, `git`
+und einen vorhandenen Klipper-Checkout; er installiert nichts automatisch.
+
+```sh
+python tools/run_timing_regressions.py \
+  --klipper-path "/path with spaces/to/klipper" \
+  --check-unguarded
+```
+
+Standard-Pin ist `ce7002bedf37e938bb483572949f3703ac6476cb`. HEAD wird
+protokolliert und gegen den Pin geprueft; staged oder unstaged Aenderungen
+an tracked Klipper-Dateien brechen vor den Tests ab. Untracked Build-Artefakte
+zaehlen nicht als Source-Aenderung. Fuer einen bewusst anderen Referenzstand
+kann `--expected-klipper-commit <vollstaendiger SHA>` angegeben werden.
+
+`--check-unguarded` startet Direct, Global und Multi jeweils separat mit
+dem vorhandenen `--unguarded`-Schalter. Nur Exit 1 zusammen mit
+`AssertionError: Stale auto-enable fired` gilt als erwartetes RED. Fehlende
+Dependencies, andere Assertions und native Crashes gelten als Fehler.
+Ein erfolgreicher kompletter Lauf meldet die Pytest-Zaehler, fuenf positive
+C-Faelle und drei erwartete RED-Kontrollen.
+
+Die Harnesses verwenden weiterhin Klippers echte C-trapq/itersolve/
+steppersync und `EnableTracking`. Auch der lokale Harness importiert jetzt
+die Produktionsmethoden samt `MotorLifecycle`, statt alte Feeder-Methoden
+per AST zu kopieren. Jede Buffer-Instanz hat ihren eigenen Lifecycle;
+der printerweite `DisableCoordinator` koordiniert nur selektierte Owner.
+Der Anchor-Planner ist rein: Klipper-Lookup, Logging und Plan-Anwendung
+bleiben am Feeder. Vor dem moeglicherweise reentranten Toolhead-Lookup
+erfasste Enable-/Move-Floors bleiben erhalten; Live-lme und Live-Tuning
+werden danach wie bisher gelesen. Dies aendert keine Timing-Policy.
+
+Diese Checks pruefen Komponenten und Callbacks, nicht physische Mechanik,
+TMC/UART oder reales Host-/MCU-Transport-Timing.

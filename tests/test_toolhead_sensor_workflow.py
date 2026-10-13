@@ -4,6 +4,8 @@ import pytest
 
 from helpers import FakeGCmd
 from klipper_extras.buffer_toolhead import ToolheadSensorWorkflow
+from klipper_extras.buffer_cleanup import CleanupCoordinator
+from klipper_extras.buffer_pending import PendingStreamLifecycle
 
 
 def setup_workflow(present=False, clear_after=2):
@@ -37,6 +39,7 @@ def setup_workflow(present=False, clear_after=2):
         _check_phase_entry=lambda *args: None,
         _raise_if_locked_out=lambda *args, **kwargs: None,
         _move_in_flight=lambda: False, _enable_stepper=lambda: None)
+    owner.pending_stream = PendingStreamLifecycle(owner)
     owner._set_state = lambda value: setattr(owner, '_state', value)
     owner._halt_motion = lambda: calls.append('halt')
     def fast(*args, **kwargs):
@@ -57,6 +60,7 @@ def setup_workflow(present=False, clear_after=2):
                 sensor.present = False
     script.retracted = 0.
     owner._gcode_run_script_checked = script
+    owner.cleanup = CleanupCoordinator(owner)
     return ToolheadSensorWorkflow(owner), owner, sensor, calls
 
 

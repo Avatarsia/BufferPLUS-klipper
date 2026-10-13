@@ -1,21 +1,8 @@
 import pytest
 
+from helpers import FakeGCmd
 from fakes_klipper import FakeConfig, FakePrinter
 from klipper_extras import buffer_feeder
-
-
-class FakeGCmd:
-    def __init__(self, values=None):
-        self.values = {key.upper(): value for key, value in (values or {}).items()}
-
-    def get(self, key, default=None):
-        return self.values.get(key.upper(), default)
-
-    def get_int(self, key, default=None, **kwargs):
-        return int(self.values.get(key.upper(), default))
-
-    def get_float(self, key, default=None, **kwargs):
-        return float(self.values.get(key.upper(), default))
 
 
 def test_buffer_unload_filament_smoke():

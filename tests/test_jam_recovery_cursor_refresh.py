@@ -1,16 +1,6 @@
+from helpers import FakeGCmd
 from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
 from klipper_extras import buffer_feeder
-
-
-class FakeGCmd:
-    def get(self, key, default=None):
-        return default
-
-    def get_int(self, key, default=None, **kwargs):
-        return default
-
-    def get_float(self, key, default=None, **kwargs):
-        return default
 
 
 def set_sensor_active(feeder, sensor_name, active):

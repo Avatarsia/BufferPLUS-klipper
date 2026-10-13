@@ -15,8 +15,10 @@ re-armiert — NICHT im nicht-paused :ready-Zweig, denn diese Kante
 feuert zwischen RESUME und dem naechsten Druckende nie.
 """
 
-from fakes_klipper import FakeConfig, FakePrinter, FakePrintStats
+
+from helpers import build_feeder
 from helpers import set_sensor_active
+from fakes_klipper import FakePrintStats
 from klipper_extras import buffer_feeder
 
 
@@ -27,12 +29,10 @@ def make_feeder(values=None, state=None):
     """Lokaler Helper im Repo-Muster; fire_event NACH Instanziierung,
     weil der Park-Pfad _enable_stepper exercisen kann (NOT-TO-DO
     2026-05-12: FakePrinter ruft connect-Handler nie selbst auf)."""
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
-    printer.fire_event('klippy:connect')
-    feeder._startup_grace_done = True
-    feeder._state = state if state is not None else buffer_feeder.STATE_AUTO
+    printer, feeder = build_feeder(
+        values,
+        state=state if state is not None else buffer_feeder.STATE_AUTO,
+        fire_connect=True)
     # Park-faehige Sensorlage: Filament am Eingang, Zwischenzone.
     set_sensor_active(feeder, 'entrance', True)
     set_sensor_active(feeder, 'hall_empty', False)

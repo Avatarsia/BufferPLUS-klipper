@@ -27,37 +27,16 @@ BUFFER= selector is mandatory; the default-mux fallback re-registers each
 command with mux_value=None when only one instance exists).
 """
 
+
+from helpers import FakeGCmd, build_feeder
 from fakes_klipper import FakeConfig, FakePrinter
 from klipper_extras import buffer_feeder
 
 
-# ---------------------------------------------------------------------------
-# Local FakeGCmd: returns the default UNCHANGED when key is absent (the
-# conftest copy unconditionally float(default) and would crash on None).
-# ---------------------------------------------------------------------------
-
-class FakeGCmd:
-    def __init__(self, values=None):
-        self.values = {key.upper(): value for key, value in (values or {}).items()}
-
-    def get(self, key, default=None):
-        return self.values.get(key.upper(), default)
-
-    def get_int(self, key, default=None, **kwargs):
-        v = self.values.get(key.upper(), default)
-        return None if v is None else int(v)
-
-    def get_float(self, key, default=None, **kwargs):
-        v = self.values.get(key.upper(), default)
-        return None if v is None else float(v)
-
-
 def make_feeder(values=None):
-    printer = FakePrinter()
-    config = FakeConfig(printer=printer, values=values)
-    feeder = buffer_feeder.BufferFeeder(config)
-    feeder._startup_grace_done = True
-    feeder._state = buffer_feeder.STATE_IDLE
+    printer, feeder = build_feeder(
+        values,
+        state=buffer_feeder.STATE_IDLE)
     return printer, feeder
 
 

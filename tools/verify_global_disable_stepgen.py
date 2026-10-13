@@ -116,6 +116,15 @@ def run_case(klipper_path, feeder_module, case, unguarded=False):
             set_digital=lambda t, v: toggles.append((round(t, 9), v)))
         enable = EnableTracking(stepper, StepperEnablePin(pin, 0))
         feeder = feeder_module.BufferFeeder.__new__(feeder_module.BufferFeeder)
+        feeder.feed_controller = feeder_module.FeedSpeedController(
+            lambda *args, **kwargs: feeder._debug_event(*args, **kwargs))
+        feeder.pending_stream = feeder_module.PendingStreamLifecycle(feeder)
+        feeder.motor = feeder_module.MotorLifecycle(feeder)
+        feeder.diagnostics = feeder_module.BufferDiagnostics(feeder)
+        feeder.print_session = feeder_module.PrintSessionCoordinator(feeder)
+        feeder.legacy_workflow = feeder_module.LegacyFilamentWorkflow(feeder)
+        feeder.idle_watchdog = feeder_module.IdleWatchdogCoordinator(feeder)
+        feeder.streaming = feeder_module.StreamingCoordinator(feeder)
         feeder.printer, feeder.reactor = printer, reactor
         feeder.stepper, feeder.motion_queuing = stepper, mq
         feeder.trapq, feeder.trapq_append = tq, lib.trapq_append
@@ -196,6 +205,15 @@ def run_case(klipper_path, feeder_module, case, unguarded=False):
                 other_stepper, StepperEnablePin(other_pin, 0))
             other = feeder_module.BufferFeeder.__new__(feeder_module.BufferFeeder)
             other.__dict__.update(feeder.__dict__)
+            other.feed_controller = feeder_module.FeedSpeedController(
+                lambda *args, **kwargs: other._debug_event(*args, **kwargs))
+            other.pending_stream = feeder_module.PendingStreamLifecycle(other)
+            other.motor = feeder_module.MotorLifecycle(other)
+            other.diagnostics = feeder_module.BufferDiagnostics(other)
+            other.print_session = feeder_module.PrintSessionCoordinator(other)
+            other.legacy_workflow = feeder_module.LegacyFilamentWorkflow(other)
+            other.idle_watchdog = feeder_module.IdleWatchdogCoordinator(other)
+            other.streaming = feeder_module.StreamingCoordinator(other)
             other.stepper, other.trapq = other_stepper, other_tq
             other._stepper_enable = other_enable
             feeders.append(other)
@@ -269,7 +287,7 @@ def main():
     parser.add_argument("--case", choices=("direct", "global", "multi", "all"),
                         default="all")
     args = parser.parse_args()
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = args.feeder_path.resolve().parents[1]
     sys.path.insert(0, str(repo_root))
     sys.path.insert(0, str(args.klipper_path.resolve() / "klippy"))
     module = load_feeder(args.feeder_path)
