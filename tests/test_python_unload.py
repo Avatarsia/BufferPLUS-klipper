@@ -24,7 +24,7 @@ def test_buffer_unload_filament_smoke():
     # post-cool moves sind jetzt drei separate run_script_from_command
     # Aufrufe.
     assert [mode for mode, _ in scripts] == ["run_script_from_command"] * 8
-    assert scripts[0][1] == "SAVE_GCODE_STATE NAME=buffer_feeder_op"
+    assert scripts[0][1] == "SAVE_GCODE_STATE NAME=buffer_feeder_op_mellow"
     assert scripts[1][1] == "M83"
     assert scripts[2][1] == "BUFFER_SYNC_TO_EXTRUDER BUFFER=mellow EXTRUDER=extruder"
     # Pre-cool: 6 cycles (P7-64 default tip_cycles=6) à 2 G1 = 12 lines.
@@ -46,7 +46,7 @@ def test_buffer_unload_filament_smoke():
     # Cooling-Move: M118 + M104 + TEMPERATURE_WAIT.
     assert scripts[4][1] == "\n".join([
         "M118 UNLOAD Cooling-Move: heize runter auf 170 C",
-        "M104 S170",
+        "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=170",
         "TEMPERATURE_WAIT SENSOR=extruder MAXIMUM=180",
     ])
     # Post-cool: tip_final_retract default = 50 (P7-64), sync_dist=250
@@ -60,7 +60,7 @@ def test_buffer_unload_filament_smoke():
     # ueberschreibt nur unload_sync_distance, also kommt der neue
     # 5000-default zum Tragen.
     assert scripts[6][1] == "BUFFER_UNLOAD_PHASE3 BUFFER=mellow MAX_DISTANCE=5000 SPEED=50"
-    assert scripts[7][1] == "RESTORE_GCODE_STATE NAME=buffer_feeder_op MOVE=0"
+    assert scripts[7][1] == "RESTORE_GCODE_STATE NAME=buffer_feeder_op_mellow MOVE=0"
     assert gcode.info_messages[-1] == "BufferFeeder: UNLOAD abgeschlossen (Python workflow)"
     assert feeder._macro_state_saved is False
 
@@ -95,7 +95,7 @@ def test_buffer_unload_filament_unsyncs_on_error(monkeypatch):
         feeder.cmd_BUFFER_UNLOAD_FILAMENT(FakeGCmd())
 
     assert events == [
-        ("script", "SAVE_GCODE_STATE NAME=buffer_feeder_op"),
+        ("script", "SAVE_GCODE_STATE NAME=buffer_feeder_op_mellow"),
         ("script", "M83"),
         ("script", "BUFFER_SYNC_TO_EXTRUDER BUFFER=mellow EXTRUDER=extruder"),
         ("script", "\n".join([
@@ -113,7 +113,7 @@ def test_buffer_unload_filament_unsyncs_on_error(monkeypatch):
             "G1 E-14 F1200",
         ])),
         ("unsync", None),
-        ("script", "RESTORE_GCODE_STATE NAME=buffer_feeder_op MOVE=0"),
+        ("script", "RESTORE_GCODE_STATE NAME=buffer_feeder_op_mellow MOVE=0"),
     ]
     assert feeder._macro_state_saved is False
 
@@ -137,7 +137,7 @@ def test_buffer_unload_filament_skips_cooling_when_disabled():
     scripts = gcode.scripts
     # 7 statt 8 scripts (Cooling-Move-Block fehlt).
     assert [mode for mode, _ in scripts] == ["run_script_from_command"] * 7
-    assert scripts[0][1] == "SAVE_GCODE_STATE NAME=buffer_feeder_op"
+    assert scripts[0][1] == "SAVE_GCODE_STATE NAME=buffer_feeder_op_mellow"
     assert scripts[1][1] == "M83"
     assert scripts[2][1] == "BUFFER_SYNC_TO_EXTRUDER BUFFER=mellow EXTRUDER=extruder"
     # Pre-cool moves direkt gefolgt von post-cool moves, kein Cooling.
@@ -154,7 +154,7 @@ def test_buffer_unload_filament_skips_cooling_when_disabled():
         assert "M104" not in script
         assert "TEMPERATURE_WAIT" not in script
     assert scripts[5][1] == "BUFFER_UNLOAD_PHASE3 BUFFER=mellow MAX_DISTANCE=5000 SPEED=50"
-    assert scripts[6][1] == "RESTORE_GCODE_STATE NAME=buffer_feeder_op MOVE=0"
+    assert scripts[6][1] == "RESTORE_GCODE_STATE NAME=buffer_feeder_op_mellow MOVE=0"
 
 
 def test_buffer_unload_filament_uses_custom_cool_temp():
@@ -177,7 +177,7 @@ def test_buffer_unload_filament_uses_custom_cool_temp():
 
     scripts = gcode.scripts
     cooling_script = scripts[4][1]
-    assert "M104 S120" in cooling_script
+    assert "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=120" in cooling_script
     assert "MAXIMUM=130" in cooling_script
     assert "heize runter auf 120 C" in cooling_script
 
@@ -195,6 +195,12 @@ def test_buffer_unload_filament_uses_custom_extruder_name():
     feeder._startup_grace_done = True  # UNLOAD-Grace-Guard (Codex-Review 2026-07-13)
     gcode = fake_printer.lookup_object("gcode")
     fake_printer.lookup_object("extruder").heater.temperature = 220.0
+
+    other = type(fake_printer.lookup_object("extruder"))()
+    other.get_name = lambda: "extruder1"
+    other.heater.temperature = 220.0
+    fake_printer.objects["extruder1"] = other
+    fake_printer.lookup_object("toolhead").extruder = other
 
     feeder.cmd_BUFFER_UNLOAD_FILAMENT(FakeGCmd({"EXTRUDER": "extruder1"}))
 
@@ -228,13 +234,13 @@ def test_buffer_unload_filament_skips_pre_cool_when_tip_cycles_zero():
     # 7 statt 8 scripts (pre_cool entfaellt). Cooling-Move-Default=1
     # bleibt aktiv, post-cool laeuft.
     assert [mode for mode, _ in scripts] == ["run_script_from_command"] * 7
-    assert scripts[0][1] == "SAVE_GCODE_STATE NAME=buffer_feeder_op"
+    assert scripts[0][1] == "SAVE_GCODE_STATE NAME=buffer_feeder_op_mellow"
     assert scripts[1][1] == "M83"
     assert scripts[2][1] == "BUFFER_SYNC_TO_EXTRUDER BUFFER=mellow EXTRUDER=extruder"
     # Direkt nach Sync kommt der Cooling-Move (kein leerer pre_cool).
     assert scripts[3][1] == "\n".join([
         "M118 UNLOAD Cooling-Move: heize runter auf 170 C",
-        "M104 S170",
+        "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=170",
         "TEMPERATURE_WAIT SENSOR=extruder MAXIMUM=180",
     ])
     # Post-cool unveraendert.
@@ -244,7 +250,7 @@ def test_buffer_unload_filament_skips_pre_cool_when_tip_cycles_zero():
         "M400",
     ])
     assert scripts[5][1] == "BUFFER_UNLOAD_PHASE3 BUFFER=mellow MAX_DISTANCE=5000 SPEED=50"
-    assert scripts[6][1] == "RESTORE_GCODE_STATE NAME=buffer_feeder_op MOVE=0"
+    assert scripts[6][1] == "RESTORE_GCODE_STATE NAME=buffer_feeder_op_mellow MOVE=0"
     # Sicherheit: kein G1-Push-Script (waere pre_cool gewesen).
     for _, script in scripts:
         assert "G1 E8 F1200" not in script

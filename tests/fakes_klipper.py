@@ -193,6 +193,9 @@ class FakeExtruder:
     def get_trapq(self):
         return self.trapq
 
+    def get_name(self):
+        return 'extruder'
+
     def get_heater(self):
         return self.heater
 
@@ -217,6 +220,10 @@ class FakeToolhead:
         self.last_move_time = 0.0
         self.flush_calls = 0
         self.get_last_move_time_calls = 0
+        self.extruder = None
+
+    def get_extruder(self):
+        return self.extruder
 
     def get_last_move_time(self):
         # Real Klipper toolhead.get_last_move_time() always flushes
@@ -324,6 +331,7 @@ class FakePrinter:
             "stepper_enable": FakeStepperEnable(),
         }
         self.event_handlers = {}
+        self.objects['toolhead'].extruder = self.objects['extruder']
 
     def get_reactor(self):
         return self.reactor

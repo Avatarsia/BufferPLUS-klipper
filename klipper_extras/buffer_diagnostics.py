@@ -90,7 +90,7 @@ class BufferDiagnostics:
             "runout_follow      = %s ref=%s" % (owner._runout_follow_active,
                                                 owner._runout_filament_ref),
             "runout_recov_pending= %s (RESUME will grip+fill if armed)" % owner._runout_recovery_pending,
-            "macro_state_saved  = %s (buffer_feeder_op slot consumable)" % owner._macro_state_saved,
+            "macro_state_saved  = %s (buffer_feeder_op_%s slot consumable)" % (owner._macro_state_saved, owner.name),
             "synced_to_extruder = %s" % owner._stepper_synced_to,
             "debug_flags        = events=%s metrics=%s" % (
                 owner.buffer_debug_events, owner.buffer_debug_metrics),

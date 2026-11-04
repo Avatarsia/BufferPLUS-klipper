@@ -165,6 +165,65 @@ Wenn du nur eine einzige Buffer-Instanz hast, funktionieren viele
 Commands oft auch ohne `BUFFER=mellow`. In dieser README nutze ich den
 Parameter trotzdem immer explizit, damit die Beispiele eindeutig bleiben.
 
+### Mehrere Buffer: je ein Buffer pro Extruder
+
+Jede `[buffer_feeder NAME]`-Instanz kann mit `extruder:` einem eigenen
+Klipper-Extruder zugeordnet werden. Ohne diese Option bleibt der Default
+`extruder` erhalten. Die folgenden Ausschnitte ergaenzen die jeweiligen
+vollstaendigen Hardware-Sections:
+
+```ini
+[buffer_feeder mellow]
+extruder: extruder
+# Stepper-, Sensor-Pins und weitere Optionen fuer den ersten Buffer
+
+[buffer_feeder mellow2]
+extruder: extruder1
+# Eigene Stepper-, Sensor-Pins und weitere Optionen fuer den zweiten Buffer
+```
+
+- Beide Extruder muessen in Klipper konfiguriert sein. Unbekannte oder
+  ungeeignete Extruder-Objekte werden beim Connect abgelehnt.
+- Jeder Buffer braucht eigene Pins und eine passende Treiber-Section,
+  z.B. `[tmc2208 buffer_feeder mellow2]`. Separate Boards erhalten eigene
+  MCU-Namen und Serial-Adressen; die Pin-Praefixe entsprechend anpassen.
+- Nur die Hardware-Sections vervielfachen, nicht die komplette `lll.cfg`:
+  die gemeinsamen Macros werden einmal definiert.
+- AUTO-Demand, Temperaturpruefung, CLOG-Erkennung und Runout-Nachlauf
+  verwenden den jeweils zugeordneten Extruder. Druckstatus, Print-Ende
+  und `PAUSE` gelten weiterhin fuer den gesamten Drucker.
+
+```gcode
+BUFFER_AUTO_ON BUFFER=mellow
+BUFFER_AUTO_ON BUFFER=mellow2
+BUFFER_STATE_DUMP BUFFER=mellow2
+
+# Vor LOAD/UNLOAD den passenden Extruder aktivieren:
+ACTIVATE_EXTRUDER EXTRUDER=extruder1
+LOAD_FILAMENT BUFFER=mellow2
+UNLOAD_FILAMENT BUFFER=mellow2
+```
+
+Die mitgelieferten LOAD-/UNLOAD-/CLEAR_JAM-Macros akzeptieren `BUFFER=`;
+ohne Auswahl bleibt `mellow` der Macro-Default. Bei mehreren Instanzen
+brauchen direkte Plugin-Commands immer `BUFFER=NAME`.
+`BUFFER_SYNC_TO_EXTRUDER`, `BUFFER_LOAD_SYNCED` und LOAD-/UNLOAD-Workflows
+verwenden standardmaessig den konfigurierten Extruder. Ein explizites
+`EXTRUDER=` gilt nur fuer diesen Befehl und aendert die AUTO-Zuordnung
+nicht. Workflows mit `G1 E` lehnen einen abweichenden aktiven Extruder
+vor dem Heizen und Foerdern ab. Es erfolgt keine automatische Tool-Auswahl.
+
+Die Diagnose-Macros `BUFFER_BASELINE_RUN` und die Boot-Statusmeldung in
+der Beispielconfig beziehen sich weiterhin auf `mellow`.
+
+Migrationshinweis fuer eigene Macros: Der interne GCode-State-Slot heisst
+jetzt `buffer_feeder_op_<Buffername>` statt `buffer_feeder_op`, z.B.
+`buffer_feeder_op_mellow2`. Eigene direkte `SAVE_GCODE_STATE`-/
+`RESTORE_GCODE_STATE`-Aufrufe entsprechend anpassen. Bevorzugt die
+Plugin-Commands `BUFFER_SAVE_MACRO_STATE`, `BUFFER_RESTORE_MACRO_STATE`
+und `BUFFER_RESTORE_STATE` mit `BUFFER=NAME` verwenden; diese verwalten
+auch den zugehoerigen Recovery-Status.
+
 ### Update-Hinweis
 
 Es gibt zwei Wege:

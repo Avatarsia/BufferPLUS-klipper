@@ -22,11 +22,13 @@ class ExtruderVelocityTracker:
     """
 
     def __init__(self, owner, printer, *,
+                 extruder_name='extruder',
                  sample_interval=0.025,
                  window_size=0.3,
                  filament_diameter=1.75):
         self.owner = owner
         self.printer = printer
+        self.extruder_name = extruder_name
         self.sample_interval = sample_interval
         self.window_size = window_size
         self._cross_section = math.pi * (filament_diameter / 2.0) ** 2
@@ -37,11 +39,13 @@ class ExtruderVelocityTracker:
         self._extruder = None
         self._mcu = None
         self._last_sample_time = None
+        self._forward_position = None
+        self._extruded_distance = 0.0
 
     def _get_extruder(self):
         if self._extruder is not None:
             return self._extruder
-        self._extruder = self.printer.lookup_object('extruder', None)
+        self._extruder = self.printer.lookup_object(self.extruder_name, None)
         return self._extruder
 
     def _get_mcu(self):
@@ -94,7 +98,16 @@ class ExtruderVelocityTracker:
         except (AttributeError, TypeError):
             return
         self._samples.append((eventtime, position))
+        if self._forward_position is None:
+            self._forward_position = position
+        elif position > self._forward_position:
+            self._extruded_distance += position - self._forward_position
+            self._forward_position = position
         self._last_sample_time = eventtime
+
+    def get_extruded_distance(self):
+        """Per-extruder forward consumption, excluding retract recovery."""
+        return self._extruded_distance
 
     def get_velocity(self):
         """Returns linear filament velocity (mm/s, non-negative).
@@ -124,6 +137,8 @@ class ExtruderVelocityTracker:
         """Clear all samples. Call on klippy:disconnect / BUFFER_RESET."""
         self._samples.clear()
         self._last_sample_time = None
+        self._forward_position = None
+        self._extruded_distance = 0.0
 
 
 @dataclass(frozen=True)

@@ -107,7 +107,7 @@ class ToolheadSensorWorkflow:
 
     def _heat(self, gcmd):
         o = self.owner
-        name = gcmd.get('EXTRUDER', 'extruder')
+        name = gcmd.get('EXTRUDER', o.extruder_name)
         active = o.printer.lookup_object('toolhead').get_extruder().get_name()
         if name != active:
             raise self._error('EXTRUDER=%s stimmt nicht mit dem aktiven Extruder '

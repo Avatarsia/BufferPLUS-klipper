@@ -41,7 +41,7 @@ class CleanupCoordinator:
 
     def save_gcode_state(self, from_command=False):
         self.owner._gcode_run_script_checked(
-            "SAVE_GCODE_STATE NAME=buffer_feeder_op",
+            "SAVE_GCODE_STATE NAME=buffer_feeder_op_%s" % self.owner.name,
             from_command=from_command)
         self.owner._macro_state_saved = True
 
@@ -50,7 +50,7 @@ class CleanupCoordinator:
         if not owner._macro_state_saved:
             return False
         owner._gcode_run_script_checked(
-            "RESTORE_GCODE_STATE NAME=buffer_feeder_op MOVE=0",
+            "RESTORE_GCODE_STATE NAME=buffer_feeder_op_%s MOVE=0" % owner.name,
             from_command=from_command)
         owner._macro_state_saved = False
         return True

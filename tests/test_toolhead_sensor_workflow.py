@@ -34,7 +34,7 @@ def setup_workflow(present=False, clear_after=2):
         unload_sync_distance=20., unload_fast_speed=50.,
         unload_fast_max=1000., unload_phase3_speed=50., min_temp=180.,
         interrupt_chunk_mm=3., max_move_chunk_mm=50., max_feed_time=60.,
-        _stepper_synced_to=None, name='mellow', hall_full=False,
+        _stepper_synced_to=None, name='mellow', extruder_name='extruder', hall_full=False,
         _cmd_error=RuntimeError, _respond=lambda message: calls.append(message),
         _check_phase_entry=lambda *args: None,
         _raise_if_locked_out=lambda *args, **kwargs: None,

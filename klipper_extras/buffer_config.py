@@ -27,6 +27,7 @@ class BufferConfigValues:
     Applying this snapshot does not synchronize later owner mutations back.
     """
 
+    extruder_name: str
     feed_speed: float
     manual_speed: float
     burst_speed: float
@@ -108,6 +109,7 @@ class BufferConfigValues:
                 "max_feed_speed (%.1f) must be >= feed_speed (%.1f)"
                 % (max_feed_speed, feed_speed))
         return cls(
+            extruder_name=config.get('extruder', 'extruder'),
             feed_speed=feed_speed,
             manual_speed=config.getfloat('manual_speed', 15., above=0.),
             burst_speed=config.getfloat('burst_speed', 50., above=0.),

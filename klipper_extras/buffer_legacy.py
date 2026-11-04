@@ -100,7 +100,7 @@ def _parse_legacy_unload_options(owner, gcmd):
     max_distance = gcmd.get_float('MAX_DISTANCE', owner.unload_fast_max, above=0.)
     heat_to = gcmd.get_float('AUTO_HEAT_TARGET', 250.0, above=0.)
     temp_window = gcmd.get_float('TEMP_WINDOW', 5.0, minval=0.)
-    extruder_name = gcmd.get('EXTRUDER', 'extruder')
+    extruder_name = gcmd.get('EXTRUDER', owner.extruder_name)
     return LegacyUnloadOptions(
         tip_cycles=tip_cycles,
         tip_push=tip_push,
@@ -521,7 +521,12 @@ class LegacyFilamentWorkflow:
         temp_window = options.temp_window
         extruder_name = options.extruder_name
 
-        temp = owner._hotend_temp()
+        active = owner.printer.lookup_object('toolhead').get_extruder().get_name()
+        if extruder_name != active:
+            raise owner._cmd_error(
+                "EXTRUDER=%s differs from active extruder %s"
+                % (extruder_name, active))
+        temp = owner._hotend_temp(extruder_name)
         if temp < owner.min_temp:
             # M104 + TEMPERATURE_WAIT MINIMUM statt M109 (User-Request
             # 2026-07-13): M109 wartet bis exakt eingeregelt (inkl.
@@ -534,10 +539,10 @@ class LegacyFilamentWorkflow:
             owner._gcode_run_script_checked(
                 "M118 Hotend zu kalt (%d/%d C) - heize automatisch auf %d C "
                 "(weiter ab %d C)\n"
-                "M104 S%d\n"
+                "SET_HEATER_TEMPERATURE HEATER=%s TARGET=%d\n"
                 "TEMPERATURE_WAIT SENSOR=%s MINIMUM=%d"
                 % (int(temp), int(owner.min_temp), int(heat_to),
-                   int(wait_min), int(heat_to), extruder_name,
+                   int(wait_min), extruder_name, int(heat_to), extruder_name,
                    int(wait_min)),
                 from_command=True)
 
@@ -566,9 +571,9 @@ class LegacyFilamentWorkflow:
                 if use_cooling_move:
                     owner._gcode_run_script_checked(
                         "M118 UNLOAD Cooling-Move: heize runter auf %d C\n"
-                        "M104 S%d\n"
+                        "SET_HEATER_TEMPERATURE HEATER=%s TARGET=%d\n"
                         "TEMPERATURE_WAIT SENSOR=%s MAXIMUM=%d"
-                        % (int(cool_temp), int(cool_temp), extruder_name, int(cool_temp_max)),
+                        % (int(cool_temp), extruder_name, int(cool_temp), extruder_name, int(cool_temp_max)),
                         from_command=True)
 
                 post_cool_moves = []

@@ -383,11 +383,8 @@ class HallSensorMonitor:
         else:
             owner._respond("Runout — external sensor mode, %dmm follow"
                            % int(owner.runout_follow_mm))
-            try:
-                ps = owner.printer.lookup_object('print_stats')
-                owner._runout_filament_ref = ps.get_status(eventtime).get('filament_used', 0.0)
-            except Exception:
-                owner._runout_filament_ref = 0.0
+            owner.velocity_tracker.tick(eventtime)
+            owner._runout_filament_ref = owner.velocity_tracker.get_extruded_distance()
             owner._runout_follow_active = True
 
     def on_button_change(self, button_name, pressed, eventtime):

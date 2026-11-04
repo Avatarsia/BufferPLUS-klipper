@@ -36,7 +36,7 @@ def test_unload_heat_uses_temperature_wait_window():
     assert "M109" not in script, (
         "M109 waits for the exact target (both directions) — use "
         "M104 + TEMPERATURE_WAIT MINIMUM with a window instead")
-    assert "M104 S250" in script
+    assert "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=250" in script
     assert "TEMPERATURE_WAIT SENSOR=extruder MINIMUM=245" in script, (
         "default window is 5C below AUTO_HEAT_TARGET=250")
 
@@ -60,5 +60,5 @@ def test_unload_no_heat_when_warm_enough():
 
     assert "TEMPERATURE_WAIT" not in heat_script(printer).split("\n")[0] \
         or "MINIMUM" not in heat_script(printer)
-    assert "M104 S250" not in heat_script(printer), (
+    assert "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=250" not in heat_script(printer), (
         "temp >= min_temp: no auto-heat at all (existing behavior)")

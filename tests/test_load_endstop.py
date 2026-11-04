@@ -301,9 +301,10 @@ def load_macro_commands(feeder):
                              undefined=jinja2.StrictUndefined)
     printer = {'buffer_feeder mellow': feeder.get_status(feeder.reactor.now),
                'extruder': {'temperature': 250.},
+               'toolhead': {'extruder': 'extruder'},
                'gcode_macro LOAD_FILAMENT': {'auto_heat_target': 250., 'temp_window': 5.},
                'configfile': {'settings': {'extruder': {'min_extrude_temp': 170.}}}}
-    return [line.strip() for line in env.from_string(source).render(printer=printer).splitlines()
+    return [line.strip() for line in env.from_string(source).render(printer=printer, params={}).splitlines()
             if line.strip() and not line.strip().startswith('#')]
 
 

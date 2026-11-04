@@ -59,6 +59,9 @@ def test_best_effort_restore_failure_retains_retry_latch(monkeypatch):
 class MacroRunner:
     """Small external GCode model: real plugin mux dispatch plus E-mode slots."""
     def __init__(self, printer):
+        jinja2 = pytest.importorskip('jinja2')
+        self.env = jinja2.Environment(variable_start_string='{', variable_end_string='}',
+                                     undefined=jinja2.StrictUndefined)
         self.gcode = printer.lookup_object('gcode')
         self.relative = False
         self.slots = {}
@@ -81,7 +84,7 @@ class MacroRunner:
             name, *words = line.split()
             params = dict(word.split('=', 1) for word in words if '=' in word)
             if name in self.macros:
-                self.run(self.macros[name])
+                self.run(self.env.from_string(self.macros[name]).render(params=params))
             elif name in self.gcode.mux_commands:
                 matches = [entry for entry in self.gcode.mux_commands[name]
                            if entry['mux_value'] == params.get(entry['mux_key'])]

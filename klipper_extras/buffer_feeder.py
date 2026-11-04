@@ -86,6 +86,7 @@ class BufferFeeder:
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         self.name = config.get_name().split()[1]   # "mellow"
+        self._config_error = config.error
         self.initial_settings = BufferConfigValues.from_config(config)
         self.settings = self.initial_settings  # Legacy startup snapshot alias.
         self.initial_settings.apply(self)
@@ -151,6 +152,7 @@ class BufferFeeder:
         self.cleanup = CleanupCoordinator(self)
         self.velocity_tracker = ExtruderVelocityTracker(
             owner=self, printer=self.printer,
+            extruder_name=self.extruder_name,
             sample_interval=0.025,
             window_size=0.3,
             filament_diameter=self.filament_diameter)
@@ -508,6 +510,16 @@ class BufferFeeder:
     # -----------------------------------------------------------------------
 
     def _handle_connect(self):
+        try:
+            extruder = self.printer.lookup_object(self.extruder_name)
+            if not (callable(getattr(extruder, 'get_heater', None))
+                    and callable(getattr(extruder, 'get_trapq', None))):
+                raise ValueError('not an extruder')
+        except Exception as exc:
+            raise self._config_error(
+                "buffer_feeder %s: invalid extruder '%s': %s"
+                % (self.name, self.extruder_name, exc))
+
         # Resolve stepper enable once all MCUs are connected.
         try:
             se = self.printer.lookup_object('stepper_enable')
@@ -1313,8 +1325,7 @@ class BufferFeeder:
                 and self._runout_filament_ref is not None):
             return
         try:
-            ps = self.printer.lookup_object('print_stats')
-            cur = ps.get_status(eventtime).get('filament_used', 0.0)
+            cur = self.velocity_tracker.get_extruded_distance()
             if cur - self._runout_filament_ref >= self.runout_follow_mm:
                 self._respond("Runout-follow %dmm reached — stepper off"
                               % int(self.runout_follow_mm))
@@ -1670,7 +1681,7 @@ class BufferFeeder:
 
     def _read_extruder_position(self):
         try:
-            ex = self.printer.lookup_object('extruder')
+            ex = self.printer.lookup_object(self.extruder_name)
             return ex.last_position
         except Exception:
             return 0.0
@@ -2107,9 +2118,9 @@ class BufferFeeder:
         # Klippers ganze gcode pipeline deadlocken.
         return self.diagnostics._respond(message)
 
-    def _hotend_temp(self):
+    def _hotend_temp(self, extruder_name=None):
         try:
-            ex = self.printer.lookup_object('extruder')
+            ex = self.printer.lookup_object(extruder_name or self.extruder_name)
             return ex.get_heater().get_temp(self.reactor.monotonic())[0]
         except Exception:
             return 0.0
@@ -2125,7 +2136,7 @@ class BufferFeeder:
         if not self.auto_load_after_follow:
             return
         if self._hotend_warm():
-            self._schedule_gcode_script("LOAD_FILAMENT")
+            self._schedule_gcode_script("LOAD_FILAMENT BUFFER=%s" % self.name)
         else:
             self._respond(
                 "Auto-Load übersprungen: Hotend zu kalt"
@@ -2589,7 +2600,7 @@ class BufferFeeder:
             raise self._cmd_error("BufferFeeder: HALT requested")
         if self._stepper_synced_to is not None:
             raise self._cmd_error("Buffer already synced; call BUFFER_UNSYNC first")
-        extruder = gcmd.get('EXTRUDER', 'extruder')
+        extruder = gcmd.get('EXTRUDER', self.extruder_name)
         active = self.printer.lookup_object('toolhead').get_extruder().get_name()
         if extruder != active:
             raise self._cmd_error(
@@ -2626,7 +2637,7 @@ class BufferFeeder:
 
     cmd_BUFFER_SYNC_TO_EXTRUDER_help = ("Sync buffer-feeder stepper to the named "
                                          "extruder's trapq for parallel motion. "
-                                         "Optional: EXTRUDER=<name> (default: extruder)")
+                                         "Optional: EXTRUDER=<name> (default: configured extruder)")
     def cmd_BUFFER_SYNC_TO_EXTRUDER(self, gcmd):
         # bindet den Buffer-Feeder-Stepper an den Trapq eines
         # anderen Extruder-Steppers, sodass jeder G1 E Move den Buffer-
@@ -2640,7 +2651,7 @@ class BufferFeeder:
         # Stau (HALL2/HALL1) oder Leerlauf (HALL3). Auch loest die
         # Stepcompress-Cursor-Etablierung: solange der gemeinsame Trapq
         # aktiv ist, ist der Buffer-Stepper-last_step_clock immer frisch.
-        extruder_name = gcmd.get('EXTRUDER', 'extruder')
+        extruder_name = gcmd.get('EXTRUDER', self.extruder_name)
         self._sync_to_extruder(extruder_name)
 
     def _unsync_if_synced(self):
@@ -2827,9 +2838,9 @@ class BufferFeeder:
 
     def cmd_BUFFER_RESTORE_STATE(self, gcmd):
         if self._try_restore_gcode_state(from_command=True):
-            self._respond("Restored gcode-state from 'buffer_feeder_op'")
+            self._respond("Restored gcode-state from 'buffer_feeder_op_%s'" % self.name)
         else:
-            self._respond("No 'buffer_feeder_op' gcode-state to restore")
+            self._respond("No 'buffer_feeder_op_%s' gcode-state to restore" % self.name)
 
     def cmd_BUFFER_SAVE_MACRO_STATE(self, gcmd):
         """Invoked by the _SAVE_E_MODE macro. Saves gcode state AND
@@ -2925,6 +2936,7 @@ class BufferFeeder:
             'measure_load_active':      self._measure_load_active,
             'measure_load_distance_mm': self._measure_load_distance,
             'macro_state_saved':        self._macro_state_saved,
+            'extruder':                 self.extruder_name,
             'synced_to_extruder':       self._stepper_synced_to,
             'print_phase':              print_phase,
             'print_extrusion_seen':     self._print_extrusion_seen,
