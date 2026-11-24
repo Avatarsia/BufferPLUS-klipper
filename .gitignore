@@ -1,0 +1,17 @@
+# User-Download-Artefakt (pre-python-ansatz-Snapshot)
+LLL (1).cfg
+Nicht bestätigt*.crdownload
+
+# Referenz-Downloads (Klipper-Source, PDFs) — nicht committen
+vergleich/
+__pycache__/
+
+# Codex/Tools-Artefakte
+.tmp_pytest_shim/
+.claude/
+.pytest_cache/
+venv-test/
+
+# Logs (per-tool, nicht committen)
+klippy.log
+klippy.log.*
