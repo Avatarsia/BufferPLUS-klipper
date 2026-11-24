@@ -408,6 +408,78 @@ def test_flush_submit_uses_small_chunk_while_post_full_clamp_active(monkeypatch)
     assert submits[0]['submit_chunk_cap'] == pytest.approx(3.0, abs=0.001)
 
 
+@pytest.mark.parametrize('after_hall2, velocity, speed_cap, expected_rate', [
+    (True, 12.7, 32.0, 12.7),
+    (False, 12.7, 32.0, 13.97),
+    (False, 12.7, 14.0, 13.14142678598),
+    (False, 29.1, 32.0, 23.85685884692),
+    (False, 29.1, 70.0, 26.69549249820),
+    (False, 40.0, 70.0, 27.38612787526),
+])
+def test_flush_neutral_chunk_delivers_target_average(
+        monkeypatch, after_hall2, velocity, speed_cap, expected_rate):
+    _, feeder = make_c_cont_feeder(monkeypatch, cfg_overrides={
+        'feed_speed': speed_cap,
+        'feed_speed_gain': 1.10,
+        'min_feed_floor': 10.0,
+        'interrupt_chunk_mm': 3.0,
+        'accel': 1000.0,
+    })
+    feeder.reactor.now = 10.0
+    _stub_tracker(monkeypatch, feeder, velocity=velocity, flow=velocity * 2.405)
+    queue = feeder.motion_queuing
+    if after_hall2:
+        set_sensor_active(feeder, 'hall_full', True)
+        queue.trigger_flush(flush_time=10.0, step_gen_time=10.0)
+        assert not queue.append_calls
+        set_sensor_active(feeder, 'hall_full', False)
+    feeder.reactor.now = 10.1
+    queue.trigger_flush(flush_time=10.1, step_gen_time=10.1)
+
+    (move,) = queue.append_calls
+    assert feeder._commanded_pos == pytest.approx(3.0)
+    assert move[12] <= speed_cap
+    assert 3.0 / sum(move[2:5]) == pytest.approx(expected_rate)
+
+
+@pytest.mark.parametrize('velocity, chunk, after_hall2', [
+    (12.7, 3.0, True),
+    (29.1, 3.6, False),
+    (40.0, 9.0, False),
+])
+def test_hall3_transition_keeps_flush_chunk_rate(
+        monkeypatch, velocity, chunk, after_hall2):
+    _, feeder = make_c_cont_feeder(monkeypatch, cfg_overrides={
+        'feed_speed': 32.0 if after_hall2 else 70.0,
+        'feed_speed_gain': 1.10,
+        'hall3_demand_gain': 1.5,
+        'min_feed_floor': 10.0,
+        'interrupt_chunk_mm': chunk,
+        'accel': 1000.0,
+    })
+    _stub_tracker(monkeypatch, feeder, velocity=velocity, flow=velocity * 2.405)
+    queue = feeder.motion_queuing
+    if after_hall2:
+        feeder.reactor.now = 10.0
+        set_sensor_active(feeder, 'hall_full', True)
+        queue.trigger_flush(10.0, 10.0)
+        set_sensor_active(feeder, 'hall_full', False)
+    feeder.reactor.now = 10.1
+    queue.trigger_flush(10.1, 10.1)
+    set_sensor_active(feeder, 'hall_empty', True)
+    feeder.reactor.now = 10.6
+    queue.trigger_flush(10.6, 10.6)
+
+    neutral, hall3 = queue.append_calls
+    neutral_rate = chunk / sum(neutral[2:5])
+    hall3_rate = chunk / sum(hall3[2:5])
+    assert hall3_rate + 1e-9 >= neutral_rate
+    if after_hall2:
+        assert hall3_rate == pytest.approx(12.7)
+    else:
+        assert hall3[12] == pytest.approx(velocity * 1.5)
+
+
 def test_flush_submit_uses_small_chunk_during_post_full_recovery(monkeypatch):
     """The first boosted chunk after H2 also stays short."""
     printer, feeder = make_c_cont_feeder(
@@ -1109,14 +1181,14 @@ def test_c_cont_continuous_feed_persists_through_hall_state_change(monkeypatch):
     moduliert, kein Stream-Reset).
 
     Soft-Throttle: HALL3 startet mit min(vel*1.5, feed_speed),
-    Zwischenzone mit min(vel*1.10, feed_speed).
+    Zwischenzone mit trapezkorrigiertem Durchschnitt vel*1.10.
     """
     printer, feeder = make_c_cont_feeder(
         monkeypatch, cfg_overrides={'feed_speed': 70.0})
     feeder._state = buffer_feeder.STATE_AUTO
-    _populate_tracker_to_ready(feeder, velocity=40.0)
+    _populate_tracker_to_ready(feeder, velocity=30.0)
     submits = _capture_submits(feeder, monkeypatch)
-    # HALL3 -> min(40*1.5, 70)=60, erster Submit setzt _continuous_feed=True
+    # HALL3 -> min(30*1.5, 70)=45, erster Submit setzt _continuous_feed=True
     set_sensor_active(feeder, 'hall_empty', True)
     feeder._last_move_end_time = 0.0
     feeder._pending_remaining_mm = 0.0
@@ -1131,11 +1203,9 @@ def test_c_cont_continuous_feed_persists_through_hall_state_change(monkeypatch):
     feeder._on_mcu_flush(flush_time=10.5, step_gen_time=10.5)
     # _continuous_feed bleibt strukturell True:
     assert feeder._continuous_feed is True
-    # Speed wurde moduliert (Zwischenzone Hotfix3 = max(15, 1.10*40)=44):
+    # Die Zwischenzone kompensiert die Beschleunigung und bleibt unter HALL3.
     assert len(submits) == 2
-    assert submits[1]['speed'] == pytest.approx(44.0, abs=1.0)
-    # Speed-Aenderung gegenueber erstem Submit ist erfolgt (Modulation):
-    assert submits[1]['speed'] != first_submit_speed
+    assert 33.0 < submits[1]['speed'] < first_submit_speed
 
 
 # ===========================================================================

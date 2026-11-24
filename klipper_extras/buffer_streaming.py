@@ -3,6 +3,7 @@ import logging
 import math
 
 from ._buffer_common import STATE_AUTO, STATE_MANUAL_RETRACT
+from .buffer_modulator import hall3_refill_speed
 from .buffer_pending import SubmitResult
 from .buffer_types import Hall1Context
 
@@ -224,17 +225,38 @@ class StreamingCoordinator:
         else:
             anchor = step_gen_time + owner.lead_time
 
+        submit_speed = target_speed
+        if not owner.hall_empty or owner._post_full_bias_clamp:
+            # The neutral zone and the HALL3 dwell track average delivery.
+            # For distance d the trapezoid takes d/v + v/a. Use the lower
+            # root, or the triangular peak if the average is unreachable.
+            triangular_peak = math.sqrt(owner.accel * submit_chunk_mm)
+            ratio = 2.0 * target_speed / triangular_peak
+            if ratio < 1.0:
+                submit_speed = 2.0 * target_speed / (
+                    1.0 + math.sqrt(1.0 - ratio * ratio))
+            else:
+                submit_speed = triangular_peak
+            _, velocity = owner._get_tracker_velocity()
+            refill_speed = hall3_refill_speed(
+                velocity, owner.min_feed_floor, owner.hall3_demand_gain,
+                owner.feed_speed)
+            # Compensation must not introduce a speed drop at HALL3.
+            # Keep the uncorrected target if custom gains already invert it.
+            submit_speed = min(submit_speed, max(target_speed, refill_speed),
+                               owner.feed_speed)
+
         if not owner._continuous_feed:
             # Real inactive -> active transition: reset safety counters.
             owner._feed_distance_accumulator = 0.0
             owner._feed_deadline_time = None
             owner._continuous_feed = True
             owner._continuous_feed_direction = 1
-        owner._continuous_feed_speed = target_speed
+        owner._continuous_feed_speed = submit_speed
         owner._debug_event(
             'flush_submit',
             "submit speed=%.3f anchor=%.3f move_active=%s chunk=%.3f",
-            target_speed, anchor, move_active, submit_chunk_mm,
+            submit_speed, anchor, move_active, submit_chunk_mm,
             min_interval=1.0)
 
         # Pipeline-Cap: one sub-chunk in-flight at a time so a HALL1/
@@ -243,7 +265,7 @@ class StreamingCoordinator:
         # the buffer arm.
         owner._submit_move(
             submit_chunk_mm,
-            target_speed,
+            submit_speed,
             forced_t0=anchor,
             streaming=move_active,
             submit_chunk_cap=submit_chunk_mm)
