@@ -12,6 +12,14 @@ HIGH_FLOW_CARRY_GRACE_S = 0.75
 POST_FULL_H3_DWELL_S = 0.50
 POST_FULL_RECOVERY_S = 1.00
 POST_FULL_RECOVERY_CHUNK_MM = 3.0
+FEED_SPEED_EPSILON = 1e-6
+
+
+def hall3_refill_speed(velocity, floor, gain, speed_cap):
+    if velocity < floor - FEED_SPEED_EPSILON:
+        return min(floor, speed_cap)
+    return min(max(velocity * gain, floor), speed_cap)
+
 
 class ExtruderVelocityTracker:
     """Read-only passive tracker for extruder velocity.
@@ -326,7 +334,7 @@ class FeedSpeedController:
                                                    feed_speed)
         """
         floor = settings.min_feed_floor
-        floor_epsilon = 1e-6
+        floor_epsilon = FEED_SPEED_EPSILON
         stop_floor = floor * settings.feed_hysteresis_stop_factor
         eventtime = snapshot.eventtime
         if snapshot.hall_overflow:
@@ -368,17 +376,9 @@ class FeedSpeedController:
             self._clear_post_full_bias_clamp(
                 'hall3_demand', eventtime, recovery_time=recovery_time)
             self._arm_high_flow_carry(eventtime, 'hall3_demand')
-            if extruder_vel < floor - floor_epsilon:
-                self._modulator_feeding = True
-                # feed_speed-Clamp wie in allen Nachbar-Pfaden (Review
-                # 2026-07-09): min_feed_floor > feed_speed ist per
-                # Config moeglich (kein Cross-Check, BUFFER_SET
-                # ungeprueft) — der Floor darf den globalen Speed-Cap
-                # nicht ueberfahren.
-                return min(floor, settings.feed_speed)
             self._modulator_feeding = True
-            return min(max(extruder_vel * settings.hall3_demand_gain, floor),
-                       settings.feed_speed)
+            return hall3_refill_speed(
+                extruder_vel, floor, settings.hall3_demand_gain, settings.feed_speed)
         if not vel_ready or extruder_vel <= floor_epsilon:
             self._modulator_feeding = False
             return 0.0

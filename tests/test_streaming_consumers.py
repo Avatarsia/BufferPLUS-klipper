@@ -98,6 +98,7 @@ def test_flush_debug_callback_sees_armed_session_and_calls_live_owner_wrapper(
         monkeypatch):
     _, feeder = make_feeder()
     feeder._state = buffer_feeder.STATE_AUTO
+    set_sensor_active(feeder, 'hall_empty', True)
     trace = []
     monkeypatch.setattr(feeder, '_compute_target_feed_speed', lambda: 25.0)
     monkeypatch.setattr(feeder, '_auto_submit_permission', lambda now: (True, 'printing'))
