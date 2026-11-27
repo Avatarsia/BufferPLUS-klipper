@@ -148,7 +148,7 @@ def _populate_tracker_to_ready(feeder, *, velocity):
     velocity_tracker.is_ready() == True wird."""
     fake_ext = feeder.printer.objects['extruder']
     t = 0.0
-    for _ in range(12):
+    for _ in range(13):
         fake_ext.last_position = t * velocity
         feeder.velocity_tracker.tick(t)
         t += 0.025
@@ -585,7 +585,7 @@ def test_c_cont_modulator_extruder_vel_zero_fallback(monkeypatch):
     # Tracker ready aber alle Positions gleich -> vel=0
     fake_ext = feeder.printer.objects['extruder']
     t = 0.0
-    for _ in range(12):
+    for _ in range(13):
         fake_ext.last_position = 100.0  # konstant
         feeder.velocity_tracker.tick(t)
         t += 0.025
@@ -611,7 +611,7 @@ def test_c_cont_hotfix4_stalled_toolhead_no_submit_in_full_buffer(monkeypatch):
     # Tracker ready aber konstante Position (Toolhead stalled)
     fake_ext = feeder.printer.objects['extruder']
     t = 0.0
-    for _ in range(12):
+    for _ in range(13):
         fake_ext.last_position = 100.0  # konstant
         feeder.velocity_tracker.tick(t)
         t += 0.025
@@ -630,7 +630,7 @@ def test_c_cont_hotfix4_stalled_but_hall_empty_still_fills(monkeypatch):
     set_sensor_active(feeder, 'hall_overflow', False)
     fake_ext = feeder.printer.objects['extruder']
     t = 0.0
-    for _ in range(12):
+    for _ in range(13):
         fake_ext.last_position = 100.0
         feeder.velocity_tracker.tick(t)
         t += 0.025

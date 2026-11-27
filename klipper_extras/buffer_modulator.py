@@ -40,10 +40,7 @@ class ExtruderVelocityTracker:
         self.sample_interval = sample_interval
         self.window_size = window_size
         self._cross_section = math.pi * (filament_diameter / 2.0) ** 2
-        # round() avoids float-precision truncation (e.g. 0.3 / 0.025
-        # = 11.999... -> int() would yield 11 instead of expected 12).
-        self._max_samples = max(2, int(round(window_size / sample_interval)))
-        self._samples = collections.deque(maxlen=self._max_samples)
+        self._samples = collections.deque()
         self._extruder = None
         self._mcu = None
         self._last_sample_time = None
@@ -105,7 +102,14 @@ class ExtruderVelocityTracker:
             position = self._read_position(ext, eventtime)
         except (AttributeError, TypeError):
             return
+        if (self._last_sample_time is not None
+                and eventtime - self._last_sample_time > self.window_size):
+            self._samples.clear()
         self._samples.append((eventtime, position))
+        cutoff = eventtime - self.window_size
+        # Keep the last sample at or before the cutoff for interpolation.
+        while len(self._samples) > 1 and self._samples[1][0] <= cutoff:
+            self._samples.popleft()
         if self._forward_position is None:
             self._forward_position = position
         elif position > self._forward_position:
@@ -123,6 +127,13 @@ class ExtruderVelocityTracker:
         if len(self._samples) < 2:
             return 0.0
         (t0, p0), (t1, p1) = self._samples[0], self._samples[-1]
+        cutoff = t1 - self.window_size
+        if t0 < cutoff:
+            t_next, p_next = self._samples[1]
+            segment_dt = t_next - t0
+            if segment_dt >= 1e-6:
+                p0 += (p_next - p0) * (cutoff - t0) / segment_dt
+                t0 = cutoff
         dt = t1 - t0
         if dt < 1e-6:
             return 0.0
@@ -139,7 +150,9 @@ class ExtruderVelocityTracker:
     def is_ready(self):
         """True after sliding window has filled (window_size seconds
         of samples accumulated)."""
-        return len(self._samples) == self._max_samples
+        return (len(self._samples) >= 2
+                and self._samples[-1][0] - self._samples[0][0]
+                >= self.window_size - 1e-6)
 
     def reset(self):
         """Clear all samples. Call on klippy:disconnect / BUFFER_RESET."""

@@ -20,7 +20,7 @@ def make_feeder(values=None, state=None, print_state="printing"):
 
 def _prime_tracker(feeder, fake_ext, *, velocity):
     t = 0.0
-    for _ in range(12):
+    for _ in range(13):
         fake_ext.last_position = t * velocity
         feeder.velocity_tracker.tick(t)
         t += 0.025

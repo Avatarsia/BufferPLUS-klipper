@@ -101,6 +101,10 @@ class LoadEndstopMonitor:
         return stopped
 
 
+BUTTON_DEBOUNCE_S = 0.010
+BUTTON_HOLD_S = 0.350
+
+
 class HallSensorMonitor:
     def __init__(self, owner, config):
         self.owner = owner
@@ -189,11 +193,13 @@ class HallSensorMonitor:
         self._click_count = {BUTTON_FEED: 0, BUTTON_RETRACT: 0}
         self._last_click_time = {BUTTON_FEED: 0.0, BUTTON_RETRACT: 0.0}
         self._button_held = {BUTTON_FEED: False, BUTTON_RETRACT: False}
+        self._button_press_time = {BUTTON_FEED: None, BUTTON_RETRACT: None}
+        self._button_press_armed = {BUTTON_FEED: False, BUTTON_RETRACT: False}
+        self._button_hold_started = {BUTTON_FEED: False, BUTTON_RETRACT: False}
+        self._click_origin_state = {BUTTON_FEED: None, BUTTON_RETRACT: None}
         # Deferred click summary: ein einziger _respond pro Click-Window,
-        # statt einer Meldung pro Tastendruck. Aktionen feuern weiterhin
-        # sofort (responsives UX), aber die Summary kommt erst nach dem
-        # triple_click_window-Settling - so sieht der User bei einem
-        # Triple-Klick "Triple-Burst" statt "Dauerlauf / Puls / Burst".
+        # statt einer Meldung pro Tastendruck. Short-click actions settle
+        # after triple_click_window; a triple is final on its third release.
         self._pending_click_msg = {BUTTON_FEED: None, BUTTON_RETRACT: None}
         self._click_settle_timer = {BUTTON_FEED: None, BUTTON_RETRACT: None}
 
@@ -212,14 +218,17 @@ class HallSensorMonitor:
         self._pin_change_time[name] = eventtime
 
     def check_debounce(self, eventtime):
-        threshold = self.owner.hall_debounce_ms / 1000.0
         for name, raw in self._pin_raw_state.items():
+            threshold = (BUTTON_DEBOUNCE_S if name in
+                         ('feed_button', 'retract_button') else
+                         self.owner.hall_debounce_ms / 1000.0)
             stable = self._pin_stable_state[name]
             if stable == raw:
                 continue
             if (eventtime - self._pin_change_time[name]) >= threshold:
                 self._pin_stable_state[name] = raw
                 self.on_stable_sensor_change(eventtime, name, raw)
+        self.check_button_holds(eventtime)
 
     def semantic_state(self, name):
         raw = self._pin_stable_state[name]
@@ -397,6 +406,54 @@ class HallSensorMonitor:
             if was_held:
                 self.on_button_release(button_name, eventtime)
 
+    def cancel_gesture(self, button_name):
+        self._click_count[button_name] = 0
+        self._click_origin_state[button_name] = None
+        self._pending_click_msg[button_name] = None
+
+    def cancel_pending_gestures(self):
+        for button_name in (BUTTON_FEED, BUTTON_RETRACT):
+            self.cancel_gesture(button_name)
+            self._button_press_armed[button_name] = False
+            self._button_hold_started[button_name] = False
+
+    def gesture_allowed(self, button_name, origin_state=None):
+        owner = self.owner
+        retract_overflow_override = (
+            button_name == BUTTON_RETRACT
+            and (owner._state == STATE_OVERFLOW or owner.hall_overflow)
+            and owner._state != STATE_JAM)
+        blocked = (STATE_LOADING_PULL, STATE_LOADING_PUSH,
+                   STATE_UNLOADING, STATE_OVERFLOW, STATE_JAM,
+                   STATE_INITIAL_GRIP)
+        if owner._state in blocked and not retract_overflow_override:
+            return False
+        if owner.hall_overflow and not retract_overflow_override:
+            return False
+        if (owner._stepper_synced_to is not None or owner._halt_requested
+                or owner._measure_load_active):
+            return False
+        if origin_state is not None and owner._state != origin_state:
+            return False
+        return True
+
+    def check_button_holds(self, eventtime):
+        for button_name in (BUTTON_FEED, BUTTON_RETRACT):
+            press_time = self._button_press_time[button_name]
+            if (not self._button_held[button_name]
+                    or not self._button_press_armed[button_name]
+                    or self._button_hold_started[button_name]
+                    or press_time is None
+                    or eventtime - press_time < BUTTON_HOLD_S):
+                continue
+            if not self.gesture_allowed(button_name):
+                self.cancel_gesture(button_name)
+                self._button_press_armed[button_name] = False
+                continue
+            self.cancel_gesture(button_name)
+            self._button_hold_started[button_name] = True
+            self.owner._action_manual_start(button_name)
+
     def ensure_click_settle_timer(self, button_name):
         if self._click_settle_timer[button_name] is None:
             cb = lambda et, b=button_name: self.click_settle_fire(b, et)
@@ -409,7 +466,24 @@ class HallSensorMonitor:
         self.reactor.update_timer(self._click_settle_timer[button_name], fire_time)
 
     def click_settle_fire(self, button_name, eventtime):
-        del eventtime
+        if self._button_held[button_name]:
+            return eventtime + BUTTON_DEBOUNCE_S
+        count = self._click_count[button_name]
+        origin_state = self._click_origin_state[button_name]
+        self._click_count[button_name] = 0
+        self._click_origin_state[button_name] = None
+        if count:
+            self._pending_click_msg[button_name] = None
+            if self.gesture_allowed(button_name, origin_state):
+                if count == CLICK_DOUBLE:
+                    # The resolved gesture is local now, so cancelling all
+                    # pending button state cannot erase it. Stop any hold in
+                    # the opposite direction before queuing the pulse.
+                    self.owner._halt_motion()
+                    self.owner._action_manual_pulse(button_name)
+                elif count == CLICK_SINGLE:
+                    self._pending_click_msg[button_name] = (
+                        "%s: short click - no action" % button_name)
         msg = self._pending_click_msg[button_name]
         self._pending_click_msg[button_name] = None
         if msg is not None:
@@ -430,23 +504,25 @@ class HallSensorMonitor:
         if owner._state in block_states and not retract_overflow_override:
             hint = ""
             if owner._state == STATE_JAM:
-                hint = " — fix the cause, then BUFFER_CLEAR_JAM"
+                hint = " - fix the cause, then BUFFER_CLEAR_JAM"
             elif owner._state == STATE_OVERFLOW:
-                hint = " — clear HALL1 (lockout releases automatically); retract button is allowed"
+                hint = " - clear HALL1 (lockout releases automatically); retract button is allowed"
             elif owner._state in (STATE_LOADING_PULL,
                                   STATE_LOADING_PUSH, STATE_UNLOADING):
-                hint = " — wait for LOAD/UNLOAD to finish, or BUFFER_HALT"
+                hint = " - wait for LOAD/UNLOAD to finish, or BUFFER_HALT"
             elif owner._state == STATE_INITIAL_GRIP:
-                hint = " — wait for grip to finish, or STOP_BUFFER_FILL"
+                hint = " - wait for grip to finish, or STOP_BUFFER_FILL"
             self.set_pending_click_msg(
                 button_name,
-                "Button ignored — state=%s%s" % (owner._state, hint))
+                "Button ignored - state=%s%s" % (owner._state, hint))
+            self._button_press_armed[button_name] = False
             return
         if owner.hall_overflow and not retract_overflow_override:
             self.set_pending_click_msg(
                 button_name,
-                "Button ignored — HALL1 overflow physically active "
+                "Button ignored - HALL1 overflow physically active "
                 "(retract button still works to recover)")
+            self._button_press_armed[button_name] = False
             return
 
         if button_name == BUTTON_FEED and owner._measure_load_active:
@@ -462,36 +538,20 @@ class HallSensorMonitor:
                 owner._measure_load_distance = 0.0
                 owner._submit_move(owner.max_feed_distance, owner.manual_speed)
                 owner._set_state(STATE_MANUAL_FEED)
-                owner._respond("MEASURE_LOAD: feeder running — click again to stop")
+                owner._respond("MEASURE_LOAD: feeder running - click again to stop")
             return
-
-        now = eventtime
-        if (now - self._last_click_time[button_name]) > owner.triple_click_window:
-            self._click_count[button_name] = 1
-        else:
-            self._click_count[button_name] += 1
-        self._last_click_time[button_name] = now
-
-        cnt = self._click_count[button_name]
-        if cnt == CLICK_SINGLE:
-            owner._action_manual_start(button_name)
-        elif cnt == CLICK_DOUBLE:
-            owner._continuous_feed = False
-            owner._halt_motion()
-            owner._action_manual_pulse(button_name)
-        elif cnt >= CLICK_TRIPLE:
-            self._click_count[button_name] = 0
-            owner._continuous_feed = False
-            owner._halt_motion()
-            if button_name == BUTTON_FEED and not owner.feed_burst_enabled:
-                owner._action_manual_start(button_name)
-            else:
-                owner._action_burst(button_name)
+        self._button_press_time[button_name] = eventtime
+        self._button_press_armed[button_name] = True
+        self._button_hold_started[button_name] = False
 
     def on_button_release(self, button_name, eventtime):
-        del eventtime
         owner = self.owner
-        if owner._continuous_feed:
+        armed = self._button_press_armed[button_name]
+        held = self._button_hold_started[button_name]
+        self._button_press_armed[button_name] = False
+        self._button_hold_started[button_name] = False
+        self._button_press_time[button_name] = None
+        if held and owner._continuous_feed:
             desired_dir = +1 if button_name == BUTTON_FEED else -1
             if (owner._continuous_feed_direction == desired_dir
                     and not owner._measure_load_active):
@@ -499,3 +559,33 @@ class HallSensorMonitor:
                 owner._halt_motion()
                 if owner._state in (STATE_MANUAL_FEED, STATE_MANUAL_RETRACT):
                     owner._start_cooldown()
+            return
+        if not armed or held:
+            return
+        if (self._click_count[button_name] == 0
+                or eventtime - self._last_click_time[button_name]
+                > owner.triple_click_window):
+            self._click_count[button_name] = 1
+            self._click_origin_state[button_name] = owner._state
+        else:
+            self._click_count[button_name] += 1
+        self._last_click_time[button_name] = eventtime
+        count = self._click_count[button_name]
+        if count >= CLICK_TRIPLE:
+            origin_state = self._click_origin_state[button_name]
+            self.cancel_gesture(button_name)
+            if not self.gesture_allowed(button_name, origin_state):
+                return
+            if button_name == BUTTON_FEED and not owner.feed_burst_enabled:
+                self.set_pending_click_msg(
+                    button_name, "feed: Triple-Burst disabled - no action")
+            else:
+                # A triple may resolve while the other button is held.
+                # Clear that stream and its pending chunks before the burst.
+                owner._halt_motion()
+                owner._action_burst(button_name)
+            return
+        self.ensure_click_settle_timer(button_name)
+        self.reactor.update_timer(
+            self._click_settle_timer[button_name],
+            eventtime + owner.triple_click_window)

@@ -18,7 +18,7 @@ def test_runtime_tuning_reaches_status_and_flush_motion_without_rewriting_startu
     set_sensor_active(feeder, 'hall_empty', True)
     set_sensor_active(feeder, 'entrance', True)
     extruder = printer.lookup_object('extruder')
-    for index in range(12):
+    for index in range(13):
         eventtime = index * 0.025
         extruder.last_position = eventtime * 50.0
         feeder.velocity_tracker.tick(eventtime)

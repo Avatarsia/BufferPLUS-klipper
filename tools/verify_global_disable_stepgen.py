@@ -163,7 +163,8 @@ def run_case(klipper_path, feeder_module, case, unguarded=False):
         feeder._compute_target_feed_speed = lambda: 0.
         feeder.velocity_tracker = SimpleNamespace(is_ready=lambda: True)
         feeder.sensors = SimpleNamespace(
-            hall_overflow=False, hall_full=False, hall_empty=True)
+            hall_overflow=False, hall_full=False, hall_empty=True,
+            cancel_pending_gestures=lambda: None)
         toolhead = ToolHead.__new__(ToolHead)
         toolhead.printer, toolhead.reactor, toolhead.mcu = printer, reactor, mcu
         toolhead.motion_queuing = mq

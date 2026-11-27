@@ -153,7 +153,7 @@ class BufferFeeder:
         self.velocity_tracker = ExtruderVelocityTracker(
             owner=self, printer=self.printer,
             extruder_name=self.extruder_name,
-            sample_interval=0.025,
+            sample_interval=MAIN_TICK_INTERVAL,
             window_size=0.3,
             filament_diameter=self.filament_diameter)
 
@@ -444,6 +444,7 @@ class BufferFeeder:
             ('BUFFER_SET',                  self.cmd_BUFFER_SET,                  None),
             ('BUFFER_BENCHMARK_MARK',       self.cmd_BUFFER_BENCHMARK_MARK,       None),
             ('BUFFER_BENCH_MODE',           self.cmd_BUFFER_BENCH_MODE,           None),
+            ('BUFFER_RUN_BASELINE',         self.cmd_BUFFER_RUN_BASELINE,         None),
             ('BUFFER_PREP_BASELINE',        self.cmd_BUFFER_PREP_BASELINE,        None),
             ('CALIBRATE_FEEDER_SYNC',       self.cmd_CALIBRATE_FEEDER_SYNC,       None),
             ('MEASURE_LOAD_START',          self.cmd_MEASURE_LOAD_START,          None),
@@ -1036,7 +1037,7 @@ class BufferFeeder:
 
     def _tick_velocity_observation(self, eventtime):
         # C-cont T2: Velocity-Tracker tick (50Hz, intern throttled
-        # auf sample_interval=0.025s = 40Hz). Read-only passiver
+        # auf sample_interval). Read-only passiver
         # Observer ueber extruder.get_status — kein flush, kein
         # SYNC, kein Side-Effect auf den Druckkopf.
         self.velocity_tracker.tick(eventtime)
@@ -1949,6 +1950,7 @@ class BufferFeeder:
         armed for a since-finished continuous feed does not later
         trip SAFETY_TIMEOUT on a quiescent feeder.
         """
+        self.sensors.cancel_pending_gestures()
         if self._load_endstop_move is not None and not preserve_load:
             self._load_endstop_move.error = 'load endstop move interrupted'
         self._continuous_feed = False
@@ -2403,6 +2405,35 @@ class BufferFeeder:
         if self.hall_empty:
             return +1
         return 0
+
+    cmd_BUFFER_RUN_BASELINE_help = "Run the baseline macro with safety cleanup"
+
+    def cmd_BUFFER_RUN_BASELINE(self, gcmd):
+        rawparams = gcmd.get_raw_command_parameters()
+        if gcmd.get('BUFFER', None) is None:
+            rawparams = "BUFFER=%s %s" % (self.name, rawparams)
+        saved = (self.jam_action, self.hall3_demand_gain,
+                 self.buffer_debug_events, self.buffer_debug_metrics,
+                 self._print_running)
+        slot = "buffer_baseline_run_%s" % self.name
+
+        def restore_temporary_values():
+            (self.jam_action, self.hall3_demand_gain,
+             self.buffer_debug_events, self.buffer_debug_metrics,
+             self._print_running) = saved
+
+        self._gcode_run_script_checked(
+            "SAVE_GCODE_STATE NAME=%s" % slot, from_command=True)
+        with self.cleanup.on_exit([
+                restore_temporary_values,
+                lambda: self._set_benchmark_mode(
+                    enabled=False, reason="baseline_cleanup", notify=False),
+                lambda: self._gcode_run_script_checked(
+                    "RESTORE_GCODE_STATE NAME=%s MOVE=0" % slot,
+                    from_command=True),
+        ], policy=CleanupPolicy.STRICT):
+            self._gcode_run_script_checked(
+                "_BUFFER_BASELINE_RUN " + rawparams, from_command=True)
 
     cmd_BUFFER_PREP_BASELINE_help = (
         "Bring buffer into neutral sensor zone for bench tests. "

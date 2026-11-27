@@ -34,7 +34,7 @@ def make_feeder(values=None, print_state="printing"):
     return printer, feeder
 
 
-def populate_tracker(feeder, velocity, samples=12):
+def populate_tracker(feeder, velocity, samples=13):
     fake_ext = feeder.printer.objects['extruder']
     t = 0.0
     for _ in range(samples):

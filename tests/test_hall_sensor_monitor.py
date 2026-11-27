@@ -6,26 +6,22 @@ def set_sensor_active(feeder, sensor_name, active):
     feeder._pin_stable_state[sensor_name] = (not active) if polarity_flip else active
 
 
-def test_single_feed_click_starts_manual_feed_and_arms_click_settle_timer(fake_printer, feeder):
-    # Current code counts clicks on button-press and single FEED click
-    # enters the manual-start path, which also arms the settle timer.
+def test_single_feed_click_waits_without_starting_motion(fake_printer, feeder):
     printer = fake_printer
     feeder._state = buffer_feeder.STATE_IDLE
     set_sensor_active(feeder, "hall_overflow", False)
 
     feeder._on_button_change(buffer_feeder.BUTTON_FEED, True, 1.0)
+    feeder._on_button_change(buffer_feeder.BUTTON_FEED, False, 1.1)
 
     assert feeder._click_count[buffer_feeder.BUTTON_FEED] == 1
-    assert feeder._state == buffer_feeder.STATE_MANUAL_FEED
-    assert feeder._continuous_feed is True
-    assert feeder._continuous_feed_direction == 1
-    assert feeder._continuous_feed_speed == feeder.manual_speed
-    assert feeder._pending_click_msg[buffer_feeder.BUTTON_FEED] == "feed: Dauerlauf"
+    assert feeder._state == buffer_feeder.STATE_IDLE
+    assert feeder._continuous_feed is False
     assert feeder._click_settle_timer[buffer_feeder.BUTTON_FEED] in printer.reactor.timers
     assert printer.reactor.update_timer_calls == [
         (
             feeder._click_settle_timer[buffer_feeder.BUTTON_FEED],
-            feeder.triple_click_window,
+            1.1 + feeder.triple_click_window,
         )
     ]
 
@@ -42,9 +38,7 @@ def test_click_settle_fire_responds_with_pending_message_and_clears_it(fake_prin
     assert printer.lookup_object("gcode").info_messages[-1] == "BufferFeeder: feed summary"
 
 
-def test_double_feed_click_halts_then_triggers_manual_pulse(feeder, monkeypatch):
-    # The second FEED click within the window halts first, then dispatches
-    # to the manual-pulse branch.
+def test_double_feed_click_triggers_only_manual_pulse_after_settle(feeder, monkeypatch):
     feeder._state = buffer_feeder.STATE_IDLE
     set_sensor_active(feeder, "hall_overflow", False)
     events = []
@@ -66,19 +60,20 @@ def test_double_feed_click_halts_then_triggers_manual_pulse(feeder, monkeypatch)
     )
 
     feeder._on_button_change(buffer_feeder.BUTTON_FEED, True, 1.0)
-    feeder._on_button_change(buffer_feeder.BUTTON_FEED, True, 1.1)
+    feeder._on_button_change(buffer_feeder.BUTTON_FEED, False, 1.1)
+    feeder._on_button_change(buffer_feeder.BUTTON_FEED, True, 1.2)
+    feeder._on_button_change(buffer_feeder.BUTTON_FEED, False, 1.3)
+    assert events == []
+    feeder._click_settle_fire(buffer_feeder.BUTTON_FEED, 3.0)
 
     assert events == [
-        ("manual_start", buffer_feeder.BUTTON_FEED),
         "halt_motion",
         ("manual_pulse", buffer_feeder.BUTTON_FEED),
     ]
-    assert feeder._click_count[buffer_feeder.BUTTON_FEED] == 2
+    assert feeder._click_count[buffer_feeder.BUTTON_FEED] == 0
 
 
-def test_triple_feed_click_with_burst_disabled_halts_then_restarts_manual_start(feeder_factory, monkeypatch):
-    # With feed_burst_enabled=0, the third FEED click halts and falls back
-    # to manual-start instead of the burst branch.
+def test_triple_feed_click_with_burst_disabled_has_no_fallback_motion(feeder_factory, monkeypatch):
     _, feeder = feeder_factory(values={"feed_burst_enabled": False}, grace_done=False)
     feeder._state = buffer_feeder.STATE_IDLE
     set_sensor_active(feeder, "hall_overflow", False)
@@ -105,23 +100,15 @@ def test_triple_feed_click_with_burst_disabled_halts_then_restarts_manual_start(
         lambda button: events.append(("burst", button)),
     )
 
-    feeder._on_button_change(buffer_feeder.BUTTON_FEED, True, 1.0)
-    feeder._on_button_change(buffer_feeder.BUTTON_FEED, True, 1.1)
-    feeder._on_button_change(buffer_feeder.BUTTON_FEED, True, 1.2)
+    for start in (1.0, 1.2, 1.4):
+        feeder._on_button_change(buffer_feeder.BUTTON_FEED, True, start)
+        feeder._on_button_change(buffer_feeder.BUTTON_FEED, False, start + 0.1)
 
-    assert events == [
-        ("manual_start", buffer_feeder.BUTTON_FEED),
-        "halt_motion",
-        ("manual_pulse", buffer_feeder.BUTTON_FEED),
-        "halt_motion",
-        ("manual_start", buffer_feeder.BUTTON_FEED),
-    ]
+    assert events == []
     assert feeder._click_count[buffer_feeder.BUTTON_FEED] == 0
 
 
-def test_triple_feed_click_with_burst_enabled_halts_then_triggers_burst(feeder_factory, monkeypatch):
-    # With feed_burst_enabled=1, the third FEED click halts and takes the
-    # burst branch instead of restarting manual-start.
+def test_triple_feed_click_with_burst_enabled_triggers_only_burst(feeder_factory, monkeypatch):
     _, feeder = feeder_factory(values={"feed_burst_enabled": True}, grace_done=False)
     feeder._state = buffer_feeder.STATE_IDLE
     set_sensor_active(feeder, "hall_overflow", False)
@@ -148,14 +135,11 @@ def test_triple_feed_click_with_burst_enabled_halts_then_triggers_burst(feeder_f
         lambda button: events.append(("burst", button)),
     )
 
-    feeder._on_button_change(buffer_feeder.BUTTON_FEED, True, 1.0)
-    feeder._on_button_change(buffer_feeder.BUTTON_FEED, True, 1.1)
-    feeder._on_button_change(buffer_feeder.BUTTON_FEED, True, 1.2)
+    for start in (1.0, 1.2, 1.4):
+        feeder._on_button_change(buffer_feeder.BUTTON_FEED, True, start)
+        feeder._on_button_change(buffer_feeder.BUTTON_FEED, False, start + 0.1)
 
     assert events == [
-        ("manual_start", buffer_feeder.BUTTON_FEED),
-        "halt_motion",
-        ("manual_pulse", buffer_feeder.BUTTON_FEED),
         "halt_motion",
         ("burst", buffer_feeder.BUTTON_FEED),
     ]

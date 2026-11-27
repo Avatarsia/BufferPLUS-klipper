@@ -127,6 +127,10 @@ class LegacyFilamentWorkflow:
 
     def cmd_BUFFER_LOAD_PHASE1(self, gcmd):
         owner = self.owner
+        if owner._stepper_synced_to is not None:
+            raise owner._cmd_error(
+                "LOAD_PHASE1 rejected: buffer synced to '%s'; call BUFFER_UNSYNC first"
+                % owner._stepper_synced_to)
         owner._halt_requested = False    # ack any stale console HALT
         if (owner._load_endstop_sensor is not None
                 and owner._load_endstop_present()):
@@ -631,7 +635,9 @@ class LegacyFilamentWorkflow:
             # exit the loop. UNLOAD ist Retract → OVERFLOW/JAM erlaubt.
             owner._wait_for_move_done(gcmd, direction=-1)
         else:
-            overshoot = True
+            overshoot = owner.entrance_detected
+            if not overshoot:
+                owner._respond("UNLOAD Phase 3: entrance clear after %.0f mm" % retracted)
         owner._disable_stepper()
         if overshoot:
             # Explicit failure — do not let UNLOAD_FILAMENT print
